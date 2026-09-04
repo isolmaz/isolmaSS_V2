@@ -27,10 +27,6 @@ serde_json = "1.0"
 name = "isolmass"
 path = "src/main.rs"
 
-[[bin]]
-name = "isolmass-setup"
-path = "src/installer_bin.rs"
-
 [profile.release]
 opt-level = "z"
 lto = true

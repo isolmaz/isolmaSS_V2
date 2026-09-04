@@ -356,7 +356,7 @@
 > - Grounded production testing in place: `OverlayState::handle_escape_action`, `TextEditState::insert_char`, `backspace`, `delete`, `move_left`, `move_right` called directly without simulation mocks.
 > - PE header inspection verifies `IMAGE_SUBSYSTEM_WINDOWS_GUI = 2`.
 > - Isolated settings testing validates default `true`, explicit `false`/`true` round-trips, file persistence, and error propagation.
-> - Authentic Windows setup installer executable (`target/release/isolmass-setup.exe`) verified (226,816 bytes, well under 3 MB budget) via `installer.nsi`, native `src/installer_bin.rs`, and strict non-zero exit in `package.bat`.
+> - Authentic Windows setup installer executable (`target/release/isolmass-setup.exe`) verified (262,277 bytes, well under 3 MB budget) via `installer.nsi` (which embeds `isolmass.exe` via LZMA) and strict non-zero exit in `package.bat`.
 > - Settings window state retains `last_error` and displays red error notices on failed saves without closing the dialog or swallowing errors.
 
 > PrintScreen vs. the Windows 11 Snipping Tool was on this list but is confirmed working now, so

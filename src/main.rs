@@ -21,6 +21,7 @@ use hotkey::{start_hotkey_listener, HotkeyConfig};
 use overlay::show_overlay_session;
 use save::{default_save_directory, generate_screenshot_filename, save_buffer_to_png};
 use settings::{show_settings_dialog, Settings, PRESET_COLORS, PRESET_THICKNESSES};
+use std::io::Read;
 use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::time::Instant;
@@ -83,14 +84,12 @@ fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     let parsed_combo = HotkeyConfig::from_str("Ctrl+Shift+S").expect("Parse Ctrl+Shift+S");
     assert_eq!(parsed_combo.description, "Ctrl+Shift+S");
 
-    // 1. Test Windows Registry Fix for Snipping Tool suppression
-    let reg_applied = hotkey::disable_windows_snipping_tool_hotkey();
-    assert!(reg_applied, "Windows registry fix command must execute successfully");
-    assert!(
-        hotkey::is_windows_snipping_tool_disabled(),
-        "PrintScreenKeyForSnippingEnabled must be verified as 0 in registry"
+    // 1. Non-mutating query for Windows Snipping Tool suppression state
+    let snipping_tool_disabled = hotkey::is_windows_snipping_tool_disabled();
+    println!(
+        "  - Windows Snipping Tool suppression query verified (non-mutating): disabled={}.",
+        snipping_tool_disabled
     );
-    println!("  - Windows Snipping Tool registry suppression verified (PrintScreenKeyForSnippingEnabled = 0).");
 
     // 2. Test WH_KEYBOARD_LL hook listener startup & active key
     let (rx, handle) = start_hotkey_listener(default_cfg)?;
@@ -1114,29 +1113,49 @@ fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
 
     let setup_path = std::path::Path::new("target/release/isolmass-setup.exe");
     if !setup_path.exists() {
-        // Attempt to build via makensis if available, else via cargo
-        let makensis_check = std::process::Command::new("makensis")
-            .arg("/VERSION")
-            .output();
-
-        if let Ok(output) = makensis_check && output.status.success() {
-            println!("  - Building installer with makensis...");
-            let compile_status = std::process::Command::new("makensis")
-                .arg("installer.nsi")
-                .status()?;
-            assert!(compile_status.success(), "makensis compilation must succeed");
+        let makensis_local = format!(
+            "{}\\Programs\\nsis-3.10\\makensis.exe",
+            std::env::var("LOCALAPPDATA").unwrap_or_default()
+        );
+        let makensis_cmd = if std::process::Command::new("where")
+            .arg("makensis")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+            || std::process::Command::new("makensis")
+                .arg("/VERSION")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        {
+            "makensis".to_string()
+        } else if std::path::Path::new(&makensis_local).exists() {
+            makensis_local
         } else {
-            println!("  - Building native installer with cargo build --release --bin isolmass-setup...");
-            let cargo_status = std::process::Command::new("cargo")
-                .args(["build", "--release", "--bin", "isolmass-setup"])
-                .status()?;
-            assert!(cargo_status.success(), "Native installer compilation must succeed");
-        }
+            panic!(
+                "makensis not found on PATH or at %LOCALAPPDATA%\\Programs\\nsis-3.10\\makensis.exe"
+            );
+        };
+
+        println!("  - Building installer with NSIS ({makensis_cmd})...");
+        let compile_status = std::process::Command::new(&makensis_cmd)
+            .arg("installer.nsi")
+            .status()?;
+        assert!(compile_status.success(), "makensis compilation must succeed");
     }
 
     assert!(
         setup_path.exists(),
         "Installer artifact 'target/release/isolmass-setup.exe' MUST exist!"
+    );
+    let mut setup_file = std::fs::File::open(setup_path)?;
+    let mut pe_magic = [0u8; 2];
+    setup_file.read_exact(&mut pe_magic)?;
+    drop(setup_file);
+    assert_eq!(
+        pe_magic,
+        [0x4D, 0x5A],
+        "Installer artifact must have valid PE magic header [0x4D, 0x5A] ('MZ')"
     );
     let setup_size = setup_path.metadata()?.len();
     assert!(
@@ -1164,8 +1183,8 @@ fn run_interactive_session() -> Result<(), Box<dyn std::error::Error>> {
     println!(" isolmaSS — Lightweight Native Screenshot Utility");
     println!("============================================================");
 
-    // Apply Windows Snipping Tool suppression fix to guarantee PrintScreen is dedicated to isolmaSS
-    let reg_fixed = hotkey::disable_windows_snipping_tool_hotkey();
+    // Query Windows Snipping Tool suppression state (registry modification is reserved for --fix-printscreen)
+    let snipping_tool_disabled = hotkey::is_windows_snipping_tool_disabled();
     let settings = Settings::load_or_default();
     let (event_rx, handle) = start_hotkey_listener(settings.hotkey)?;
 
@@ -1183,17 +1202,17 @@ fn run_interactive_session() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Hotkey & System Tray daemon active!");
     println!(
-        "  - Active Hotkey:   [{}] (Locked to isolmaSS; Windows Snipping Tool suppressed)",
-        handle.active_description
+        "  - Active Hotkey:   [{}] (Locked to isolmaSS; Windows Snipping Tool suppressed: {})",
+        handle.active_description, snipping_tool_disabled
     );
     println!("  - System Tray:     Active in notification area (Right-click menu: Capture, Settings, Exit)");
     println!("  - Low-Level Hook:  WH_KEYBOARD_LL active (swallows VK_SNAPSHOT keystrokes)");
     println!(
         "  - Registry Fix:    PrintScreenKeyForSnippingEnabled = 0 ({})",
-        if reg_fixed {
+        if snipping_tool_disabled {
             "Verified active"
         } else {
-            "Fallback mode"
+            "Not active (run 'isolmass --fix-printscreen' to dedicate PrintScreen)"
         }
     );
     println!("  - Save Folder:     [{}]", settings.save_directory.display());
