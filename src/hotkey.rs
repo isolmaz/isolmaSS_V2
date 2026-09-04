@@ -347,7 +347,7 @@ pub unsafe fn process_keyboard_hook(
         // VK_BACK: backspace character before caret.
         // VK_DELETE: delete character after caret.
         // VK_LEFT / VK_RIGHT: move caret position.
-        // VK_RETURN: commit text object and auto-select it.
+        // VK_RETURN: commit the text object without selecting it.
         // All text editing keystrokes consumed with LRESULT(1) while editing.
         if text_editing {
             if is_down && !overlay_hwnd.is_invalid() {

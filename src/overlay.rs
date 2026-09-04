@@ -1,6 +1,6 @@
 use crate::annotation::{
-    AnnotationKind, AnnotationObject, EditCommand, HistoryManager, ToolKind, bgra_to_colorref,
-    render_pen_preview, snap_angle_45, snap_square,
+    AnnotationKind, AnnotationObject, AnnotationResizeHandle, EditCommand, HistoryManager,
+    ToolKind, bgra_to_colorref, render_pen_preview, snap_angle_45, snap_square,
 };
 use crate::capture::{CaptureBuffer, Rect, SelectionHitZone};
 use crate::clipboard::{copy_dib_to_clipboard, flatten_selection_to_dib};
@@ -100,6 +100,7 @@ pub enum EscapeAction {
 pub struct TextEditState {
     pub pos: (i32, i32),
     pub text: String,
+    original_text: String,
     pub caret: usize,
     pub color: [u8; 4],
     pub font_size: i32,
@@ -116,9 +117,11 @@ impl TextEditState {
         editing_id: Option<usize>,
     ) -> Self {
         let caret = text.chars().count();
+        let original_text = text.clone();
         Self {
             pos,
             text,
+            original_text,
             caret,
             color,
             font_size,
@@ -185,10 +188,17 @@ impl TextEditState {
 }
 
 #[derive(Debug, Clone, Copy)]
+enum DragObjectAction {
+    Move,
+    Resize(AnnotationResizeHandle),
+}
+
+#[derive(Debug, Clone)]
 struct DragObjectState {
     id: usize,
-    start_pos: (i32, i32),
+    action: DragObjectAction,
     last_pos: (i32, i32),
+    original_kind: AnnotationKind,
 }
 
 struct ScreenDcGuard(HDC);
@@ -271,8 +281,20 @@ impl Drop for OverlayState {
 
 impl OverlayState {
     pub fn handle_escape_action(&mut self) -> EscapeAction {
-        if self.text_edit.is_some() {
-            self.text_edit = None;
+        if let Some(edit) = self.text_edit.take() {
+            if let Some(id) = edit.editing_id
+                && !self.objects.iter().any(|object| object.id == id)
+            {
+                self.objects.push(AnnotationObject::new(
+                    id,
+                    AnnotationKind::Text {
+                        pos: edit.pos,
+                        text: edit.original_text,
+                        color: edit.color,
+                        font_size: edit.font_size,
+                    },
+                ));
+            }
             EscapeAction::CancelledTextEdit
         } else if let Some(id) = self.selected_id.take() {
             EscapeAction::DeselectedObject(id)
@@ -517,14 +539,43 @@ impl OverlayState {
                     }
                 }
 
-                // 9. Render Toolbar (Two-row: Tools + Palette/Thickness)
+                // 9. Render the contextual L-shaped editor toolbar.
                 let can_undo = self.history.can_undo();
                 let can_redo = self.history.can_redo();
+                let selected = if self.active_tool == ToolKind::Select {
+                    self.selected_id
+                        .and_then(|id| self.objects.iter().find(|object| object.id == id))
+                } else {
+                    None
+                };
+                let (toolbar_color, toolbar_thickness, show_color, show_thickness) =
+                    if let Some(object) = selected {
+                        (
+                            object.get_color().unwrap_or(self.active_color),
+                            object.get_thickness().unwrap_or(self.active_thickness),
+                            object.get_color().is_some(),
+                            object.get_thickness().is_some(),
+                        )
+                    } else {
+                        match self.active_tool {
+                            ToolKind::Rectangle | ToolKind::Arrow | ToolKind::Pen => {
+                                (self.active_color, self.active_thickness, true, true)
+                            }
+                            ToolKind::Text => {
+                                (self.active_color, self.active_thickness, true, false)
+                            }
+                            ToolKind::Blur | ToolKind::Select => {
+                                (self.active_color, self.active_thickness, false, false)
+                            }
+                        }
+                    };
                 let mut tb = Toolbar::layout(
                     &sel,
                     self.active_tool,
-                    self.active_color,
-                    self.active_thickness,
+                    toolbar_color,
+                    toolbar_thickness,
+                    show_color,
+                    show_thickness,
                     width,
                     height,
                     can_undo,
@@ -578,14 +629,28 @@ impl OverlayState {
                             new_kind,
                         });
                     } else {
-                        self.history.record(EditCommand::Add(obj.clone()));
+                        let old_kind = AnnotationKind::Text {
+                            pos: edit.pos,
+                            text: edit.original_text.clone(),
+                            color: edit.color,
+                            font_size: edit.font_size,
+                        };
                         self.objects.push(obj);
+                        self.history.record(EditCommand::Modify {
+                            id: obj_id,
+                            old_kind,
+                            new_kind,
+                        });
                     }
                 } else {
                     self.history.record(EditCommand::Add(obj.clone()));
                     self.objects.push(obj);
                 }
-                self.selected_id = Some(obj_id);
+                self.selected_id = if is_modify && self.active_tool == ToolKind::Select {
+                    Some(obj_id)
+                } else {
+                    None
+                };
             }
             self.redraw(hwnd);
         }
@@ -615,46 +680,51 @@ impl OverlayState {
             return LRESULT(0);
         }
 
-        // 2. If currently in TextEditState:
+        // 2. Text editing owns keys, except copy: commit first so the flattened
+        // screenshot contains the final text and never includes editor affordances.
         if self.text_edit.is_some() {
-            match vk {
-                x if x == VK_RETURN.0 as usize => {
-                    self.commit_text(hwnd);
-                    return LRESULT(0);
-                }
-                x if x == VK_BACK.0 as usize => {
-                    if let Some(edit) = &mut self.text_edit
-                        && edit.backspace()
-                    {
-                        self.redraw(hwnd);
+            if self.mode == OverlayMode::SelectionActive && ctrl_down && vk == 'C' as usize {
+                self.commit_text(hwnd);
+            } else {
+                match vk {
+                    x if x == VK_RETURN.0 as usize => {
+                        self.commit_text(hwnd);
+                        return LRESULT(0);
                     }
-                    return LRESULT(0);
-                }
-                x if x == VK_DELETE.0 as usize => {
-                    if let Some(edit) = &mut self.text_edit
-                        && edit.delete()
-                    {
-                        self.redraw(hwnd);
+                    x if x == VK_BACK.0 as usize => {
+                        if let Some(edit) = &mut self.text_edit
+                            && edit.backspace()
+                        {
+                            self.redraw(hwnd);
+                        }
+                        return LRESULT(0);
                     }
-                    return LRESULT(0);
-                }
-                x if x == VK_LEFT.0 as usize => {
-                    if let Some(edit) = &mut self.text_edit
-                        && edit.move_left()
-                    {
-                        self.redraw(hwnd);
+                    x if x == VK_DELETE.0 as usize => {
+                        if let Some(edit) = &mut self.text_edit
+                            && edit.delete()
+                        {
+                            self.redraw(hwnd);
+                        }
+                        return LRESULT(0);
                     }
-                    return LRESULT(0);
-                }
-                x if x == VK_RIGHT.0 as usize => {
-                    if let Some(edit) = &mut self.text_edit
-                        && edit.move_right()
-                    {
-                        self.redraw(hwnd);
+                    x if x == VK_LEFT.0 as usize => {
+                        if let Some(edit) = &mut self.text_edit
+                            && edit.move_left()
+                        {
+                            self.redraw(hwnd);
+                        }
+                        return LRESULT(0);
                     }
-                    return LRESULT(0);
+                    x if x == VK_RIGHT.0 as usize => {
+                        if let Some(edit) = &mut self.text_edit
+                            && edit.move_right()
+                        {
+                            self.redraw(hwnd);
+                        }
+                        return LRESULT(0);
+                    }
+                    _ => return LRESULT(0),
                 }
-                _ => return LRESULT(0),
             }
         }
 
@@ -745,6 +815,12 @@ impl OverlayState {
         // 9. Tool switching shortcuts (R, A, P, T, B)
         if !ctrl_down {
             match vk as u8 as char {
+                'V' | 'v' => {
+                    self.active_tool = ToolKind::Select;
+                    self.persist_editor_preferences();
+                    self.redraw(hwnd);
+                    return LRESULT(0);
+                }
                 'R' | 'r' => {
                     self.active_tool = ToolKind::Rectangle;
                     self.persist_editor_preferences();
@@ -894,6 +970,62 @@ impl OverlayState {
         result
     }
 
+    fn editor_cursor(&self, pt: (i32, i32)) -> PCWSTR {
+        if self.mode != OverlayMode::SelectionActive {
+            return IDC_CROSS;
+        }
+        if self.text_edit.is_some() {
+            return IDC_IBEAM;
+        }
+        if self.active_tool != ToolKind::Select {
+            return if self.active_tool == ToolKind::Text {
+                IDC_IBEAM
+            } else {
+                IDC_CROSS
+            };
+        }
+
+        if let Some(object) = self
+            .selected_id
+            .and_then(|id| self.objects.iter().find(|object| object.id == id))
+        {
+            let radius = 7 * self.dpi as i32 / 96;
+            if let Some(handle) = object.hit_resize_handle(pt, radius) {
+                return match handle {
+                    AnnotationResizeHandle::TopLeft | AnnotationResizeHandle::BottomRight => {
+                        IDC_SIZENWSE
+                    }
+                    AnnotationResizeHandle::TopRight | AnnotationResizeHandle::BottomLeft => {
+                        IDC_SIZENESW
+                    }
+                    AnnotationResizeHandle::ArrowStart | AnnotationResizeHandle::ArrowEnd => {
+                        IDC_SIZEALL
+                    }
+                };
+            }
+            if object.geometry_bounds().inflate(4, 4).contains(pt.0, pt.1) {
+                return IDC_SIZEALL;
+            }
+        }
+
+        let Some(selection) = self.committed_selection else {
+            return IDC_CROSS;
+        };
+        match selection.hit_test_selection(pt, 4 * self.dpi as i32 / 96, 8 * self.dpi as i32 / 96) {
+            SelectionHitZone::TopLeftCorner | SelectionHitZone::BottomRightCorner => IDC_SIZENWSE,
+            SelectionHitZone::TopRightCorner | SelectionHitZone::BottomLeftCorner => IDC_SIZENESW,
+            SelectionHitZone::BorderEdge => IDC_SIZEALL,
+            SelectionHitZone::Interior => {
+                if self.objects.iter().rev().any(|object| object.hit_test(pt)) {
+                    IDC_SIZEALL
+                } else {
+                    IDC_ARROW
+                }
+            }
+            SelectionHitZone::None => IDC_CROSS,
+        }
+    }
+
     fn persist_editor_preferences(&mut self) {
         self.settings.default_color = self.active_color;
         self.settings.default_thickness = self.active_thickness;
@@ -929,86 +1061,18 @@ unsafe extern "system" fn overlay_wnd_proc(
                 }
                 let pt = (pt_client.x, pt_client.y);
 
-                let cur_id = if let Some(tb) = &state.toolbar {
-                    if tb.contains_point(pt) {
-                        if tb.hit_test(pt).is_some() {
+                let cur_id = if let Some(toolbar) = &state.toolbar {
+                    if toolbar.contains_point(pt) {
+                        if toolbar.hit_test(pt).is_some() {
                             IDC_HAND
                         } else {
                             IDC_ARROW
                         }
-                    } else if state.mode == OverlayMode::SelectionActive {
-                        if let Some(sel) = state.committed_selection {
-                            match sel.hit_test_selection(
-                                pt,
-                                4 * state.dpi as i32 / 96,
-                                8 * state.dpi as i32 / 96,
-                            ) {
-                                SelectionHitZone::TopLeftCorner
-                                | SelectionHitZone::BottomRightCorner => IDC_SIZENWSE,
-                                SelectionHitZone::TopRightCorner
-                                | SelectionHitZone::BottomLeftCorner => IDC_SIZENESW,
-                                SelectionHitZone::BorderEdge => IDC_SIZEALL,
-                                SelectionHitZone::Interior => {
-                                    if state.text_edit.is_some() {
-                                        IDC_IBEAM
-                                    } else if let Some(hit_obj) =
-                                        state.objects.iter().rev().find(|o| o.hit_test(pt))
-                                    {
-                                        if let AnnotationKind::Text { .. } = hit_obj.kind {
-                                            IDC_IBEAM
-                                        } else {
-                                            IDC_SIZEALL
-                                        }
-                                    } else if state.active_tool == ToolKind::Text {
-                                        IDC_IBEAM
-                                    } else {
-                                        IDC_CROSS
-                                    }
-                                }
-                                SelectionHitZone::None => IDC_CROSS,
-                            }
-                        } else {
-                            IDC_CROSS
-                        }
                     } else {
-                        IDC_CROSS
-                    }
-                } else if state.mode == OverlayMode::SelectionActive {
-                    if let Some(sel) = state.committed_selection {
-                        match sel.hit_test_selection(
-                            pt,
-                            4 * state.dpi as i32 / 96,
-                            8 * state.dpi as i32 / 96,
-                        ) {
-                            SelectionHitZone::TopLeftCorner
-                            | SelectionHitZone::BottomRightCorner => IDC_SIZENWSE,
-                            SelectionHitZone::TopRightCorner
-                            | SelectionHitZone::BottomLeftCorner => IDC_SIZENESW,
-                            SelectionHitZone::BorderEdge => IDC_SIZEALL,
-                            SelectionHitZone::Interior => {
-                                if state.text_edit.is_some() {
-                                    IDC_IBEAM
-                                } else if let Some(hit_obj) =
-                                    state.objects.iter().rev().find(|o| o.hit_test(pt))
-                                {
-                                    if let AnnotationKind::Text { .. } = hit_obj.kind {
-                                        IDC_IBEAM
-                                    } else {
-                                        IDC_SIZEALL
-                                    }
-                                } else if state.active_tool == ToolKind::Text {
-                                    IDC_IBEAM
-                                } else {
-                                    IDC_CROSS
-                                }
-                            }
-                            SelectionHitZone::None => IDC_CROSS,
-                        }
-                    } else {
-                        IDC_CROSS
+                        state.editor_cursor(pt)
                     }
                 } else {
-                    IDC_CROSS
+                    state.editor_cursor(pt)
                 };
 
                 let cur = unsafe { LoadCursorW(HINSTANCE::default(), cur_id).unwrap_or_default() };
@@ -1052,7 +1116,9 @@ unsafe extern "system" fn overlay_wnd_proc(
                     let _ = SetFocus(hwnd);
                 }
 
-                if state.mode == OverlayMode::SelectionActive {
+                if state.mode == OverlayMode::SelectionActive
+                    && state.active_tool == ToolKind::Select
+                {
                     // Double-click on existing committed text object: re-opens it in text editing mode with caret at the end!
                     if let Some(pos) = state.objects.iter().rposition(|o| {
                         if let AnnotationKind::Text { .. } = o.kind {
@@ -1069,6 +1135,7 @@ unsafe extern "system" fn overlay_wnd_proc(
                             font_size,
                         } = obj.kind
                         {
+                            state.dragging_object = None;
                             state.text_edit = Some(TextEditState::new(
                                 t_pos,
                                 text,
@@ -1257,24 +1324,50 @@ unsafe extern "system" fn overlay_wnd_proc(
                             return LRESULT(0);
                         }
 
-                        // 2. Dragging object
-                        if let Some(drag) = state.dragging_object {
-                            let dx = client_x - drag.last_pos.0;
-                            let dy = client_y - drag.last_pos.1;
-                            let dirty = if let Some(obj) =
-                                state.objects.iter_mut().find(|object| object.id == drag.id)
+                        // 2. Moving or resizing the selected object. The preview mutates
+                        // freely, while history receives one Modify command on button-up.
+                        if let Some(drag) = state.dragging_object.as_ref() {
+                            let drag_id = drag.id;
+                            let action = drag.action;
+                            let last_pos = drag.last_pos;
+                            let original_kind = &drag.original_kind;
+                            let selection = state.committed_selection.unwrap_or_default();
+                            let dirty = if let Some(object) =
+                                state.objects.iter_mut().find(|object| object.id == drag_id)
                             {
-                                let old_bounds = obj.bounds();
-                                obj.translate(dx, dy);
-                                old_bounds.union(&obj.bounds()).inflate(6, 6)
+                                let old_bounds = object.bounds();
+                                match action {
+                                    DragObjectAction::Move => {
+                                        let bounds = object.geometry_bounds();
+                                        let requested_dx = client_x - last_pos.0;
+                                        let requested_dy = client_y - last_pos.1;
+                                        let min_dx = selection.left - bounds.left;
+                                        let max_dx = selection.right - bounds.right;
+                                        let min_dy = selection.top - bounds.top;
+                                        let max_dy = selection.bottom - bounds.bottom;
+                                        let dx = if min_dx <= max_dx {
+                                            requested_dx.clamp(min_dx, max_dx)
+                                        } else {
+                                            0
+                                        };
+                                        let dy = if min_dy <= max_dy {
+                                            requested_dy.clamp(min_dy, max_dy)
+                                        } else {
+                                            0
+                                        };
+                                        object.translate(dx, dy);
+                                    }
+                                    DragObjectAction::Resize(handle) => {
+                                        object.resize_from(original_kind, handle, pt, selection);
+                                    }
+                                }
+                                old_bounds.union(&object.bounds()).inflate(8, 8)
                             } else {
                                 Rect::default()
                             };
-                            state.dragging_object = Some(DragObjectState {
-                                id: drag.id,
-                                start_pos: drag.start_pos,
-                                last_pos: pt,
-                            });
+                            if let Some(drag) = state.dragging_object.as_mut() {
+                                drag.last_pos = pt;
+                            }
                             state.redraw_region(hwnd, dirty);
                             return LRESULT(0);
                         }
@@ -1464,109 +1557,140 @@ unsafe extern "system" fn overlay_wnd_proc(
                             return LRESULT(0);
                         };
 
-                        let zone = sel.hit_test_selection(
-                            pt,
-                            4 * state.dpi as i32 / 96,
-                            8 * state.dpi as i32 / 96,
-                        );
-                        match zone {
-                            SelectionHitZone::TopLeftCorner
-                            | SelectionHitZone::TopRightCorner
-                            | SelectionHitZone::BottomLeftCorner
-                            | SelectionHitZone::BottomRightCorner => {
-                                state.dragging_selection = Some(DragSelectionState {
-                                    action: DragSelectionAction::Resize(zone),
-                                    start_pos: pt,
+                        if state.active_tool == ToolKind::Select {
+                            let handle_radius = 7 * state.dpi as i32 / 96;
+                            if let Some(object) = state
+                                .selected_id
+                                .and_then(|id| state.objects.iter().find(|object| object.id == id))
+                                && let Some(handle) = object.hit_resize_handle(pt, handle_radius)
+                            {
+                                state.dragging_object = Some(DragObjectState {
+                                    id: object.id,
+                                    action: DragObjectAction::Resize(handle),
                                     last_pos: pt,
+                                    original_kind: object.kind.clone(),
                                 });
-                                state.selected_id = None;
-                                state.redraw(hwnd);
                                 return LRESULT(0);
                             }
-                            SelectionHitZone::BorderEdge => {
-                                state.dragging_selection = Some(DragSelectionState {
-                                    action: DragSelectionAction::Move,
-                                    start_pos: pt,
-                                    last_pos: pt,
-                                });
-                                state.selected_id = None;
-                                state.redraw(hwnd);
-                                return LRESULT(0);
-                            }
-                            SelectionHitZone::Interior => {
-                                // 2. Click existing object
-                                let hit_obj_id = state
-                                    .objects
-                                    .iter()
-                                    .rev()
-                                    .find(|o| o.hit_test(pt))
-                                    .map(|o| o.id);
 
-                                if let Some(id) = hit_obj_id {
-                                    state.selected_id = Some(id);
-                                    state.dragging_object = Some(DragObjectState {
-                                        id,
+                            let zone = sel.hit_test_selection(
+                                pt,
+                                4 * state.dpi as i32 / 96,
+                                8 * state.dpi as i32 / 96,
+                            );
+                            match zone {
+                                SelectionHitZone::TopLeftCorner
+                                | SelectionHitZone::TopRightCorner
+                                | SelectionHitZone::BottomLeftCorner
+                                | SelectionHitZone::BottomRightCorner => {
+                                    state.dragging_selection = Some(DragSelectionState {
+                                        action: DragSelectionAction::Resize(zone),
                                         start_pos: pt,
                                         last_pos: pt,
                                     });
+                                    state.selected_id = None;
                                     state.redraw(hwnd);
                                     return LRESULT(0);
                                 }
-
-                                // 3. Click empty canvas inside selection
-                                state.selected_id = None;
-
-                                match state.active_tool {
-                                    ToolKind::Rectangle => {
-                                        state.drawing_shape = Some(InProgressDrawing::Rectangle {
-                                            start: pt,
-                                            current: pt,
+                                SelectionHitZone::BorderEdge => {
+                                    state.dragging_selection = Some(DragSelectionState {
+                                        action: DragSelectionAction::Move,
+                                        start_pos: pt,
+                                        last_pos: pt,
+                                    });
+                                    state.selected_id = None;
+                                    state.redraw(hwnd);
+                                    return LRESULT(0);
+                                }
+                                SelectionHitZone::Interior => {
+                                    // A selected object's whole bounding interior is draggable;
+                                    // unselected line work still requires a precise first hit.
+                                    let hit_object = state
+                                        .selected_id
+                                        .and_then(|id| state.objects.iter().find(|o| o.id == id))
+                                        .filter(|object| {
+                                            object
+                                                .geometry_bounds()
+                                                .inflate(4, 4)
+                                                .contains(pt.0, pt.1)
+                                        })
+                                        .or_else(|| {
+                                            state
+                                                .objects
+                                                .iter()
+                                                .rev()
+                                                .find(|object| object.hit_test(pt))
                                         });
-                                    }
-                                    ToolKind::Arrow => {
-                                        state.drawing_shape = Some(InProgressDrawing::Arrow {
-                                            start: pt,
-                                            current: pt,
+                                    if let Some(object) = hit_object {
+                                        let id = object.id;
+                                        let original_kind = object.kind.clone();
+                                        state.selected_id = Some(id);
+                                        state.dragging_object = Some(DragObjectState {
+                                            id,
+                                            action: DragObjectAction::Move,
+                                            last_pos: pt,
+                                            original_kind,
                                         });
-                                    }
-                                    ToolKind::Pen => {
-                                        state.drawing_shape =
-                                            Some(InProgressDrawing::Pen { points: vec![pt] });
-                                    }
-                                    ToolKind::Text => {
-                                        state.text_edit = Some(TextEditState::new(
-                                            pt,
-                                            String::new(),
-                                            state.active_color,
-                                            DEFAULT_FONT_SIZE * state.dpi as i32 / 96,
-                                            None,
-                                        ));
-                                        unsafe {
-                                            let _ = SetTimer(hwnd, 1, 500, None);
-                                        }
-                                        set_overlay_text_editing(true);
                                         state.redraw(hwnd);
+                                        return LRESULT(0);
                                     }
-                                    ToolKind::Blur => {
-                                        state.drawing_shape = Some(InProgressDrawing::Blur {
-                                            start: pt,
-                                            current: pt,
-                                        });
+                                    state.selected_id = None;
+                                    state.redraw(hwnd);
+                                }
+                                SelectionHitZone::None => {
+                                    if state.selected_id.is_some() {
+                                        state.selected_id = None;
+                                        state.redraw(hwnd);
+                                    } else {
+                                        state.mode = OverlayMode::DraggingSelection;
+                                        state.drag_start = Some(pt);
+                                        state.committed_selection = None;
+                                        state.toolbar = None;
+                                        state.objects.clear();
+                                        state.redraw(hwnd);
                                     }
                                 }
                             }
-                            SelectionHitZone::None => {
-                                if state.selected_id.is_some() {
-                                    state.selected_id = None;
-                                    state.redraw(hwnd);
-                                } else {
-                                    state.mode = OverlayMode::DraggingSelection;
-                                    state.drag_start = Some(pt);
-                                    state.committed_selection = None;
-                                    state.toolbar = None;
-                                    state.objects.clear();
+                        } else if sel.contains(pt.0, pt.1) {
+                            state.selected_id = None;
+                            match state.active_tool {
+                                ToolKind::Rectangle => {
+                                    state.drawing_shape = Some(InProgressDrawing::Rectangle {
+                                        start: pt,
+                                        current: pt,
+                                    });
+                                }
+                                ToolKind::Arrow => {
+                                    state.drawing_shape = Some(InProgressDrawing::Arrow {
+                                        start: pt,
+                                        current: pt,
+                                    });
+                                }
+                                ToolKind::Pen => {
+                                    state.drawing_shape =
+                                        Some(InProgressDrawing::Pen { points: vec![pt] });
+                                }
+                                ToolKind::Text => {
+                                    state.text_edit = Some(TextEditState::new(
+                                        pt,
+                                        String::new(),
+                                        state.active_color,
+                                        DEFAULT_FONT_SIZE * state.dpi as i32 / 96,
+                                        None,
+                                    ));
+                                    unsafe {
+                                        let _ = SetTimer(hwnd, 1, 500, None);
+                                    }
+                                    set_overlay_text_editing(true);
                                     state.redraw(hwnd);
                                 }
+                                ToolKind::Blur => {
+                                    state.drawing_shape = Some(InProgressDrawing::Blur {
+                                        start: pt,
+                                        current: pt,
+                                    });
+                                }
+                                ToolKind::Select => unreachable!(),
                             }
                         }
                     }
@@ -1650,14 +1774,17 @@ unsafe extern "system" fn overlay_wnd_proc(
                         }
 
                         if let Some(drag) = state.dragging_object.take() {
-                            let total_dx = drag.last_pos.0 - drag.start_pos.0;
-                            let total_dy = drag.last_pos.1 - drag.start_pos.1;
-                            if total_dx != 0 || total_dy != 0 {
-                                state.history.record(EditCommand::Move {
-                                    id: drag.id,
-                                    dx: total_dx,
-                                    dy: total_dy,
-                                });
+                            if let Some(object) =
+                                state.objects.iter().find(|object| object.id == drag.id)
+                            {
+                                let new_kind = object.kind.clone();
+                                if new_kind != drag.original_kind {
+                                    state.history.record(EditCommand::Modify {
+                                        id: drag.id,
+                                        old_kind: drag.original_kind,
+                                        new_kind,
+                                    });
+                                }
                             }
                             state.selected_id = Some(drag.id);
                             state.redraw(hwnd);
@@ -1674,7 +1801,7 @@ unsafe extern "system" fn overlay_wnd_proc(
                                     };
                                     let r = Rect::normalized(start, final_cur)
                                         .clamp(state.capture.width, state.capture.height);
-                                    if r.width() >= 3 && r.height() >= 3 {
+                                    if r.width() >= 6 && r.height() >= 6 {
                                         Some(AnnotationObject::new(
                                             state.next_id,
                                             AnnotationKind::Rectangle {
@@ -1737,7 +1864,7 @@ unsafe extern "system" fn overlay_wnd_proc(
                                     };
                                     let r = Rect::normalized(start, final_cur)
                                         .clamp(state.capture.width, state.capture.height);
-                                    if r.width() >= 3 && r.height() >= 3 {
+                                    if r.width() >= 6 && r.height() >= 6 {
                                         Some(AnnotationObject::new(
                                             state.next_id,
                                             AnnotationKind::Blur {
@@ -1754,7 +1881,7 @@ unsafe extern "system" fn overlay_wnd_proc(
                             if let Some(obj) = new_obj {
                                 state.next_id += 1;
                                 state.history.record(EditCommand::Add(obj.clone()));
-                                state.selected_id = Some(obj.id);
+                                state.selected_id = None;
                                 state.objects.push(obj);
                             }
 

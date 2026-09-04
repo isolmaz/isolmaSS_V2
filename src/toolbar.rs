@@ -44,6 +44,8 @@ pub struct Toolbar {
     pub active_color: [u8; 4],
     pub active_thickness: i32,
     pub dpi: u32,
+    screen_width: i32,
+    screen_height: i32,
 }
 
 struct FontGuard {
@@ -63,7 +65,6 @@ impl Drop for FontGuard {
 
 impl Toolbar {
     pub const TOOL_BUTTON: i32 = 34;
-    pub const PANEL_GAP: i32 = 8;
     pub const ACTION_HEIGHT: i32 = 42;
 
     /// Builds a Lightshot-style tool rail beside the selection and a compact
@@ -74,6 +75,8 @@ impl Toolbar {
         active_tool: ToolKind,
         active_color: [u8; 4],
         active_thickness: i32,
+        show_color: bool,
+        show_thickness: bool,
         screen_width: i32,
         screen_height: i32,
         can_undo: bool,
@@ -82,10 +85,11 @@ impl Toolbar {
     ) -> Self {
         let scale = |value: i32| value * dpi as i32 / 96;
         let margin = scale(6);
-        let gap = scale(Self::PANEL_GAP);
         let pad = scale(6);
         let tool_button = scale(Self::TOOL_BUTTON);
+        // First item is physically closest to the selection's bottom edge.
         let tool_items = [
+            (ToolbarItem::Tool(ToolKind::Select), true),
             (ToolbarItem::Tool(ToolKind::Rectangle), true),
             (ToolbarItem::Tool(ToolKind::Arrow), true),
             (ToolbarItem::Tool(ToolKind::Pen), true),
@@ -98,18 +102,6 @@ impl Toolbar {
         let tool_height = pad * 2
             + tool_items.len() as i32 * tool_button
             + (tool_items.len() as i32 - 1) * scale(3);
-        let mut tool_x = selection.right + gap;
-        if tool_x + tool_width > screen_width - margin {
-            tool_x = selection.left - gap - tool_width;
-        }
-        if tool_x < margin {
-            tool_x = (selection.right - tool_width - margin)
-                .clamp(margin, (screen_width - tool_width - margin).max(margin));
-        }
-        let tool_y = selection
-            .top
-            .clamp(margin, (screen_height - tool_height - margin).max(margin));
-        let tool_bounds = Rect::new(tool_x, tool_y, tool_x + tool_width, tool_y + tool_height);
 
         let color_size = scale(20);
         let color_step = scale(23);
@@ -118,25 +110,83 @@ impl Toolbar {
         let action_button = scale(34);
         let action_step = scale(37);
         let section_gap = scale(12);
-        let action_width = pad * 2 + PRESET_COLORS.len() as i32 * color_step
-            - (color_step - color_size)
-            + section_gap
-            + PRESET_THICKNESSES.len() as i32 * thickness_step
-            - (thickness_step - thickness_width)
-            + section_gap
+        let colors_width = if show_color {
+            PRESET_COLORS.len() as i32 * color_step - (color_step - color_size)
+        } else {
+            0
+        };
+        let thicknesses_width = if show_thickness {
+            PRESET_THICKNESSES.len() as i32 * thickness_step - (thickness_step - thickness_width)
+        } else {
+            0
+        };
+        let style_sections = i32::from(show_color) + i32::from(show_thickness);
+        let action_width = pad * 2
+            + colors_width
+            + thicknesses_width
+            + style_sections * section_gap
             + 4 * action_step
             - (action_step - action_button);
         let action_height = scale(Self::ACTION_HEIGHT);
-        let mut action_y = selection.bottom + gap;
-        if action_y + action_height > screen_height - margin {
-            action_y = selection.top - gap - action_height;
-        }
-        if action_y < margin {
-            action_y = (selection.bottom - action_height - margin)
-                .clamp(margin, screen_height - action_height - margin);
-        }
-        let action_x = (selection.right - action_width)
-            .clamp(margin, (screen_width - action_width - margin).max(margin));
+
+        // Place both panels from one shared corner. Clamping that corner, rather than
+        // each panel independently, keeps the toolbar a coherent L even when neither
+        // selection-anchored orientation fits at a screen edge.
+        let panel_width = tool_width.max(action_width);
+        let right_join = selection.right + tool_width;
+        let left_join = selection.left - tool_width;
+        let right_min = margin + panel_width;
+        let right_max = screen_width - margin;
+        let left_min = margin;
+        let left_max = screen_width - margin - panel_width;
+        let right_fits = (right_min..=right_max).contains(&right_join);
+        let left_fits = (left_min..=left_max).contains(&left_join);
+        let place_right = right_fits || !left_fits;
+
+        let below_join = selection.bottom;
+        let above_join = selection.top;
+        let below_min = margin + tool_height;
+        let below_max = screen_height - margin - action_height;
+        let above_min = margin + action_height;
+        let above_max = screen_height - margin - tool_height;
+        let below_fits = (below_min..=below_max).contains(&below_join);
+        let above_fits = (above_min..=above_max).contains(&above_join);
+        let place_below = below_fits || !above_fits;
+
+        let clamp_join = |value: i32, min: i32, max: i32| {
+            if min <= max {
+                value.clamp(min, max)
+            } else {
+                min
+            }
+        };
+        let shared_x = if place_right {
+            clamp_join(right_join, right_min, right_max)
+        } else {
+            clamp_join(left_join, left_min, left_max)
+        };
+        let shared_y = if place_below {
+            clamp_join(below_join, below_min, below_max)
+        } else {
+            clamp_join(above_join, above_min, above_max)
+        };
+
+        let tool_x = if place_right {
+            shared_x - tool_width
+        } else {
+            shared_x
+        };
+        let action_x = if place_right {
+            shared_x - action_width
+        } else {
+            shared_x
+        };
+        let (tool_y, action_y) = if place_below {
+            (shared_y - tool_height, shared_y)
+        } else {
+            (shared_y, shared_y - action_height)
+        };
+        let tool_bounds = Rect::new(tool_x, tool_y, tool_x + tool_width, tool_y + tool_height);
         let action_bounds = Rect::new(
             action_x,
             action_y,
@@ -145,39 +195,46 @@ impl Toolbar {
         );
 
         let mut buttons = Vec::with_capacity(
-            tool_items.len() + PRESET_COLORS.len() + PRESET_THICKNESSES.len() + 4,
+            tool_items.len()
+                + usize::from(show_color) * PRESET_COLORS.len()
+                + usize::from(show_thickness) * PRESET_THICKNESSES.len()
+                + 4,
         );
-        let mut y = tool_y + pad;
+        let mut y = tool_bounds.bottom - pad - tool_button;
         for (item, enabled) in tool_items {
             buttons.push(ToolbarButton {
                 item,
                 rect: Rect::new(tool_x + pad, y, tool_x + pad + tool_button, y + tool_button),
                 is_enabled: enabled,
             });
-            y += tool_button + scale(3);
+            y -= tool_button + scale(3);
         }
 
         let item_y = action_y + (action_height - color_size) / 2;
         let mut x = action_x + pad;
-        for color in PRESET_COLORS {
-            buttons.push(ToolbarButton {
-                item: ToolbarItem::Color(color),
-                rect: Rect::new(x, item_y, x + color_size, item_y + color_size),
-                is_enabled: true,
-            });
-            x += color_step;
+        if show_color {
+            for color in PRESET_COLORS {
+                buttons.push(ToolbarButton {
+                    item: ToolbarItem::Color(color),
+                    rect: Rect::new(x, item_y, x + color_size, item_y + color_size),
+                    is_enabled: true,
+                });
+                x += color_step;
+            }
+            x += section_gap - (color_step - color_size);
         }
-        x += section_gap - (color_step - color_size);
-        for thickness in PRESET_THICKNESSES {
-            let y = action_y + (action_height - tool_button) / 2;
-            buttons.push(ToolbarButton {
-                item: ToolbarItem::Thickness(thickness),
-                rect: Rect::new(x, y, x + thickness_width, y + tool_button),
-                is_enabled: true,
-            });
-            x += thickness_step;
+        if show_thickness {
+            for thickness in PRESET_THICKNESSES {
+                let y = action_y + (action_height - tool_button) / 2;
+                buttons.push(ToolbarButton {
+                    item: ToolbarItem::Thickness(thickness),
+                    rect: Rect::new(x, y, x + thickness_width, y + tool_button),
+                    is_enabled: true,
+                });
+                x += thickness_step;
+            }
+            x += section_gap - (thickness_step - thickness_width);
         }
-        x += section_gap - (thickness_step - thickness_width);
         for action in [
             ToolbarAction::Save,
             ToolbarAction::Copy,
@@ -202,6 +259,8 @@ impl Toolbar {
             active_color,
             active_thickness,
             dpi,
+            screen_width,
+            screen_height,
         }
     }
 
@@ -225,7 +284,11 @@ impl Toolbar {
 
     /// Updates hover state based on mouse coordinates.
     pub fn update_hover(&mut self, pt: (i32, i32)) -> bool {
-        let new_hover = self.hit_test(pt);
+        let new_hover = self
+            .buttons
+            .iter()
+            .find(|button| button.rect.contains(pt.0, pt.1))
+            .map(|button| button.item);
         if self.hovered_item != new_hover {
             self.hovered_item = new_hover;
             true
@@ -234,7 +297,7 @@ impl Toolbar {
         }
     }
 
-    /// Renders the side tool rail and bottom action strip onto the HDC.
+    /// Renders the bottom-up tool rail and contextual strip as one L onto the HDC.
     pub fn render(&self, hdc: HDC) {
         let scale = |value: i32| value * self.dpi as i32 / 96;
         let panel_bg = COLORREF(0x00282421);
@@ -391,6 +454,7 @@ impl Toolbar {
                     };
                     draw_rounded(&button.rect, fill, border, scale(5));
                     let glyph = match item {
+                        ToolbarItem::Tool(ToolKind::Select) => "↖",
                         ToolbarItem::Tool(ToolKind::Rectangle) => "□",
                         ToolbarItem::Tool(ToolKind::Arrow) => "➜",
                         ToolbarItem::Tool(ToolKind::Pen) => "✎",
@@ -424,19 +488,34 @@ impl Toolbar {
             }
         }
 
-        let tooltip = self.hovered_item.and_then(|item| match item {
-            ToolbarItem::Tool(ToolKind::Rectangle) => Some("Rectangle [R]"),
-            ToolbarItem::Tool(ToolKind::Arrow) => Some("Arrow [A]"),
-            ToolbarItem::Tool(ToolKind::Pen) => Some("Pen [P]"),
-            ToolbarItem::Tool(ToolKind::Text) => Some("Text [T]"),
-            ToolbarItem::Tool(ToolKind::Blur) => Some("Blur [B]"),
-            ToolbarItem::Action(ToolbarAction::Undo) => Some("Undo [Ctrl+Z]"),
-            ToolbarItem::Action(ToolbarAction::Redo) => Some("Redo [Ctrl+Y]"),
-            ToolbarItem::Action(ToolbarAction::Save) => Some("Save [Ctrl+S]"),
-            ToolbarItem::Action(ToolbarAction::Copy) => Some("Copy [Ctrl+C]"),
-            ToolbarItem::Action(ToolbarAction::Settings) => Some("Settings [Ctrl+,]"),
-            ToolbarItem::Action(ToolbarAction::Cancel) => Some("Close [Esc]"),
-            ToolbarItem::Color(_) | ToolbarItem::Thickness(_) => None,
+        let tooltip = self.hovered_item.map(|item| match item {
+            ToolbarItem::Tool(ToolKind::Select) => "Select [V]".to_string(),
+            ToolbarItem::Tool(ToolKind::Rectangle) => "Rectangle [R]".to_string(),
+            ToolbarItem::Tool(ToolKind::Arrow) => "Arrow [A]".to_string(),
+            ToolbarItem::Tool(ToolKind::Pen) => "Pen [P]".to_string(),
+            ToolbarItem::Tool(ToolKind::Text) => "Text [T]".to_string(),
+            ToolbarItem::Tool(ToolKind::Blur) => "Blur [B]".to_string(),
+            ToolbarItem::Action(ToolbarAction::Undo) => "Undo [Ctrl+Z]".to_string(),
+            ToolbarItem::Action(ToolbarAction::Redo) => "Redo [Ctrl+Y]".to_string(),
+            ToolbarItem::Action(ToolbarAction::Save) => "Save [Ctrl+S]".to_string(),
+            ToolbarItem::Action(ToolbarAction::Copy) => "Copy [Ctrl+C]".to_string(),
+            ToolbarItem::Action(ToolbarAction::Settings) => "Settings [Ctrl+,]".to_string(),
+            ToolbarItem::Action(ToolbarAction::Cancel) => "Close [Esc]".to_string(),
+            ToolbarItem::Color(color) => match color {
+                [49, 49, 224, 255] => "Red color".to_string(),
+                [7, 103, 247, 255] => "Orange color".to_string(),
+                [25, 196, 252, 255] => "Yellow color".to_string(),
+                [68, 158, 47, 255] => "Green color".to_string(),
+                [194, 113, 25, 255] => "Blue color".to_string(),
+                [181, 54, 156, 255] => "Purple color".to_string(),
+                [255, 255, 255, 255] => "White color".to_string(),
+                [41, 37, 33, 255] => "Black color".to_string(),
+                _ => "Custom color".to_string(),
+            },
+            ToolbarItem::Thickness(2) => "Thin (2 px)".to_string(),
+            ToolbarItem::Thickness(4) => "Medium (4 px)".to_string(),
+            ToolbarItem::Thickness(8) => "Thick (8 px)".to_string(),
+            ToolbarItem::Thickness(value) => format!("{value} px thickness"),
         });
         if let Some(label) = tooltip {
             let button = self
@@ -444,32 +523,41 @@ impl Toolbar {
                 .iter()
                 .find(|button| Some(button.item) == self.hovered_item)
                 .expect("hovered toolbar item must have a button");
-            let tooltip_width = scale(label.len() as i32 * 7 + 16);
+            let margin = scale(6);
+            let tooltip_width = scale(label.len() as i32 * 7 + 16)
+                .min((self.screen_width - margin * 2).max(scale(80)));
             let tooltip_height = scale(28);
             let tooltip_gap = scale(6);
-            let tooltip_rect = if self.tool_bounds.contains(button.rect.left, button.rect.top) {
-                let place_right = self.tool_bounds.left <= self.action_bounds.left;
-                let left = if place_right {
-                    self.tool_bounds.right + tooltip_gap
+            let is_tool_button = self.tool_bounds.contains(button.rect.left, button.rect.top);
+            let (preferred_left, preferred_top) = if is_tool_button {
+                let right = self.tool_bounds.right + tooltip_gap;
+                let left = self.tool_bounds.left - tooltip_gap - tooltip_width;
+                let x = if right + tooltip_width <= self.screen_width - margin {
+                    right
                 } else {
-                    self.tool_bounds.left - tooltip_gap - tooltip_width
+                    left
                 };
-                Rect::new(
-                    left,
+                (
+                    x,
                     (button.rect.top + button.rect.bottom - tooltip_height) / 2,
-                    left + tooltip_width,
-                    (button.rect.top + button.rect.bottom + tooltip_height) / 2,
                 )
             } else {
-                let left = ((button.rect.left + button.rect.right - tooltip_width) / 2)
-                    .max(self.action_bounds.left);
-                Rect::new(
-                    left,
-                    self.action_bounds.top - tooltip_gap - tooltip_height,
-                    left + tooltip_width,
-                    self.action_bounds.top - tooltip_gap,
+                let above = self.action_bounds.top - tooltip_gap - tooltip_height;
+                let below = self.action_bounds.bottom + tooltip_gap;
+                (
+                    (button.rect.left + button.rect.right - tooltip_width) / 2,
+                    if above >= margin { above } else { below },
                 )
             };
+            let left = preferred_left.clamp(
+                margin,
+                (self.screen_width - tooltip_width - margin).max(margin),
+            );
+            let top = preferred_top.clamp(
+                margin,
+                (self.screen_height - tooltip_height - margin).max(margin),
+            );
+            let tooltip_rect = Rect::new(left, top, left + tooltip_width, top + tooltip_height);
             draw_rounded(&tooltip_rect, panel_bg, accent, scale(5));
 
             let tooltip_face: Vec<u16> = "Segoe UI\0".encode_utf16().collect();
@@ -514,5 +602,63 @@ impl Toolbar {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn assert_in_screen(rect: Rect, width: i32, height: i32) {
+        assert!(rect.left >= 0 && rect.top >= 0, "{rect:?}");
+        assert!(rect.right <= width && rect.bottom <= height, "{rect:?}");
+    }
+
+    #[test]
+    fn standard_layout_joins_at_the_selection_bottom_right() {
+        let selection = Rect::new(200, 100, 800, 600);
+        let toolbar = Toolbar::layout(
+            &selection,
+            ToolKind::Rectangle,
+            PRESET_COLORS[0],
+            3,
+            true,
+            true,
+            1920,
+            1080,
+            true,
+            true,
+            96,
+        );
+
+        assert_eq!(toolbar.tool_bounds.left, selection.right);
+        assert_eq!(toolbar.tool_bounds.bottom, selection.bottom);
+        assert_eq!(toolbar.tool_bounds.right, toolbar.action_bounds.right);
+        assert_eq!(toolbar.tool_bounds.bottom, toolbar.action_bounds.top);
+        assert_in_screen(toolbar.tool_bounds, 1920, 1080);
+        assert_in_screen(toolbar.action_bounds, 1920, 1080);
+    }
+
+    #[test]
+    fn constrained_layout_clamps_one_shared_corner() {
+        let selection = Rect::new(600, 450, 630, 470);
+        let toolbar = Toolbar::layout(
+            &selection,
+            ToolKind::Rectangle,
+            PRESET_COLORS[0],
+            3,
+            true,
+            true,
+            640,
+            480,
+            false,
+            false,
+            96,
+        );
+
+        assert_eq!(toolbar.tool_bounds.right, toolbar.action_bounds.right);
+        assert_eq!(toolbar.tool_bounds.bottom, toolbar.action_bounds.top);
+        assert_in_screen(toolbar.tool_bounds, 640, 480);
+        assert_in_screen(toolbar.action_bounds, 640, 480);
     }
 }

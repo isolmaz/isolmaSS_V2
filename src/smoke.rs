@@ -282,21 +282,23 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     println!("  -> Slice A5: PASSED");
 
     // ------------------------------------------------------------
-    // Slice A6: Selection Commit & Floating Toolbar Shell
+    // Slice A6: Selection Commit & L Toolbar
     // ------------------------------------------------------------
-    println!("\n[Slice A6] Testing Selection Commit & Lightshot-Style Toolbar Layout...");
+    println!("\n[Slice A6] Testing Selection Commit & L Toolbar Layout...");
     let tb = Toolbar::layout(
         &selection,
         ToolKind::Rectangle,
         PRESET_COLORS[0],
         3,
+        true,
+        true,
         capture.width,
         capture.height,
         true,
         false,
         96,
     );
-    assert_eq!(tb.buttons.len(), 22); // tools/history + swatches/thickness/actions
+    assert_eq!(tb.buttons.len(), 23); // Select/drawing/history + swatches/thickness/actions
     assert!(tb.tool_bounds.left >= 0);
     assert!(tb.tool_bounds.bottom <= capture.height);
     assert!(tb.action_bounds.left >= 0);
@@ -310,7 +312,7 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     );
     assert_eq!(
         tb.hit_test(btn_center),
-        Some(ToolbarItem::Tool(ToolKind::Rectangle))
+        Some(ToolbarItem::Tool(ToolKind::Select))
     );
 
     let copy_btn = tb
@@ -327,7 +329,7 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         Some(ToolbarItem::Action(ToolbarAction::Copy))
     );
     println!(
-        "  - Toolbar layout: side tool rail + bottom action strip, {} controls aligned.",
+        "  - Toolbar layout: coherent bottom-up L, {} controls aligned.",
         tb.buttons.len()
     );
     println!("  -> Slice A6: PASSED");
@@ -414,9 +416,9 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     println!("  -> Slice A11: PASSED");
 
     // ------------------------------------------------------------
-    // Slice A12: Universal Auto-Select & Manipulation
+    // Slice A12: Explicit Select & Manipulation
     // ------------------------------------------------------------
-    println!("\n[Slice A12] Testing Universal Auto-Select & Manipulation...");
+    println!("\n[Slice A12] Testing Explicit Select & Manipulation...");
     let objects = [rect_obj.clone(), arrow_obj.clone()];
     let hit_id = objects
         .iter()
@@ -600,7 +602,7 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     println!("  -> Slice B3: PASSED");
 
     // ------------------------------------------------------------
-    // Slice B4: Minimal Native Settings Window & Model
+    // Slice B4: Simple/Advanced Native Settings Window & Model
     // ------------------------------------------------------------
     println!("\n[Slice B4] Testing Settings Model & JSON Serialization...");
     let default_settings = Settings::default();
@@ -871,9 +873,9 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // ------------------------------------------------------------
-    // Slice C2: Selection Border Drag-to-Move & Resize
+    // Slice C2: Select-Only Region Move & Resize
     // ------------------------------------------------------------
-    println!("\n[Slice C2] Testing Selection Border Drag-to-Move & Corner Resize...");
+    println!("\n[Slice C2] Testing Select-Only Region Move & Corner Resize...");
     let sel = Rect::new(100, 100, 300, 200);
 
     // Corner handles (8x8 px centered on vertices, half_h = 4)
@@ -947,7 +949,7 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(translated_bounds.right, orig_bounds.right + dx);
     assert_eq!(translated_bounds.bottom, orig_bounds.bottom + dy);
     println!(
-        "  -> Slice C2: PASSED (Selection border drag-to-move & corner resize hit zones verified)"
+        "  -> Slice C2: PASSED (Select-only region move and corner resize hit zones verified)"
     );
 
     // ------------------------------------------------------------

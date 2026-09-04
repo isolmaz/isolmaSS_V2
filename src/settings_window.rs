@@ -8,7 +8,7 @@ use windows::Win32::Graphics::Gdi::{COLOR_WINDOW, HBRUSH};
 use windows::Win32::UI::Input::KeyboardAndMouse::{SetFocus, VK_ESCAPE};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetMessageW,
-    GetWindowLongPtrW, IDC_ARROW, MSG, PostQuitMessage, RegisterClassExW, SW_SHOW,
+    GetWindowLongPtrW, IDC_ARROW, MSG, PostQuitMessage, RegisterClassExW, SW_HIDE, SW_SHOW,
     SetForegroundWindow, SetWindowLongPtrW, ShowWindow, TranslateMessage, WM_CLOSE, WM_DESTROY,
     WM_KEYDOWN, WNDCLASSEXW,
 };
@@ -16,21 +16,31 @@ use windows::core::{PCWSTR, Result, w};
 
 const SETTINGS_CLASS_NAME: PCWSTR = w!("isolmaSS_SettingsClass");
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsView {
+    Simple,
+    Advanced,
+}
+
 pub struct SettingsWindowState {
     settings: Settings,
     saved: bool,
     original_start_with_windows: bool,
+    active_view: SettingsView,
     dpi: u32,
     font: windows::Win32::Graphics::Gdi::HFONT,
+    title_font: windows::Win32::Graphics::Gdi::HFONT,
 }
 
 impl Drop for SettingsWindowState {
     fn drop(&mut self) {
-        if !self.font.is_invalid() {
-            unsafe {
-                let _ = windows::Win32::Graphics::Gdi::DeleteObject(
-                    windows::Win32::Graphics::Gdi::HGDIOBJ(self.font.0),
-                );
+        for font in [self.font, self.title_font] {
+            if !font.is_invalid() {
+                unsafe {
+                    let _ = windows::Win32::Graphics::Gdi::DeleteObject(
+                        windows::Win32::Graphics::Gdi::HGDIOBJ(font.0),
+                    );
+                }
             }
         }
     }
@@ -41,6 +51,8 @@ const ID_CANCEL: i32 = 101;
 const ID_BROWSE: i32 = 102;
 const ID_CHECK_UPDATE: i32 = 103;
 const ID_FOLDER_LABEL: i32 = 104;
+const ID_VIEW_SIMPLE: i32 = 105;
+const ID_VIEW_ADVANCED: i32 = 106;
 const ID_HOTKEY_PRINT: i32 = 200;
 const ID_HOTKEY_CTRL_SHIFT_S: i32 = 201;
 const ID_HOTKEY_ALT_PRINT: i32 = 202;
@@ -57,7 +69,7 @@ const ID_FORMAT_PNG: i32 = 600;
 const ID_FORMAT_JPEG: i32 = 601;
 const ID_QUALITY_FIRST: i32 = 610;
 const SETTINGS_WIDTH: i32 = 720;
-const SETTINGS_HEIGHT: i32 = 760;
+const SETTINGS_HEIGHT: i32 = 720;
 
 fn scale(value: i32, dpi: u32) -> i32 {
     value * dpi as i32 / 96
@@ -120,15 +132,15 @@ fn move_control(hwnd: HWND, id: i32, x: i32, y: i32, width: i32, height: i32, dp
     }
 }
 
-fn create_settings_font(dpi: u32) -> windows::Win32::Graphics::Gdi::HFONT {
+fn create_ui_font(dpi: u32, size: i32, weight: i32) -> windows::Win32::Graphics::Gdi::HFONT {
     let face = wide_string("Segoe UI");
     unsafe {
         windows::Win32::Graphics::Gdi::CreateFontW(
-            -scale(9, dpi),
+            -scale(size, dpi),
             0,
             0,
             0,
-            windows::Win32::Graphics::Gdi::FW_NORMAL.0 as i32,
+            weight,
             0,
             0,
             0,
@@ -140,6 +152,14 @@ fn create_settings_font(dpi: u32) -> windows::Win32::Graphics::Gdi::HFONT {
             PCWSTR(face.as_ptr()),
         )
     }
+}
+
+fn create_settings_font(dpi: u32) -> windows::Win32::Graphics::Gdi::HFONT {
+    create_ui_font(dpi, 9, windows::Win32::Graphics::Gdi::FW_NORMAL.0 as i32)
+}
+
+fn create_title_font(dpi: u32) -> windows::Win32::Graphics::Gdi::HFONT {
+    create_ui_font(dpi, 18, 600)
 }
 
 fn set_controls_font(hwnd: HWND, font: windows::Win32::Graphics::Gdi::HFONT) {
@@ -158,95 +178,180 @@ fn set_controls_font(hwnd: HWND, font: windows::Win32::Graphics::Gdi::HFONT) {
     }
 }
 
+fn set_control_font(hwnd: HWND, id: i32, font: windows::Win32::Graphics::Gdi::HFONT) {
+    if let Ok(control) = unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgItem(hwnd, id) } {
+        unsafe {
+            windows::Win32::UI::WindowsAndMessaging::SendMessageW(
+                control,
+                windows::Win32::UI::WindowsAndMessaging::WM_SETFONT,
+                WPARAM(font.0 as usize),
+                LPARAM(1),
+            );
+        }
+    }
+}
+
 fn layout_controls(hwnd: HWND, dpi: u32) {
     let row = 24;
-    move_control(hwnd, 700, 24, 16, 670, 30, dpi);
-    move_control(hwnd, 709, 24, 46, 670, 22, dpi);
+    move_control(hwnd, 700, 24, 16, 670, 32, dpi);
+    move_control(hwnd, 709, 24, 50, 670, 22, dpi);
+    move_control(hwnd, ID_VIEW_SIMPLE, 24, 80, 152, 38, dpi);
+    move_control(hwnd, ID_VIEW_ADVANCED, 182, 80, 152, 38, dpi);
 
-    move_control(hwnd, 710, 16, 76, 688, 72, dpi);
-    move_control(hwnd, 701, 34, 101, 116, row, dpi);
-    move_control(hwnd, ID_HOTKEY_PRINT, 154, 99, 116, row, dpi);
-    move_control(hwnd, ID_HOTKEY_CTRL_SHIFT_S, 276, 99, 132, row, dpi);
-    move_control(hwnd, ID_HOTKEY_ALT_PRINT, 414, 99, 146, row, dpi);
-
-    move_control(hwnd, 711, 16, 158, 688, 196, dpi);
-    move_control(hwnd, 702, 34, 183, 116, row, dpi);
-    move_control(hwnd, ID_FOLDER_LABEL, 154, 183, 424, row, dpi);
-    move_control(hwnd, ID_BROWSE, 586, 180, 96, 29, dpi);
-    move_control(hwnd, 703, 34, 222, 116, row, dpi);
-    for index in 0..PRESET_COLORS.len() {
+    move_control(hwnd, 710, 16, 132, 688, 118, dpi);
+    move_control(hwnd, 701, 34, 157, 116, row, dpi);
+    move_control(hwnd, ID_HOTKEY_PRINT, 154, 155, 116, 25, dpi);
+    move_control(hwnd, ID_HOTKEY_CTRL_SHIFT_S, 276, 155, 132, 25, dpi);
+    move_control(hwnd, ID_HOTKEY_ALT_PRINT, 414, 155, 146, 25, dpi);
+    move_control(hwnd, 705, 34, 199, 116, row, dpi);
+    for index in 0..4 {
         move_control(
             hwnd,
-            ID_COLOR_FIRST + index as i32,
-            154 + (index as i32 % 4) * 126,
-            220 + (index as i32 / 4) * 28,
-            120,
+            ID_DELAY_FIRST + index,
+            154 + index * 104,
+            197,
+            98,
             25,
             dpi,
         );
     }
-    move_control(hwnd, 704, 34, 282, 116, row, dpi);
-    for index in 0..PRESET_THICKNESSES.len() {
-        move_control(
-            hwnd,
-            ID_THICKNESS_FIRST + index as i32,
-            154 + index as i32 * 98,
-            280,
-            90,
-            25,
-            dpi,
-        );
-    }
-    move_control(hwnd, 706, 34, 319, 116, row, dpi);
-    move_control(hwnd, ID_FORMAT_PNG, 154, 317, 74, 25, dpi);
-    move_control(hwnd, ID_FORMAT_JPEG, 234, 317, 82, 25, dpi);
-    move_control(hwnd, 707, 342, 319, 62, row, dpi);
+
+    move_control(hwnd, 711, 16, 262, 688, 148, dpi);
+    move_control(hwnd, 702, 34, 288, 116, row, dpi);
+    move_control(hwnd, ID_FOLDER_LABEL, 154, 288, 424, row, dpi);
+    move_control(hwnd, ID_BROWSE, 586, 285, 96, 29, dpi);
+    move_control(hwnd, 706, 34, 330, 116, row, dpi);
+    move_control(hwnd, ID_FORMAT_PNG, 154, 328, 74, 25, dpi);
+    move_control(hwnd, ID_FORMAT_JPEG, 234, 328, 82, 25, dpi);
+    move_control(hwnd, 707, 342, 330, 62, row, dpi);
     for index in 0..3 {
         move_control(
             hwnd,
             ID_QUALITY_FIRST + index,
             408 + index * 72,
-            317,
+            328,
             66,
             25,
             dpi,
         );
     }
 
-    move_control(hwnd, 712, 16, 364, 688, 184, dpi);
-    move_control(hwnd, 705, 34, 389, 116, row, dpi);
-    for index in 0..4 {
+    move_control(hwnd, 712, 16, 422, 688, 112, dpi);
+    move_control(hwnd, ID_WINDOW_SNAP, 34, 450, 630, 27, dpi);
+    move_control(hwnd, ID_CLOSE_AFTER_ACTION, 34, 488, 630, 27, dpi);
+
+    move_control(hwnd, 713, 16, 132, 688, 194, dpi);
+    move_control(hwnd, 703, 34, 159, 116, row, dpi);
+    for index in 0..PRESET_COLORS.len() {
         move_control(
             hwnd,
-            ID_DELAY_FIRST + index,
-            154 + index * 104,
-            387,
-            98,
+            ID_COLOR_FIRST + index as i32,
+            154 + (index as i32 % 4) * 126,
+            157 + (index as i32 / 4) * 30,
+            120,
             25,
             dpi,
         );
     }
-    for (index, id) in [
+    move_control(hwnd, 704, 34, 267, 116, row, dpi);
+    for index in 0..PRESET_THICKNESSES.len() {
+        move_control(
+            hwnd,
+            ID_THICKNESS_FIRST + index as i32,
+            154 + index as i32 * 98,
+            265,
+            90,
+            25,
+            dpi,
+        );
+    }
+
+    move_control(hwnd, 714, 16, 338, 688, 104, dpi);
+    move_control(hwnd, ID_START_WITH_WINDOWS, 34, 366, 630, 27, dpi);
+    move_control(hwnd, ID_NOTIFY_AFTER_SAVE, 34, 402, 630, 27, dpi);
+
+    move_control(hwnd, 715, 16, 454, 688, 150, dpi);
+    move_control(hwnd, ID_CHECK_UPDATES, 34, 480, 630, 27, dpi);
+    move_control(hwnd, ID_AUTO_INSTALL, 34, 514, 630, 27, dpi);
+    move_control(hwnd, ID_CHECK_UPDATE, 34, 553, 148, 30, dpi);
+    move_control(hwnd, 708, 196, 548, 486, 44, dpi);
+
+    move_control(hwnd, 716, 16, 612, 688, 58, dpi);
+    move_control(hwnd, ID_SAVE, 456, 626, 128, 36, dpi);
+    move_control(hwnd, ID_CANCEL, 594, 626, 96, 36, dpi);
+}
+
+fn show_controls(hwnd: HWND, ids: &[i32], show: bool) {
+    for id in ids {
+        if let Ok(control) =
+            unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgItem(hwnd, *id) }
+        {
+            unsafe {
+                let _ = ShowWindow(control, if show { SW_SHOW } else { SW_HIDE });
+            }
+        }
+    }
+}
+
+fn set_active_view(hwnd: HWND, view: SettingsView) {
+    const SIMPLE_CONTROLS: &[i32] = &[
+        710,
+        711,
+        712,
+        701,
+        702,
+        705,
+        706,
+        707,
+        ID_FOLDER_LABEL,
+        ID_BROWSE,
+        ID_HOTKEY_PRINT,
+        ID_HOTKEY_CTRL_SHIFT_S,
+        ID_HOTKEY_ALT_PRINT,
+        ID_FORMAT_PNG,
+        ID_FORMAT_JPEG,
         ID_WINDOW_SNAP,
         ID_CLOSE_AFTER_ACTION,
+    ];
+    const ADVANCED_CONTROLS: &[i32] = &[
+        713,
+        714,
+        715,
+        703,
+        704,
         ID_START_WITH_WINDOWS,
         ID_NOTIFY_AFTER_SAVE,
         ID_CHECK_UPDATES,
         ID_AUTO_INSTALL,
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let column = index as i32 % 2;
-        let line = index as i32 / 2;
-        move_control(hwnd, id, 34 + column * 330, 426 + line * 34, 318, 27, dpi);
-    }
+        ID_CHECK_UPDATE,
+        708,
+    ];
 
-    move_control(hwnd, 713, 16, 558, 688, 104, dpi);
-    move_control(hwnd, ID_CHECK_UPDATE, 34, 584, 148, 30, dpi);
-    move_control(hwnd, 708, 196, 579, 486, 52, dpi);
-    move_control(hwnd, ID_SAVE, 466, 682, 118, 34, dpi);
-    move_control(hwnd, ID_CANCEL, 594, 682, 96, 34, dpi);
+    let simple = view == SettingsView::Simple;
+    show_controls(hwnd, SIMPLE_CONTROLS, simple);
+    show_controls(hwnd, ADVANCED_CONTROLS, !simple);
+    for id in ID_DELAY_FIRST..=ID_DELAY_FIRST + 3 {
+        show_controls(hwnd, &[id], simple);
+    }
+    for id in ID_QUALITY_FIRST..=ID_QUALITY_FIRST + 2 {
+        show_controls(hwnd, &[id], simple);
+    }
+    for id in ID_COLOR_FIRST..=ID_COLOR_FIRST + PRESET_COLORS.len() as i32 - 1 {
+        show_controls(hwnd, &[id], !simple);
+    }
+    for id in ID_THICKNESS_FIRST..=ID_THICKNESS_FIRST + PRESET_THICKNESSES.len() as i32 - 1 {
+        show_controls(hwnd, &[id], !simple);
+    }
+    check_radio(
+        hwnd,
+        ID_VIEW_SIMPLE,
+        ID_VIEW_ADVANCED,
+        if simple {
+            ID_VIEW_SIMPLE
+        } else {
+            ID_VIEW_ADVANCED
+        },
+    );
 }
 
 fn set_check(hwnd: HWND, id: i32, checked: bool) {
@@ -388,11 +493,30 @@ fn choose_folder(owner: HWND) -> Option<PathBuf> {
 
 fn create_settings_controls(hwnd: HWND) -> Result<()> {
     use windows::Win32::UI::WindowsAndMessaging::{
-        BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, WS_GROUP, WS_TABSTOP,
+        BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON, BS_DEFPUSHBUTTON, BS_GROUPBOX, BS_PUSHBUTTON,
+        BS_PUSHLIKE, WS_GROUP, WS_TABSTOP,
     };
     let label = |id, text| create_control(hwnd, w!("STATIC"), text, Default::default(), id);
 
     label(700, "isolmaSS Settings")?;
+    label(
+        709,
+        "Capture quickly with everyday options, or fine-tune behavior in Advanced.",
+    )?;
+    create_button(
+        hwnd,
+        ID_VIEW_SIMPLE,
+        "&Simple",
+        BS_AUTORADIOBUTTON | BS_PUSHLIKE | WS_GROUP.0 as i32 | WS_TABSTOP.0 as i32,
+    )?;
+    create_button(
+        hwnd,
+        ID_VIEW_ADVANCED,
+        "&Advanced",
+        BS_AUTORADIOBUTTON | BS_PUSHLIKE | WS_TABSTOP.0 as i32,
+    )?;
+
+    create_button(hwnd, 710, "Capture", BS_GROUPBOX)?;
     label(701, "Global hotkey")?;
     create_button(
         hwnd,
@@ -412,7 +536,26 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
         "Alt+PrintScreen",
         BS_AUTORADIOBUTTON | WS_TABSTOP.0 as i32,
     )?;
+    label(705, "Capture delay")?;
+    for (index, name) in ["None", "1 second", "3 seconds", "5 seconds"]
+        .into_iter()
+        .enumerate()
+    {
+        create_button(
+            hwnd,
+            ID_DELAY_FIRST + index as i32,
+            name,
+            BS_AUTORADIOBUTTON
+                | if index == 0 {
+                    WS_GROUP.0 as i32
+                } else {
+                    Default::default()
+                }
+                | WS_TABSTOP.0 as i32,
+        )?;
+    }
 
+    create_button(hwnd, 711, "Saving", BS_GROUPBOX)?;
     label(702, "Save folder")?;
     label(ID_FOLDER_LABEL, "")?;
     create_button(
@@ -421,7 +564,51 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
         "Browse...",
         BS_PUSHBUTTON | WS_TABSTOP.0 as i32,
     )?;
+    label(706, "Image format")?;
+    create_button(
+        hwnd,
+        ID_FORMAT_PNG,
+        "PNG",
+        BS_AUTORADIOBUTTON | WS_GROUP.0 as i32 | WS_TABSTOP.0 as i32,
+    )?;
+    create_button(
+        hwnd,
+        ID_FORMAT_JPEG,
+        "JPEG",
+        BS_AUTORADIOBUTTON | WS_TABSTOP.0 as i32,
+    )?;
+    label(707, "JPEG quality")?;
+    for (index, quality) in [80, 90, 100].into_iter().enumerate() {
+        let label = quality.to_string();
+        create_button(
+            hwnd,
+            ID_QUALITY_FIRST + index as i32,
+            &label,
+            BS_AUTORADIOBUTTON
+                | if index == 0 {
+                    WS_GROUP.0 as i32
+                } else {
+                    Default::default()
+                }
+                | WS_TABSTOP.0 as i32,
+        )?;
+    }
 
+    create_button(hwnd, 712, "After capture", BS_GROUPBOX)?;
+    create_button(
+        hwnd,
+        ID_WINDOW_SNAP,
+        "Enable single-click window snap",
+        BS_AUTOCHECKBOX | WS_GROUP.0 as i32 | WS_TABSTOP.0 as i32,
+    )?;
+    create_button(
+        hwnd,
+        ID_CLOSE_AFTER_ACTION,
+        "Close overlay after Copy or Save",
+        BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32,
+    )?;
+
+    create_button(hwnd, 713, "Annotation defaults", BS_GROUPBOX)?;
     label(703, "Default color")?;
     for (index, name) in [
         "Red", "Orange", "Yellow", "Green", "Blue", "Purple", "White", "Black",
@@ -442,7 +629,6 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
                 | WS_TABSTOP.0 as i32,
         )?;
     }
-
     label(704, "Line thickness")?;
     for (index, value) in PRESET_THICKNESSES.iter().enumerate() {
         let label = format!("{value} px");
@@ -460,71 +646,33 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
         )?;
     }
 
-    label(705, "Capture delay")?;
-    for (index, name) in ["None", "1 second", "3 seconds", "5 seconds"]
-        .into_iter()
-        .enumerate()
-    {
-        create_button(
-            hwnd,
-            ID_DELAY_FIRST + index as i32,
-            name,
-            BS_AUTORADIOBUTTON
-                | if index == 0 {
-                    WS_GROUP.0 as i32
-                } else {
-                    Default::default()
-                }
-                | WS_TABSTOP.0 as i32,
-        )?;
-    }
-
-    label(706, "Image format")?;
+    create_button(hwnd, 714, "Windows", BS_GROUPBOX)?;
     create_button(
         hwnd,
-        ID_FORMAT_PNG,
-        "PNG",
-        BS_AUTORADIOBUTTON | WS_GROUP.0 as i32 | WS_TABSTOP.0 as i32,
+        ID_START_WITH_WINDOWS,
+        "Start isolmaSS when I sign in to Windows",
+        BS_AUTOCHECKBOX | WS_GROUP.0 as i32 | WS_TABSTOP.0 as i32,
     )?;
     create_button(
         hwnd,
-        ID_FORMAT_JPEG,
-        "JPEG",
-        BS_AUTORADIOBUTTON | WS_TABSTOP.0 as i32,
+        ID_NOTIFY_AFTER_SAVE,
+        "Show a notification after saving",
+        BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32,
     )?;
-    label(707, "Quality")?;
-    for (index, quality) in [80, 90, 100].into_iter().enumerate() {
-        let label = quality.to_string();
-        create_button(
-            hwnd,
-            ID_QUALITY_FIRST + index as i32,
-            &label,
-            BS_AUTORADIOBUTTON
-                | if index == 0 {
-                    WS_GROUP.0 as i32
-                } else {
-                    Default::default()
-                }
-                | WS_TABSTOP.0 as i32,
-        )?;
-    }
 
-    for (id, text) in [
-        (ID_WINDOW_SNAP, "Enable single-click window snap"),
-        (ID_CLOSE_AFTER_ACTION, "Close overlay after Copy or Save"),
-        (
-            ID_START_WITH_WINDOWS,
-            "Start isolmaSS when I sign in to Windows",
-        ),
-        (ID_NOTIFY_AFTER_SAVE, "Show a notification after saving"),
-        (ID_CHECK_UPDATES, "Check for updates automatically"),
-        (
-            ID_AUTO_INSTALL,
-            "Automatically install verified signed updates",
-        ),
-    ] {
-        create_button(hwnd, id, text, BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32)?;
-    }
+    create_button(hwnd, 715, "Updates", BS_GROUPBOX)?;
+    create_button(
+        hwnd,
+        ID_CHECK_UPDATES,
+        "Check for updates automatically",
+        BS_AUTOCHECKBOX | WS_GROUP.0 as i32 | WS_TABSTOP.0 as i32,
+    )?;
+    create_button(
+        hwnd,
+        ID_AUTO_INSTALL,
+        "Automatically install verified signed updates",
+        BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32,
+    )?;
     create_button(
         hwnd,
         ID_CHECK_UPDATE,
@@ -533,13 +681,15 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
     )?;
     label(
         708,
-        "Updates require HTTPS, a GitHub SHA-256 digest, and a valid Authenticode signature before installation.",
+        "Manual and automatic installs require HTTPS, a GitHub SHA-256 digest, and a valid Authenticode signature.",
     )?;
+
+    create_button(hwnd, 716, "", BS_GROUPBOX)?;
     create_button(
         hwnd,
         ID_SAVE,
         "Save & Apply",
-        BS_DEFPUSHBUTTON | WS_TABSTOP.0 as i32,
+        BS_DEFPUSHBUTTON | WS_GROUP.0 as i32 | WS_TABSTOP.0 as i32,
     )?;
     create_button(
         hwnd,
@@ -552,6 +702,14 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
 
 fn apply_button_action(hwnd: HWND, state: &mut SettingsWindowState, id: i32) {
     match id {
+        ID_VIEW_SIMPLE => {
+            state.active_view = SettingsView::Simple;
+            set_active_view(hwnd, state.active_view);
+        }
+        ID_VIEW_ADVANCED => {
+            state.active_view = SettingsView::Advanced;
+            set_active_view(hwnd, state.active_view);
+        }
         ID_HOTKEY_PRINT => state.settings.hotkey = HotkeyConfig::default(),
         ID_HOTKEY_CTRL_SHIFT_S => state.settings.hotkey = HotkeyConfig::fallback(),
         ID_HOTKEY_ALT_PRINT => state.settings.hotkey = HotkeyConfig::alt_print_screen(),
@@ -693,14 +851,19 @@ unsafe extern "system" fn settings_wnd_proc(
                     );
                 }
                 let new_font = create_settings_font(state.dpi);
+                let new_title_font = create_title_font(state.dpi);
                 let old_font = std::mem::replace(&mut state.font, new_font);
+                let old_title_font = std::mem::replace(&mut state.title_font, new_title_font);
                 set_controls_font(hwnd, new_font);
+                set_control_font(hwnd, 700, new_title_font);
                 layout_controls(hwnd, state.dpi);
-                if !old_font.is_invalid() {
-                    unsafe {
-                        let _ = windows::Win32::Graphics::Gdi::DeleteObject(
-                            windows::Win32::Graphics::Gdi::HGDIOBJ(old_font.0),
-                        );
+                for font in [old_font, old_title_font] {
+                    if !font.is_invalid() {
+                        unsafe {
+                            let _ = windows::Win32::Graphics::Gdi::DeleteObject(
+                                windows::Win32::Graphics::Gdi::HGDIOBJ(font.0),
+                            );
+                        }
                     }
                 }
             }
@@ -761,8 +924,10 @@ pub fn show_settings_dialog(current: &Settings) -> Result<Option<Settings>> {
         settings: current.clone(),
         saved: false,
         original_start_with_windows: current.start_with_windows,
+        active_view: SettingsView::Simple,
         dpi: 96,
         font: Default::default(),
+        title_font: Default::default(),
     });
     let hwnd = unsafe {
         CreateWindowExW(
@@ -805,15 +970,17 @@ pub fn show_settings_dialog(current: &Settings) -> Result<Option<Settings>> {
         );
     }
     state.font = create_settings_font(state.dpi);
+    state.title_font = create_title_font(state.dpi);
     create_settings_controls(hwnd)?;
     set_controls_font(hwnd, state.font);
+    set_control_font(hwnd, 700, state.title_font);
     layout_controls(hwnd, state.dpi);
     initialize_control_values(hwnd, &state.settings);
+    set_active_view(hwnd, state.active_view);
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
-        if let Ok(first) =
-            windows::Win32::UI::WindowsAndMessaging::GetDlgItem(hwnd, ID_HOTKEY_PRINT)
+        if let Ok(first) = windows::Win32::UI::WindowsAndMessaging::GetDlgItem(hwnd, ID_VIEW_SIMPLE)
         {
             let _ = SetFocus(first);
         }
@@ -821,6 +988,12 @@ pub fn show_settings_dialog(current: &Settings) -> Result<Option<Settings>> {
 
     let mut msg = MSG::default();
     while unsafe { GetMessageW(&mut msg, HWND::default(), 0, 0) }.0 > 0 {
+        if msg.message == WM_KEYDOWN && msg.wParam.0 == VK_ESCAPE.0 as usize {
+            unsafe {
+                let _ = DestroyWindow(hwnd);
+            }
+            continue;
+        }
         if !unsafe { windows::Win32::UI::WindowsAndMessaging::IsDialogMessageW(hwnd, &msg) }
             .as_bool()
         {

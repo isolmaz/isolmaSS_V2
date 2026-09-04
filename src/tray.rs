@@ -9,7 +9,7 @@ use windows::Win32::Foundation::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
     NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIIF_RESPECT_QUIET_TIME, NIM_ADD,
-    NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NOTIFYICON_VERSION_4, NOTIFYICONDATAW,
+    NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT, NOTIFYICON_VERSION_4, NOTIFYICONDATAW,
     Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -18,8 +18,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     MB_ICONERROR, MB_OK, MF_GRAYED, MF_SEPARATOR, MF_STRING, MessageBoxW, PostMessageW,
     PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SetForegroundWindow,
     SetMenuDefaultItem, SetWindowLongPtrW, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TrackPopupMenu, WM_APP, WM_CLOSE, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP,
-    WNDCLASSEXW,
+    TrackPopupMenu, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP,
+    WM_NULL, WM_RBUTTONUP, WNDCLASSEXW,
 };
 use windows::core::{PCWSTR, Result, w};
 
@@ -28,6 +28,8 @@ pub const WM_SHOW_EXISTING: u32 = WM_APP + 102;
 const TRAY_CLASS_NAME: PCWSTR = w!("isolmaSS_TrayClass");
 const TRAY_ICON_ID: u32 = 1001;
 const RESOURCE_ICON_ID: usize = 101;
+// The windows crate does not expose the SDK's `NIN_KEYSELECT` macro.
+const NIN_KEYSELECT_EVENT: u32 = NIN_SELECT + 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrayCommand {
@@ -98,6 +100,42 @@ fn send_command(state: &TrayWindowState, command: TrayCommand) {
     notify_tray_wakeup();
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TrayEventAction {
+    Capture,
+    ContextMenu,
+}
+
+fn decode_tray_event(wparam: usize, lparam: isize) -> (u32, u32, bool) {
+    let packed = lparam as u32;
+    let version_four_icon_id = packed >> 16;
+    if version_four_icon_id != 0 {
+        (packed & 0xffff, version_four_icon_id, true)
+    } else {
+        (packed, wparam as u32, false)
+    }
+}
+
+fn tray_event_action(event: u32, icon_id: u32) -> Option<TrayEventAction> {
+    if icon_id != TRAY_ICON_ID {
+        return None;
+    }
+    match event {
+        WM_LBUTTONUP | WM_LBUTTONDBLCLK | NIN_SELECT | NIN_KEYSELECT_EVENT => {
+            Some(TrayEventAction::Capture)
+        }
+        WM_RBUTTONUP | WM_CONTEXTMENU => Some(TrayEventAction::ContextMenu),
+        _ => None,
+    }
+}
+
+fn callback_point(wparam: WPARAM) -> Option<POINT> {
+    let packed = wparam.0 as u32;
+    let x = (packed as u16 as i16) as i32;
+    let y = ((packed >> 16) as u16 as i16) as i32;
+    (x != -1 || y != -1).then_some(POINT { x, y })
+}
+
 unsafe extern "system" fn tray_wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -131,17 +169,17 @@ unsafe extern "system" fn tray_wnd_proc(
             if state_ptr.is_null() {
                 return LRESULT(0);
             }
-            let packed = lparam.0 as u32;
-            let event = packed & 0xffff;
-            let icon_id = packed >> 16;
-            if icon_id != TRAY_ICON_ID {
-                return LRESULT(0);
-            }
+            let (event, icon_id, is_version_four) = decode_tray_event(wparam.0, lparam.0);
             let state = unsafe { &*state_ptr };
-            match event {
-                WM_LBUTTONUP | WM_LBUTTONDBLCLK => send_command(state, TrayCommand::Capture),
-                WM_RBUTTONUP => show_context_menu(hwnd, state),
-                _ => {}
+            match tray_event_action(event, icon_id) {
+                Some(TrayEventAction::Capture) => send_command(state, TrayCommand::Capture),
+                Some(TrayEventAction::ContextMenu) => {
+                    let anchor = (is_version_four && event == WM_CONTEXTMENU)
+                        .then(|| callback_point(wparam))
+                        .flatten();
+                    show_context_menu(hwnd, state, anchor);
+                }
+                None => {}
             }
             LRESULT(0)
         }
@@ -157,10 +195,12 @@ unsafe extern "system" fn tray_wnd_proc(
     }
 }
 
-fn show_context_menu(hwnd: HWND, state: &TrayWindowState) {
-    let mut point = POINT::default();
-    unsafe {
-        let _ = GetCursorPos(&mut point);
+fn show_context_menu(hwnd: HWND, state: &TrayWindowState, anchor: Option<POINT>) {
+    let mut point = anchor.unwrap_or_default();
+    if anchor.is_none() {
+        unsafe {
+            let _ = GetCursorPos(&mut point);
+        }
     }
     let Ok(menu) = (unsafe { CreatePopupMenu() }) else {
         return;
@@ -200,6 +240,7 @@ fn show_context_menu(hwnd: HWND, state: &TrayWindowState) {
             hwnd,
             None,
         );
+        let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
         let _ = DestroyMenu(menu);
         match selected.0 {
             1 => send_command(state, TrayCommand::Capture),
@@ -344,6 +385,38 @@ pub fn notify_tray_wakeup() {
 mod tests {
     use super::*;
     use std::sync::mpsc::channel;
+
+    #[test]
+    fn version_four_and_legacy_events_dispatch_for_our_icon() {
+        assert_eq!(
+            decode_tray_event(0x0123_0456, (TRAY_ICON_ID << 16 | WM_CONTEXTMENU) as isize),
+            (WM_CONTEXTMENU, TRAY_ICON_ID, true)
+        );
+        assert_eq!(
+            decode_tray_event(TRAY_ICON_ID as usize, WM_RBUTTONUP as isize),
+            (WM_RBUTTONUP, TRAY_ICON_ID, false)
+        );
+
+        for event in [
+            WM_LBUTTONUP,
+            WM_LBUTTONDBLCLK,
+            NIN_SELECT,
+            NIN_KEYSELECT_EVENT,
+        ] {
+            assert_eq!(
+                tray_event_action(event, TRAY_ICON_ID),
+                Some(TrayEventAction::Capture)
+            );
+        }
+        for event in [WM_RBUTTONUP, WM_CONTEXTMENU] {
+            assert_eq!(
+                tray_event_action(event, TRAY_ICON_ID),
+                Some(TrayEventAction::ContextMenu)
+            );
+        }
+        assert_eq!(tray_event_action(NIN_SELECT, TRAY_ICON_ID + 1), None);
+        assert_eq!(tray_event_action(WM_CLOSE, TRAY_ICON_ID), None);
+    }
 
     #[test]
     fn test_tray_manager_lifecycle() {

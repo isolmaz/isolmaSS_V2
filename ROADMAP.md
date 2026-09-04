@@ -4,22 +4,23 @@ This document tracks durable implementation status, outstanding gaps, and future
 
 ## Current Status
 
-- **Phase A — Core capture and annotation:** Implemented. The native capture overlay supports region and window selection, annotation tools, undo/redo, clipboard copy, and hierarchical cancellation.
-- **Phase B — Quality of life:** Implemented. Configurable PNG/JPEG saving, drawing styles, angle/square snapping, native settings, and release-budget checks are present.
-- **Phase C — Production hardening:** C0–C8 are implemented, including keyboard routing and text editing, selection manipulation, interaction polish, GUI-subsystem operation, tray update/recent-capture actions, settings behavior toggles, regression smoke coverage, and synchronized user documentation.
+- **Phase A — Core capture and annotation:** Implemented. The explicit `V` Select tool owns existing-object and screenshot-region editing; drawing tools stay active and do not auto-select newly committed annotations. Selected rectangles, blurs, arrows, pen strokes, and text move from their interiors and resize through type-appropriate handles with one undoable command per completed gesture.
+- **Phase B — Quality of life:** Implemented. Configurable PNG/JPEG saving, contextual named style controls, angle/square snapping, and a 720×720 Simple/Advanced native Settings window are present.
+- **Phase C — Production hardening:** C0–C8 are implemented, including keyboard/text routing, commit-before-copy flattening, bounded bottom-right L-toolbar layout and tooltips, deterministic full-frame rendering, GUI-subsystem operation, tray actions, settings behavior toggles, regression coverage, and synchronized user documentation.
 - **C9 — Packaging and runtime reverification:** Incomplete. Packaging, artifact-size, daemon-memory, shutdown, and console checks passed, but the latency target did not.
 
 ## Verification State
 
 The latest recorded verification is from 2026-09-04:
 
-- `cargo check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (7 passed), the release build, and `cmd /c package.bat` passed after the UI/rendering changes.
-- One post-change `--smoke-test` run exited successfully with `AUTOMATED SMOKE CHECKS PASSED (A1-C8 + C9 packaging checks)`. This command does not verify external runtime budgets or replace interactive UX testing.
-- The release executable measured **531,968 bytes**, below the 2.5 MiB target.
-- The NSIS installer measured **281,904 bytes**, below the 3 MiB target.
+- `cargo fmt --check`, `cargo check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (15 passed), the release build, and `cmd /c package.bat` passed after the UI/rendering changes.
+- `--smoke-test` was intentionally not rerun after UI-automation cleanup; current editor interactions received model/source and non-interactive verification only.
+- The release executable measured **542,720 bytes**, below the 2.5 MiB target.
+- The NSIS installer measured **286,337 bytes**, below the 3 MiB target.
 - During a **60.039-second** daemon sample, the maximum working set was **10.640625 MiB**, below the 15 MiB target.
 - In a targeted runtime scenario, Esc closed the overlay in 15.801 ms, the daemon remained alive, clean `WM_CLOSE` shutdown exited successfully, and no console `HWND` was observed.
-- With MSI Afterburner and RTSS running, a representative native pass created a selection, drew and moved a rectangle annotation, moved and resized the selection, and visually showed only the current selection, annotation, and repositioned toolbar pixels. The visible tray menu exposed update and recent-capture items; Settings opened from it, accepted a temporary JPEG selection, and canceled without saving. This targeted pass is not exhaustive UX coverage.
+- A prior pass with MSI Afterburner and RTSS visually confirmed deterministic rendering during selection, rectangle, and selection-region movement. After cleanup of disruptive UI automation, the current Select/object-transform and L-toolbar changes received model/source and non-interactive build/test verification only; their editor interactions were not runtime-automated.
+- The redesigned 720×720 Settings UI was exercised at 96 DPI in both Simple and Advanced views: all controls were visible without clipping, unsaved state survived view switches, the footer remained available, and Cancel exited normally with `settings.json` byte-identical. No alternate-DPI monitor was available.
 
 ## Open Gap
 
@@ -40,6 +41,6 @@ These remain intentionally outside the completed A–C scope and should be added
 ## Future Priorities
 
 1. Reduce PrintScreen-to-visible-overlay latency to ≤30 ms without weakening capture correctness, then repeat the full C9 runtime measurement.
-2. Complete an interactive manual pass of annotation, Settings, and tray-menu workflows; keep its results distinct from automated smoke coverage.
+2. Complete a manual editor pass for every Select/object-transform and contextual-toolbar path without global-key automation; Settings has already been exercised at 96 DPI, but alternate-DPI coverage remains open.
 3. Re-run release artifact and runtime budgets after relevant source or toolchain changes.
 4. Use real-world feedback to choose among deferred features rather than expanding scope speculatively.

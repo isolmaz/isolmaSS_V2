@@ -8,19 +8,20 @@ See [ROADMAP.md](ROADMAP.md) for the durable phase summary, open latency gap, de
 
 ### Verification Snapshot — 2026-09-04
 
+- `cargo fmt --check`: passed after applying the formatter.
 - `cargo check`: passed.
 - `cargo clippy --all-targets -- -D warnings`: passed.
-- `cargo test`: passed (7 passed, 0 failed).
+- `cargo test`: passed (15 passed, 0 failed).
 - `cargo build --release`: passed.
 - `cmd /c package.bat`: passed, including the strict NSIS installer check.
-- One post-change `--smoke-test` run exited 0 with `AUTOMATED SMOKE CHECKS PASSED (A1-C8 + C9 packaging checks)` and explicitly reported that external runtime budget status is documented separately and is not verified by that command.
-- Release executable: 531,968 bytes (0.507324 MiB), under the 2.5 MiB target.
-- NSIS installer: 281,904 bytes (0.268845 MiB), under the 3 MiB target.
+- `--smoke-test` was intentionally not rerun after UI-automation cleanup; the current editor interactions were not runtime-automated.
+- Release executable: 542,720 bytes (0.517578 MiB), under the 2.5 MiB target.
+- NSIS installer: 286,337 bytes (0.273072 MiB), under the 3 MiB target.
 - Actual daemon sample over 60.039 seconds: 11,157,504 bytes at start, 11,157,504 bytes maximum, and 11,116,544 bytes at end. The 10.640625 MiB maximum is under the 15 MiB target.
 - Actual PrintScreen-to-visible-overlay latency: 48.936 ms. This **does not meet** the ≤30 ms target.
 - In that targeted runtime scenario, Esc closed the overlay in 15.801 ms, the daemon remained alive, clean `WM_CLOSE` shutdown exited with code 0, and no console `HWND` was observed.
 
-A representative native runtime pass ran while MSI Afterburner and RTSS were active: it created a selection, drew and moved a rectangle annotation, moved and resized the selection, and visually showed only the current selection, annotation, and Lightshot-style toolbar pixels. The native tray menu was opened with its update and recent-capture items visible, and Settings was opened from that menu, changed to JPEG, and canceled without saving. This is targeted evidence, not an exhaustive annotation, tooltip, tray-icon, or Settings UX pass. A risky incomplete latency optimization was removed; capture remains on the prior single coherent GDI `BitBlt` path.
+A prior representative native runtime pass ran while MSI Afterburner and RTSS were active: it created a selection, drew and moved a rectangle annotation, moved and resized the selection, and visually showed deterministic full-frame rendering without trails. The current Select/object-transform and L-toolbar changes were verified by model/source checks only; editor interactions were intentionally not runtime-automated after test cleanup. The redesigned 720×720 Settings window was exercised at 96 DPI in both Simple and Advanced views: every control remained visible without clipping, switching views retained unsaved state, the footer remained available, and Cancel exited normally with `settings.json` byte-identical. No alternate-DPI monitor was available. A risky incomplete latency optimization was removed; capture remains on the prior single coherent GDI `BitBlt` path.
 
 ### Phase A — Core Capture & Annotation Loop
 - [x] **A0: Project Scaffold** — Pure Rust binary crate with size-optimized release profile (`opt-level = "z"`, `lto = true`, `panic = "abort"`, `strip = true`).
@@ -29,29 +30,29 @@ A representative native runtime pass ran while MSI Afterburner and RTSS were act
 - [x] **A3: Fullscreen Layered Overlay** — `WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE` window covering all monitors seamlessly.
 - [x] **A4: Drag-to-Select Rectangle** — Real-time mouse tracking and scanline copies reveal undimmed pixels inside the selection.
 - [x] **A5: Single-Click Window Snap** — Topmost window detection via `EnumWindows` + `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)` for pixel-perfect window snapping on click.
-- [x] **A6: Selection Commit & Toolbar Shell** — Compact Lightshot-style tool rail beside the selection and action strip below it, with responsive edge flipping, native icons, color palette, and thickness presets.
+- [x] **A6: Selection Commit & L Toolbar** — One coherent 90° L is anchored at the selection's bottom-right: the right rail is bottom-aligned and ordered bottom-up, while the right-aligned color/style/action strip meets it along the selection bottom. The complete L flips together when screen bounds require it, including high-DPI and small-selection layouts. Every tool, color, thickness, and action has a readable, screen-bounded hover name.
 - [x] **A7: Rectangle Tool** — Draw vector rectangles over selection with crisp borders.
 - [x] **A8: Arrow Tool** — Draw directional arrows with calculated triangular arrowheads.
 - [x] **A9: Pen (Freehand) Tool** — Freehand continuous lines following cursor path.
 - [x] **A10: Text Tool** — Inline text entry at click point with caret indicator, Enter to commit, Esc to cancel.
 - [x] **A11: Blur / Mosaic Tool** — Pixel-block averaging box blur directly on composited buffer; underlying text becomes unreadable.
-- [x] **A12: Universal Auto-Select on Draw** — Objects auto-selected upon creation; click existing object to select, drag to reposition, Delete/Backspace to remove.
+- [x] **A12: Explicit Select Tool** — `V` activates Select at the bottom-nearest rail position. Rectangle, Arrow, Pen, Text, and Blur remain active after each draw and commit without selecting the new object. Only Select can choose, move, resize, restyle, rethicken, or delete existing annotations, manipulate the screenshot selection border, or double-click text to edit it.
 - [x] **A13: Undo / Redo Stack** — Rolling 50-command history with `Ctrl+Z` (Undo) and `Ctrl+Y` (Redo).
-- [x] **A14: Copy to Clipboard** — Flattens selection + annotations into a 32-bit bottom-up DIB (`CF_DIB`) for universal pasting into Paint, Slack, Discord, Office.
+- [x] **A14: Copy to Clipboard** — `Ctrl+C` commits an active text edit first, then flattens the screenshot and annotations—never selection handles—into a 32-bit bottom-up DIB (`CF_DIB`) for universal pasting into Paint, Slack, Discord, and Office.
 - [x] **A15: Hierarchical Escape / Cancel Flow** — `Esc` cleanly cancels text editing first, then deselects object, then cancels selection, then dismisses overlay.
 - [x] **A16: Automated Smoke Checks** — `--smoke-test` exercises core production methods and selected Win32 integration paths; it is not a substitute for interactive end-to-end verification.
 
 ### Phase B — Immediate Quality-of-Life
 - [x] **B1: Save to File (PNG/JPEG via GDI+)** — Save button + `Ctrl+S` exports the composited selection in the configured PNG or JPEG format using native Windows GDI+ with zero external dependencies. Files are saved to the configured folder (default `Pictures\Screenshots`) with timestamped `.png` or `.jpg` names.
-- [x] **B2: Color Palette & Thickness Sub-Bar** — 8 preset colors (Red, Orange, Yellow, Green, Blue, Purple, White, Black) and 3 thickness levels (2px, 4px, 8px). Clicking swatches live-recolors any selected annotation (with Undo/Redo support via `EditCommand::Modify`) and sets default styling for new shapes.
+- [x] **B2: Contextual Style Strip** — Named hover controls expose 8 preset colors (Red, Orange, Yellow, Green, Blue, Purple, White, Black) and 3 named thickness levels (2px, 4px, 8px). Drawing tools show their applicable defaults; Select shows only controls supported by the selected object, while core actions remain available. A completed drag, resize, recolor, or thickness change records one undoable Modify command.
 - [x] **B3: Shift-Key Angle & Square Snapping** — Holding `Shift` during drawing constrains rectangles to a 1:1 square aspect ratio and snaps arrows to 45° angle increments (0°, 45°, 90°, 135°, etc.).
-- [x] **B4: Minimal Native Settings Window** — Native Win32 settings dialog accessible via `--settings`, toolbar button, or `Ctrl+,`. Settings are stored in `%APPDATA%\isolmaSS\settings.json`; tolerant loading falls back to defaults for missing, unreadable, or malformed data. Saving returns `NotFound` when `%APPDATA%` is unavailable, and parent-directory creation and file-write errors propagate to the dialog.
+- [x] **B4: Simple/Advanced Native Settings Window** — A 720×720 native Win32 dialog separates everyday capture/save choices into Simple and annotation, Windows-integration, and update choices into Advanced, with a persistent Save & Apply/Cancel footer and unsaved state retained across view switches. It is accessible via `--settings`, the toolbar, or `Ctrl+,`. Settings remain tolerantly readable and strictly writable with propagated persistence errors.
 - [x] **B5: Build & Budget Checks** — The current release executable and installer are under their size targets, and the measured 60.039-second daemon maximum is under 15 MiB. The separate ≤30 ms PrintScreen-to-overlay target is not met.
 
 ### Phase C — Production Hardening & Critical Fixes
 - [x] **C0: Git & Docs Sync Protocol** — Conventional commit and documentation-sync conventions are defined for Phase C work.
-- [x] **C1: Overlay Keyboard Routing & Text Tool Polish** — Routes overlay keyboard input through `WH_KEYBOARD_LL`. Strict hierarchical Esc dismiss (`TextEditing -> cancel text edit`, `ObjectSelected -> deselect`, `SelectionActive -> cancel selection`, `Idle -> close overlay`). Full text editing support (character insertion at caret, Backspace, Delete, Left/Right navigation, Enter commit/auto-select, blinking caret `|`, and double-click to re-edit existing text objects).
-- [x] **C2: Selection Border Drag-to-Move & Resize** — Explicit 8px border hit band allows dragging anywhere on the border line to smoothly move the selection and translate all child annotations. 4 corner handles (8x8 px) provide diagonal resizing.
+- [x] **C1: Overlay Keyboard Routing & Text Tool Polish** — Routes overlay keyboard input through `WH_KEYBOARD_LL`. Strict hierarchical Esc dismiss (`TextEditing -> cancel text edit`, `ObjectSelected -> deselect`, `SelectionActive -> cancel selection`, `Idle -> close overlay`). Full text editing includes character insertion, Backspace/Delete, caret navigation, Enter commit without auto-selection, a blinking caret, and Select-mode double-click re-editing.
+- [x] **C2: Select-Only Transforms** — In Select mode, every annotation moves from its interior and exposes appropriate handles: rectangle/blur bounds, arrow endpoints, scaled pen points, and proportional text font/position. Safe extents and screenshot bounds are enforced where practical, and mouse-up records exactly one Modify command. The selection region's border move/corner resize behavior is also Select-only.
 - [x] **C3: Tool Interaction UX Pass** — Contextual cursors (`IDC_CROSS`, `IDC_SIZEALL`, `IDC_SIZENWSE`/`IDC_SIZENESW`, `IDC_IBEAM`, `IDC_HAND`/`IDC_ARROW`), dual-tone contrast outline (black outer border + bright accent inner border + white corner handles), distinct active/hover toolbar button states, and >= 3px drag movement threshold.
 - [x] **C4: Pure GUI Subsystem Configuration** — Compiled with `#![windows_subsystem = "windows"]` and calls `AttachConsole(ATTACH_PARENT_PROCESS)` for CLI arguments. PE subsystem inspection is automated, and the targeted daemon runtime check observed no console `HWND`; this is not a complete UI validation.
 - [x] **C5: System Tray Icon & Right-Click Menu** — Persistent notification area icon via `Shell_NotifyIconW`. Left-click or double-click triggers immediate capture. The right-click menu provides **Capture Now**, **Settings...**, **Check for Updates**, up to five **Recent Captures**, and **Exit**. Cleanly deleted with `NIM_DELETE` on shutdown.
@@ -90,6 +91,7 @@ When launched without arguments, `isolmass.exe` runs as a pure background GUI pr
 - **`Ctrl+Y`**: Redo last undone action.
 - **`Ctrl+,`**: Open native Settings dialog.
 - **`Delete` / `Backspace`**: Delete currently selected annotation object.
+- **`V`**: Select Pointer/Select Tool
 - **`R`**: Select Rectangle Tool
 - **`A`**: Select Arrow Tool
 - **`P`**: Select Pen (Freehand) Tool
@@ -101,17 +103,20 @@ When launched without arguments, `isolmass.exe` runs as a pure background GUI pr
 - **`Left` / `Right` Arrows**: Move blinking caret (`|`) position.
 - **`Backspace`**: Delete character before caret.
 - **`Delete`**: Delete character after caret.
-- **`Enter`**: Commit text annotation and auto-select it.
+- **`Enter`**: Commit the text annotation without changing away from the Text tool or selecting the new object.
 - **`Esc`**: Cancel text edit without creating an object.
-- **Double-Click**: Double-clicking an existing committed text annotation re-opens it in text editing mode with the caret at the end.
+- **Double-Click in Select**: Double-clicking an existing committed text annotation re-opens it in text editing mode with the caret at the end.
 
-## Selection Manipulation
-- **Corner Handles (8x8 px)**: Drag diagonally to resize selection.
-- **Border Edge Bands (8 px)**: Drag anywhere along the border line to move the entire selection rectangle and all child annotations smoothly.
-- **Dual-Tone Outline**: 1px black outer border + 2px accent border ensures crisp contrast on 100% white, 100% black, or busy backgrounds.
+## Select Tool and Manipulation
+- **Drawing stays active**: Rectangle, Arrow, Pen, Text, and Blur commit without automatic selection, so repeated drawing needs no tool reactivation.
+- **Interior move**: In Select mode, drag any selected rectangle, blur, arrow, pen stroke, or text object from its interior.
+- **Type-appropriate resize handles**: Resize rectangle/blur bounds, arrow endpoints, scaled pen points, and text position/font proportionally. Safe minimum extents apply, with geometry kept inside the screenshot where practical.
+- **One-step history**: A gesture previews freely but records exactly one undoable Modify command on mouse-up.
+- **Selection region**: Only Select enables the screenshot region's 8px border move band and four corner resize handles; moving it translates contained annotations.
+- **Dual-Tone Outline**: A dark outer border, accent inner border, and visible handles retain contrast on white, black, or busy backgrounds.
 
 ## Settings Dialog
-Available via the tray menu (**Settings...**), the overlay button (**Settings**), the **`Ctrl+,`** shortcut, or the **`--settings`** CLI flag:
+Available via the tray menu (**Settings...**), the overlay button (**Settings**), the **`Ctrl+,`** shortcut, or the **`--settings`** CLI flag. The 720×720 window opens in **Simple** for everyday capture/save settings; **Advanced** exposes annotation defaults, Windows integration, and updates. Switching views preserves unsaved edits, and the Save & Apply/Cancel footer remains available in both views:
 - **Global Hotkey Presets**: `PrintScreen`, `Ctrl+Shift+S`, `Alt+PrintScreen`. The running daemon restarts its listener in place after saving; if registration fails, it restores the previous active and persisted hotkey.
 - **Save Folder**: Displays the current target directory (default: `Pictures\Screenshots`) and provides a native **Browse...** folder picker.
 - **Default Color & Thickness**: Pick default drawing styling.
@@ -133,7 +138,7 @@ Settings are loaded tolerantly: a missing, unreadable, or malformed `%APPDATA%\i
 ```bash
 cargo build --release
 ```
-The resulting executable is located at `target/release/isolmass.exe`. In the 2026-09-04 verified build it was 531,968 bytes; `target/release/isolmass-setup.exe` was 281,904 bytes. These measurements apply only to that source/toolchain build and must be refreshed after later changes.
+The resulting executable is located at `target/release/isolmass.exe`. In the 2026-09-04 verified build it was 542,720 bytes; `target/release/isolmass-setup.exe` was 286,337 bytes. These measurements apply only to that source/toolchain build and must be refreshed after later changes.
 
 ### Automated Smoke Checks
 Run the automated smoke command for core model, persistence, selected Win32 integration, and packaging checks:
