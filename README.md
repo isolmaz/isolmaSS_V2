@@ -10,17 +10,17 @@ See [ROADMAP.md](ROADMAP.md) for the durable phase summary, open latency gap, de
 
 - `cargo check`: passed.
 - `cargo clippy --all-targets -- -D warnings`: passed.
-- `cargo test`: passed (6 passed, 0 failed).
+- `cargo test`: passed (7 passed, 0 failed).
 - `cargo build --release`: passed.
 - `cmd /c package.bat`: passed, including the strict NSIS installer check.
 - One post-change `--smoke-test` run exited 0 with `AUTOMATED SMOKE CHECKS PASSED (A1-C8 + C9 packaging checks)` and explicitly reported that external runtime budget status is documented separately and is not verified by that command.
-- Release executable: 438,784 bytes (0.418457 MiB), under the 2.5 MiB target.
-- NSIS installer: 262,534 bytes (0.250372 MiB), under the 3 MiB target.
+- Release executable: 531,968 bytes (0.507324 MiB), under the 2.5 MiB target.
+- NSIS installer: 281,904 bytes (0.268845 MiB), under the 3 MiB target.
 - Actual daemon sample over 60.039 seconds: 11,157,504 bytes at start, 11,157,504 bytes maximum, and 11,116,544 bytes at end. The 10.640625 MiB maximum is under the 15 MiB target.
 - Actual PrintScreen-to-visible-overlay latency: 48.936 ms. This **does not meet** the ≤30 ms target.
 - In that targeted runtime scenario, Esc closed the overlay in 15.801 ms, the daemon remained alive, clean `WM_CLOSE` shutdown exited with code 0, and no console `HWND` was observed.
 
-This snapshot does not claim that the complete interactive annotation, Settings, or tray-menu UX was manually validated. A risky incomplete latency optimization was removed; capture remains on the prior single coherent GDI `BitBlt` path.
+A representative native runtime pass ran while MSI Afterburner and RTSS were active: it created a selection, drew and moved a rectangle annotation, moved and resized the selection, and visually showed only the current selection, annotation, and Lightshot-style toolbar pixels. The native tray menu was opened with its update and recent-capture items visible, and Settings was opened from that menu, changed to JPEG, and canceled without saving. This is targeted evidence, not an exhaustive annotation, tooltip, tray-icon, or Settings UX pass. A risky incomplete latency optimization was removed; capture remains on the prior single coherent GDI `BitBlt` path.
 
 ### Phase A — Core Capture & Annotation Loop
 - [x] **A0: Project Scaffold** — Pure Rust binary crate with size-optimized release profile (`opt-level = "z"`, `lto = true`, `panic = "abort"`, `strip = true`).
@@ -29,7 +29,7 @@ This snapshot does not claim that the complete interactive annotation, Settings,
 - [x] **A3: Fullscreen Layered Overlay** — `WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE` window covering all monitors seamlessly.
 - [x] **A4: Drag-to-Select Rectangle** — Real-time mouse tracking and scanline copies reveal undimmed pixels inside the selection.
 - [x] **A5: Single-Click Window Snap** — Topmost window detection via `EnumWindows` + `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)` for pixel-perfect window snapping on click.
-- [x] **A6: Selection Commit & Toolbar Shell** — Two-row floating toolbar anchored beneath selection with tool buttons, actions, color palette, and thickness presets.
+- [x] **A6: Selection Commit & Toolbar Shell** — Compact Lightshot-style tool rail beside the selection and action strip below it, with responsive edge flipping, native icons, color palette, and thickness presets.
 - [x] **A7: Rectangle Tool** — Draw vector rectangles over selection with crisp borders.
 - [x] **A8: Arrow Tool** — Draw directional arrows with calculated triangular arrowheads.
 - [x] **A9: Pen (Freehand) Tool** — Freehand continuous lines following cursor path.
@@ -42,7 +42,7 @@ This snapshot does not claim that the complete interactive annotation, Settings,
 - [x] **A16: Automated Smoke Checks** — `--smoke-test` exercises core production methods and selected Win32 integration paths; it is not a substitute for interactive end-to-end verification.
 
 ### Phase B — Immediate Quality-of-Life
-- [x] **B1: Save to File (PNG via GDI+)** — Save button + `Ctrl+S` exports composited selection to PNG using native Windows GDI+ with zero external dependencies. Automatically saved to `Pictures\Screenshots` with timestamped filename `Screenshot_YYYY-MM-DD_HH-MM-SS.png`.
+- [x] **B1: Save to File (PNG/JPEG via GDI+)** — Save button + `Ctrl+S` exports the composited selection in the configured PNG or JPEG format using native Windows GDI+ with zero external dependencies. Files are saved to the configured folder (default `Pictures\Screenshots`) with timestamped `.png` or `.jpg` names.
 - [x] **B2: Color Palette & Thickness Sub-Bar** — 8 preset colors (Red, Orange, Yellow, Green, Blue, Purple, White, Black) and 3 thickness levels (2px, 4px, 8px). Clicking swatches live-recolors any selected annotation (with Undo/Redo support via `EditCommand::Modify`) and sets default styling for new shapes.
 - [x] **B3: Shift-Key Angle & Square Snapping** — Holding `Shift` during drawing constrains rectangles to a 1:1 square aspect ratio and snaps arrows to 45° angle increments (0°, 45°, 90°, 135°, etc.).
 - [x] **B4: Minimal Native Settings Window** — Native Win32 settings dialog accessible via `--settings`, toolbar button, or `Ctrl+,`. Settings are stored in `%APPDATA%\isolmaSS\settings.json`; tolerant loading falls back to defaults for missing, unreadable, or malformed data. Saving returns `NotFound` when `%APPDATA%` is unavailable, and parent-directory creation and file-write errors propagate to the dialog.
@@ -54,7 +54,7 @@ This snapshot does not claim that the complete interactive annotation, Settings,
 - [x] **C2: Selection Border Drag-to-Move & Resize** — Explicit 8px border hit band allows dragging anywhere on the border line to smoothly move the selection and translate all child annotations. 4 corner handles (8x8 px) provide diagonal resizing.
 - [x] **C3: Tool Interaction UX Pass** — Contextual cursors (`IDC_CROSS`, `IDC_SIZEALL`, `IDC_SIZENWSE`/`IDC_SIZENESW`, `IDC_IBEAM`, `IDC_HAND`/`IDC_ARROW`), dual-tone contrast outline (black outer border + bright accent inner border + white corner handles), distinct active/hover toolbar button states, and >= 3px drag movement threshold.
 - [x] **C4: Pure GUI Subsystem Configuration** — Compiled with `#![windows_subsystem = "windows"]` and calls `AttachConsole(ATTACH_PARENT_PROCESS)` for CLI arguments. PE subsystem inspection is automated, and the targeted daemon runtime check observed no console `HWND`; this is not a complete UI validation.
-- [x] **C5: System Tray Icon & Right-Click Menu** — Persistent notification area icon via `Shell_NotifyIconW`. Left-click or double-click triggers immediate capture. Right-click context popup menu provides **Capture Now** (default bold item), **Settings...**, and **Exit**. Cleanly deleted with `NIM_DELETE` on shutdown.
+- [x] **C5: System Tray Icon & Right-Click Menu** — Persistent notification area icon via `Shell_NotifyIconW`. Left-click or double-click triggers immediate capture. The right-click menu provides **Capture Now**, **Settings...**, **Check for Updates**, up to five **Recent Captures**, and **Exit**. Cleanly deleted with `NIM_DELETE` on shutdown.
 - [x] **C6: Settings Standalone Panel & Behavior Toggles** — Native checkboxes for `enable_window_snap` (toggle single-click window snapping) and `close_after_action` (keep overlay open after Copy/Save to continue annotating). Save failures leave the dialog open and render the error.
 - [x] **C7: Regression Smoke Checks v2** — One post-change run exited 0 and reported `AUTOMATED SMOKE CHECKS PASSED (A1-C8 + C9 packaging checks)`. External runtime budgets and interactive behavior are outside that command's verification scope.
 - [x] **C8: Changelog & README Sync** — Documentation describes the implemented desktop, tray, editor, and Settings behavior while separating automated checks from manual/runtime verification.
@@ -69,6 +69,8 @@ When launched without arguments, `isolmass.exe` runs as a pure background GUI pr
 - **Right-Click Context Menu:**
   - **Capture Now** (default action)
   - **Settings...** (opens native settings panel)
+  - **Check for Updates** (runs a manual release check without auto-installing)
+  - **Recent Captures** (opens one of up to five newest screenshots; disabled when none exist)
   - **Exit** (cleanly unregisters the tray icon, unhooks the keyboard, and terminates the daemon)
 
 ## Keyboard Shortcuts
@@ -83,7 +85,7 @@ When launched without arguments, `isolmass.exe` runs as a pure background GUI pr
   3. If selection committed: cancels selection and returns to window-hover mode.
   4. If idle: closes overlay on first press.
 - **`Ctrl+C`** or **`Enter`**: Copy flattened selection + annotations to Windows Clipboard.
-- **`Ctrl+S`**: Save PNG screenshot to disk.
+- **`Ctrl+S`**: Save the screenshot to disk in the configured PNG or JPEG format.
 - **`Ctrl+Z`**: Undo last annotation modification, move, add, or delete.
 - **`Ctrl+Y`**: Redo last undone action.
 - **`Ctrl+,`**: Open native Settings dialog.
@@ -110,13 +112,16 @@ When launched without arguments, `isolmass.exe` runs as a pure background GUI pr
 
 ## Settings Dialog
 Available via the tray menu (**Settings...**), the overlay button (**Settings**), the **`Ctrl+,`** shortcut, or the **`--settings`** CLI flag:
-- **Global Hotkey Presets**: `PrintScreen`, `Ctrl+Shift+S`, `Alt+PrintScreen`. A saved hotkey takes effect on the next daemon launch; the running listener is not restarted in place.
-- **Save Folder**: Displays the current target directory (default: `Pictures\Screenshots`). The current dialog does not provide a folder picker or editor.
+- **Global Hotkey Presets**: `PrintScreen`, `Ctrl+Shift+S`, `Alt+PrintScreen`. The running daemon restarts its listener in place after saving; if registration fails, it restores the previous active and persisted hotkey.
+- **Save Folder**: Displays the current target directory (default: `Pictures\Screenshots`) and provides a native **Browse...** folder picker.
 - **Default Color & Thickness**: Pick default drawing styling.
-- **Enable single-click window snap**: Toggle automatic window snapping on hover/click.
-- **Close overlay automatically after Copy / Save**: When disabled, keeps the overlay open after copying or saving so you can continue annotating.
+- **Image Format & Quality**: Save as PNG or JPEG, with 80/90/100 JPEG quality presets.
+- **Capture Delay**: Capture immediately or after 1, 3, or 5 seconds.
+- **Capture Behavior**: Toggle single-click window snapping and whether Copy/Save closes the overlay.
+- **Windows Integration**: Start isolmaSS at sign-in and show save notifications. **Save & Apply** applies the startup setting immediately.
+- **Updates**: Toggle background checks and verified automatic installation, or run a manual update check.
 
-Settings are loaded tolerantly: a missing, unreadable, or malformed `%APPDATA%\isolmaSS\settings.json` falls back to defaults. Saving is strict: unavailable `%APPDATA%` returns `NotFound`, and parent-directory creation and file-write failures propagate. **Save & Apply** keeps the dialog open and renders the error instead of reporting success or dismissing the window.
+Settings are loaded tolerantly: a missing, unreadable, or malformed `%APPDATA%\isolmaSS\settings.json` falls back to defaults. Saving is strict: unavailable `%APPDATA%` returns `NotFound`, and parent-directory creation and file-write failures propagate. **Save & Apply** applies the Windows startup preference before persisting; a persistence failure restores the prior startup state, while any rollback failure is reported explicitly. The dialog remains open on failure.
 
 ## Building & Running
 
@@ -128,7 +133,7 @@ Settings are loaded tolerantly: a missing, unreadable, or malformed `%APPDATA%\i
 ```bash
 cargo build --release
 ```
-The resulting executable is located at `target/release/isolmass.exe`. In the 2026-09-04 verified build it was 438,784 bytes; `target/release/isolmass-setup.exe` was 262,534 bytes. These measurements apply only to that source/toolchain build and must be refreshed after later changes.
+The resulting executable is located at `target/release/isolmass.exe`. In the 2026-09-04 verified build it was 531,968 bytes; `target/release/isolmass-setup.exe` was 281,904 bytes. These measurements apply only to that source/toolchain build and must be refreshed after later changes.
 
 ### Automated Smoke Checks
 Run the automated smoke command for core model, persistence, selected Win32 integration, and packaging checks:

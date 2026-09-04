@@ -1,15 +1,16 @@
 use std::ffi::c_void;
-use windows::core::{Error, Result};
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{
-    BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
-    SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, CAPTUREBLT, DIB_RGB_COLORS, HBITMAP, HDC,
-    HGDIOBJ, RGBQUAD, SRCCOPY,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleDC, CreateDIBSection,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, HBITMAP, HDC, HGDIOBJ, RGBQUAD, ReleaseDC,
+    SRCCOPY, SelectObject,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN,
-    SM_YVIRTUALSCREEN,
+    GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
 };
+use windows::core::{Error, Result};
 
 /// An integer rectangle with inclusive-exclusive bounds.
 /// In our coordinate system:
@@ -125,7 +126,12 @@ impl Rect {
     /// - 4 Border edge bands (6-8 px centered on edges, excluding corners) -> drag-to-move
     /// - Interior -> move (or draw)
     /// - Outside -> None
-    pub fn hit_test_selection(&self, pt: (i32, i32), band: i32, handle_size: i32) -> SelectionHitZone {
+    pub fn hit_test_selection(
+        &self,
+        pt: (i32, i32),
+        band: i32,
+        handle_size: i32,
+    ) -> SelectionHitZone {
         if self.is_empty() {
             return SelectionHitZone::None;
         }
@@ -134,19 +140,39 @@ impl Rect {
         let (x, y) = pt;
 
         // 1. 4 Corner handles (8x8 px centered on vertices)
-        let tl = Rect::new(self.left - half_h, self.top - half_h, self.left + half_h, self.top + half_h);
+        let tl = Rect::new(
+            self.left - half_h,
+            self.top - half_h,
+            self.left + half_h,
+            self.top + half_h,
+        );
         if tl.contains(x, y) {
             return SelectionHitZone::TopLeftCorner;
         }
-        let tr = Rect::new(self.right - half_h, self.top - half_h, self.right + half_h, self.top + half_h);
+        let tr = Rect::new(
+            self.right - half_h,
+            self.top - half_h,
+            self.right + half_h,
+            self.top + half_h,
+        );
         if tr.contains(x, y) {
             return SelectionHitZone::TopRightCorner;
         }
-        let bl = Rect::new(self.left - half_h, self.bottom - half_h, self.left + half_h, self.bottom + half_h);
+        let bl = Rect::new(
+            self.left - half_h,
+            self.bottom - half_h,
+            self.left + half_h,
+            self.bottom + half_h,
+        );
         if bl.contains(x, y) {
             return SelectionHitZone::BottomLeftCorner;
         }
-        let br = Rect::new(self.right - half_h, self.bottom - half_h, self.right + half_h, self.bottom + half_h);
+        let br = Rect::new(
+            self.right - half_h,
+            self.bottom - half_h,
+            self.right + half_h,
+            self.bottom + half_h,
+        );
         if br.contains(x, y) {
             return SelectionHitZone::BottomRightCorner;
         }
@@ -155,7 +181,9 @@ impl Rect {
         let outer = self.inflate(band, band);
         let inner = self.inflate(-band, -band);
 
-        if outer.contains(x, y) && (!inner.contains(x, y) || inner.width() <= 0 || inner.height() <= 0) {
+        if outer.contains(x, y)
+            && (!inner.contains(x, y) || inner.width() <= 0 || inner.height() <= 0)
+        {
             return SelectionHitZone::BorderEdge;
         }
 
@@ -165,6 +193,59 @@ impl Rect {
         }
 
         SelectionHitZone::None
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CaptureTimings {
+    pub setup: Duration,
+    pub bit_blt: Duration,
+    pub copy: Duration,
+    pub dim: Duration,
+    pub total: Duration,
+}
+
+enum PixelStorage {
+    Owned(Vec<u8>),
+    Dib {
+        pointer: *mut u8,
+        length: usize,
+        memory_dc: HDC,
+        bitmap: HBITMAP,
+        old_bitmap: HGDIOBJ,
+    },
+}
+
+pub struct PixelBuffer(PixelStorage);
+
+impl std::ops::Deref for PixelBuffer {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        match &self.0 {
+            PixelStorage::Owned(bytes) => bytes,
+            PixelStorage::Dib {
+                pointer, length, ..
+            } => unsafe { std::slice::from_raw_parts(*pointer, *length) },
+        }
+    }
+}
+
+impl Drop for PixelBuffer {
+    fn drop(&mut self) {
+        if let PixelStorage::Dib {
+            memory_dc,
+            bitmap,
+            old_bitmap,
+            ..
+        } = self.0
+        {
+            unsafe {
+                SelectObject(memory_dc, old_bitmap);
+                let _ = DeleteDC(memory_dc);
+                let _ = DeleteObject(HGDIOBJ(bitmap.0));
+            }
+        }
     }
 }
 
@@ -179,9 +260,10 @@ pub struct CaptureBuffer {
     /// Virtual screen height in physical pixels.
     pub height: i32,
     /// Original 32-bit BGRA pixel data. Length is `width * height * 4`.
-    pub original: Vec<u8>,
+    pub original: PixelBuffer,
     /// Pre-rendered dimmed 32-bit BGRA pixel data.
     pub dimmed: Vec<u8>,
+    pub timings: CaptureTimings,
 }
 
 // RAII cleanup helper for HDC released via ReleaseDC
@@ -220,6 +302,31 @@ impl Drop for GdiObjectGuard {
     }
 }
 
+static BUFFER_POOL: LazyLock<Mutex<Option<Vec<u8>>>> = LazyLock::new(|| Mutex::new(None));
+
+fn take_dimmed_buffer(size: usize) -> Vec<u8> {
+    let mut dimmed = BUFFER_POOL
+        .lock()
+        .ok()
+        .and_then(|mut pool| pool.take())
+        .unwrap_or_default();
+    dimmed.resize(size, 0);
+    dimmed
+}
+
+impl Drop for CaptureBuffer {
+    fn drop(&mut self) {
+        let dimmed = std::mem::take(&mut self.dimmed);
+        if let Ok(mut pool) = BUFFER_POOL.lock()
+            && pool
+                .as_ref()
+                .is_none_or(|current| current.capacity() < dimmed.capacity())
+        {
+            *pool = Some(dimmed);
+        }
+    }
+}
+
 impl CaptureBuffer {
     /// Creates a dummy in-memory capture buffer for testing without capturing the display.
     pub fn dummy(width: i32, height: i32) -> Self {
@@ -229,14 +336,16 @@ impl CaptureBuffer {
             y: 0,
             width,
             height,
-            original: vec![0u8; len],
+            original: PixelBuffer(PixelStorage::Owned(vec![0u8; len])),
             dimmed: vec![0u8; len],
+            timings: CaptureTimings::default(),
         }
     }
 
     /// Captures the full virtual screen across all connected monitors via BitBlt.
     /// Pre-renders a dimmed backdrop buffer so interactive punch-outs are instant.
     pub fn capture_virtual_screen() -> Result<Self> {
+        let total_start = Instant::now();
         let x = unsafe { GetSystemMetrics(SM_XVIRTUALSCREEN) };
         let y = unsafe { GetSystemMetrics(SM_YVIRTUALSCREEN) };
         let width = unsafe { GetSystemMetrics(SM_CXVIRTUALSCREEN) };
@@ -287,16 +396,8 @@ impl CaptureBuffer {
         };
 
         let mut bits_ptr: *mut c_void = std::ptr::null_mut();
-        let hbitmap: HBITMAP = unsafe {
-            CreateDIBSection(
-                screen_dc,
-                &bmi,
-                DIB_RGB_COLORS,
-                &mut bits_ptr,
-                None,
-                0,
-            )?
-        };
+        let hbitmap: HBITMAP =
+            unsafe { CreateDIBSection(screen_dc, &bmi, DIB_RGB_COLORS, &mut bits_ptr, None, 0)? };
         if hbitmap.is_invalid() || bits_ptr.is_null() {
             return Err(Error::from_win32());
         }
@@ -305,7 +406,9 @@ impl CaptureBuffer {
         // 4. Select DIB section into memory DC
         let old_obj = unsafe { SelectObject(mem_dc, HGDIOBJ(hbitmap.0)) };
 
+        let setup = total_start.elapsed();
         // 5. BitBlt from screen DC to memory DC with CAPTUREBLT
+        let bit_blt_start = Instant::now();
         let blt_res = unsafe {
             BitBlt(
                 mem_dc,
@@ -320,25 +423,30 @@ impl CaptureBuffer {
             )
         };
 
-        // Restore old object before reading or deleting
-        unsafe {
-            SelectObject(mem_dc, old_obj);
+        if let Err(error) = blt_res {
+            unsafe {
+                SelectObject(mem_dc, old_obj);
+            }
+            return Err(error);
         }
+        let bit_blt = bit_blt_start.elapsed();
 
-        blt_res?;
-
-        // 6. Copy bits into Rust Vec<u8>
-        let mut original = vec![0u8; buffer_size];
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                bits_ptr as *const u8,
-                original.as_mut_ptr(),
-                buffer_size,
-            );
-        }
-
-        // 7. Pre-render dimmed backdrop buffer
-        let dimmed = Self::create_dimmed_buffer(&original);
+        // 6. Dim directly from the captured DIB; no full-screen copy is required.
+        let original_slice =
+            unsafe { std::slice::from_raw_parts(bits_ptr.cast::<u8>(), buffer_size) };
+        let mut dimmed = take_dimmed_buffer(buffer_size);
+        let dim_start = Instant::now();
+        Self::fill_dimmed_buffer(original_slice, &mut dimmed);
+        let dim = dim_start.elapsed();
+        let original = PixelBuffer(PixelStorage::Dib {
+            pointer: bits_ptr.cast::<u8>(),
+            length: buffer_size,
+            memory_dc: mem_dc,
+            bitmap: hbitmap,
+            old_bitmap: old_obj,
+        });
+        std::mem::forget(_mem_guard);
+        std::mem::forget(_bitmap_guard);
 
         Ok(Self {
             x,
@@ -347,46 +455,34 @@ impl CaptureBuffer {
             height,
             original,
             dimmed,
+            timings: CaptureTimings {
+                setup,
+                bit_blt,
+                copy: Duration::ZERO,
+                dim,
+                total: total_start.elapsed(),
+            },
         })
     }
 
     /// Pre-renders a dimmed version of the original BGRA pixel buffer.
     /// Applies a ~45% dimming factor to B, G, R channels and sets Alpha to 255.
-    pub fn create_dimmed_buffer(original: &[u8]) -> Vec<u8> {
-        let dim_lut: [u8; 256] = {
-            let mut lut = [0u8; 256];
-            let mut i = 0usize;
-            while i < 256 {
-                lut[i] = ((i as u32 * 115) / 255) as u8;
-                i += 1;
-            }
-            lut
-        };
-
-        let mut dimmed = vec![0u8; original.len()];
-
-        let (src_chunks, _) = original.as_chunks::<4>();
-        let (dst_chunks, _) = dimmed.as_chunks_mut::<4>();
-
-        for (src, dst) in src_chunks.iter().zip(dst_chunks.iter_mut()) {
-            dst[0] = dim_lut[src[0] as usize]; // B
-            dst[1] = dim_lut[src[1] as usize]; // G
-            dst[2] = dim_lut[src[2] as usize]; // R
-            dst[3] = 255;                      // A
+    fn fill_dimmed_buffer(original: &[u8], dimmed: &mut [u8]) {
+        debug_assert_eq!(original.len(), dimmed.len());
+        let dim_lut: [u8; 256] = std::array::from_fn(|index| ((index as u32 * 115) / 255) as u8);
+        let (source_pixels, _) = original.as_chunks::<4>();
+        let (destination_pixels, _) = dimmed.as_chunks_mut::<4>();
+        for (source, destination) in source_pixels.iter().zip(destination_pixels.iter_mut()) {
+            destination[0] = dim_lut[source[0] as usize];
+            destination[1] = dim_lut[source[1] as usize];
+            destination[2] = dim_lut[source[2] as usize];
+            destination[3] = 255;
         }
-
-        dimmed
     }
 
     /// Punches out an undimmed rectangle by copying rows from `source` (e.g. `original`)
     /// into `target` (e.g. `composed`).
-    pub fn copy_rect(
-        target: &mut [u8],
-        width: i32,
-        height: i32,
-        rect: &Rect,
-        source: &[u8],
-    ) {
+    pub fn copy_rect(target: &mut [u8], width: i32, height: i32, rect: &Rect, source: &[u8]) {
         if rect.is_empty() || width <= 0 || height <= 0 {
             return;
         }
@@ -481,13 +577,7 @@ impl CaptureBuffer {
     }
 
     /// Draws a solid filled rectangle onto the 32-bit BGRA buffer.
-    pub fn fill_rect(
-        target: &mut [u8],
-        width: i32,
-        height: i32,
-        rect: &Rect,
-        color_bgra: [u8; 4],
-    ) {
+    pub fn fill_rect(target: &mut [u8], width: i32, height: i32, rect: &Rect, color_bgra: [u8; 4]) {
         if rect.is_empty() || width <= 0 || height <= 0 {
             return;
         }
@@ -560,25 +650,64 @@ mod tests {
         let sel = Rect::new(100, 100, 300, 200);
 
         // Corner handles (8x8 px centered on vertices, half_h = 4)
-        assert_eq!(sel.hit_test_selection((100, 100), 4, 8), SelectionHitZone::TopLeftCorner);
-        assert_eq!(sel.hit_test_selection((300, 100), 4, 8), SelectionHitZone::TopRightCorner);
-        assert_eq!(sel.hit_test_selection((100, 200), 4, 8), SelectionHitZone::BottomLeftCorner);
-        assert_eq!(sel.hit_test_selection((300, 200), 4, 8), SelectionHitZone::BottomRightCorner);
+        assert_eq!(
+            sel.hit_test_selection((100, 100), 4, 8),
+            SelectionHitZone::TopLeftCorner
+        );
+        assert_eq!(
+            sel.hit_test_selection((300, 100), 4, 8),
+            SelectionHitZone::TopRightCorner
+        );
+        assert_eq!(
+            sel.hit_test_selection((100, 200), 4, 8),
+            SelectionHitZone::BottomLeftCorner
+        );
+        assert_eq!(
+            sel.hit_test_selection((300, 200), 4, 8),
+            SelectionHitZone::BottomRightCorner
+        );
 
         // Border edge band (excluding corners, e.g. midpoint of top border, +/- 4px)
-        assert_eq!(sel.hit_test_selection((200, 100), 4, 8), SelectionHitZone::BorderEdge);
-        assert_eq!(sel.hit_test_selection((200, 98), 4, 8), SelectionHitZone::BorderEdge);
-        assert_eq!(sel.hit_test_selection((200, 102), 4, 8), SelectionHitZone::BorderEdge);
-        assert_eq!(sel.hit_test_selection((100, 150), 4, 8), SelectionHitZone::BorderEdge);
-        assert_eq!(sel.hit_test_selection((300, 150), 4, 8), SelectionHitZone::BorderEdge);
-        assert_eq!(sel.hit_test_selection((200, 200), 4, 8), SelectionHitZone::BorderEdge);
+        assert_eq!(
+            sel.hit_test_selection((200, 100), 4, 8),
+            SelectionHitZone::BorderEdge
+        );
+        assert_eq!(
+            sel.hit_test_selection((200, 98), 4, 8),
+            SelectionHitZone::BorderEdge
+        );
+        assert_eq!(
+            sel.hit_test_selection((200, 102), 4, 8),
+            SelectionHitZone::BorderEdge
+        );
+        assert_eq!(
+            sel.hit_test_selection((100, 150), 4, 8),
+            SelectionHitZone::BorderEdge
+        );
+        assert_eq!(
+            sel.hit_test_selection((300, 150), 4, 8),
+            SelectionHitZone::BorderEdge
+        );
+        assert_eq!(
+            sel.hit_test_selection((200, 200), 4, 8),
+            SelectionHitZone::BorderEdge
+        );
 
         // Interior (deep inside selection, far from border band)
-        assert_eq!(sel.hit_test_selection((200, 150), 4, 8), SelectionHitZone::Interior);
+        assert_eq!(
+            sel.hit_test_selection((200, 150), 4, 8),
+            SelectionHitZone::Interior
+        );
 
         // Outside (far from selection)
-        assert_eq!(sel.hit_test_selection((50, 50), 4, 8), SelectionHitZone::None);
-        assert_eq!(sel.hit_test_selection((400, 400), 4, 8), SelectionHitZone::None);
+        assert_eq!(
+            sel.hit_test_selection((50, 50), 4, 8),
+            SelectionHitZone::None
+        );
+        assert_eq!(
+            sel.hit_test_selection((400, 400), 4, 8),
+            SelectionHitZone::None
+        );
     }
 
     #[test]

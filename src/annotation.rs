@@ -1,41 +1,23 @@
 use crate::capture::Rect;
-use windows::core::PCWSTR;
+use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::{COLORREF, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
-    CreateFontW, CreatePen, CreateSolidBrush, DeleteObject, DrawTextW, GetStockObject, Polygon,
-    Polyline, Rectangle as GdiRectangle, SelectObject, SetBkMode, SetTextColor, CLIP_DEFAULT_PRECIS,
-    DEFAULT_CHARSET, DEFAULT_PITCH, DEFAULT_QUALITY, DT_LEFT, DT_NOCLIP, DT_TOP, FF_DONTCARE,
-    FW_BOLD, HBRUSH, HDC, HFONT, HGDIOBJ, HPEN, NULL_BRUSH, PS_DOT, PS_SOLID, TRANSPARENT,
+    CLIP_DEFAULT_PRECIS, CreateFontW, CreatePen, CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_PITCH,
+    DEFAULT_QUALITY, DT_LEFT, DT_NOCLIP, DT_TOP, DeleteObject, DrawTextW, FF_DONTCARE, FW_BOLD,
+    GetStockObject, HBRUSH, HDC, HFONT, HGDIOBJ, HPEN, NULL_BRUSH, PS_DOT, PS_SOLID, Polygon,
+    Polyline, Rectangle as GdiRectangle, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
 };
+use windows::core::PCWSTR;
 
 /// Available annotation tools.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ToolKind {
+    #[default]
     Rectangle,
     Arrow,
     Pen,
     Text,
     Blur,
-}
-
-impl ToolKind {
-    pub const ALL: [ToolKind; 5] = [
-        ToolKind::Rectangle,
-        ToolKind::Arrow,
-        ToolKind::Pen,
-        ToolKind::Text,
-        ToolKind::Blur,
-    ];
-
-    pub fn name(&self) -> &'static str {
-        match self {
-            ToolKind::Rectangle => "Rect [R]",
-            ToolKind::Arrow => "Arrow [A]",
-            ToolKind::Pen => "Pen [P]",
-            ToolKind::Text => "Text [T]",
-            ToolKind::Blur => "Blur [B]",
-        }
-    }
 }
 
 /// Converts a 32-bit BGRA color `[B, G, R, A]` to a Win32 `COLORREF` (0x00bbggrr).
@@ -130,6 +112,29 @@ pub struct AnnotationObject {
     pub kind: AnnotationKind,
 }
 
+pub fn render_pen_preview(hdc: HDC, points: &[(i32, i32)], color: [u8; 4], thickness: i32) {
+    if points.len() < 2 {
+        return;
+    }
+    let pen = unsafe { CreatePen(PS_SOLID, thickness, bgra_to_colorref(color)) };
+    let old_pen = unsafe { SelectObject(hdc, HGDIOBJ(pen.0)) };
+    let _pen_guard = PenGuard {
+        hdc,
+        old: old_pen,
+        pen,
+    };
+    let win_points: Vec<POINT> = points
+        .iter()
+        .map(|point| POINT {
+            x: point.0,
+            y: point.1,
+        })
+        .collect();
+    unsafe {
+        let _ = Polyline(hdc, &win_points);
+    }
+}
+
 impl AnnotationObject {
     pub fn new(id: usize, kind: AnnotationKind) -> Self {
         Self { id, kind }
@@ -138,9 +143,9 @@ impl AnnotationObject {
     /// Returns the bounding box of the annotation in client coordinates.
     pub fn bounds(&self) -> Rect {
         match &self.kind {
-            AnnotationKind::Rectangle { rect, thickness, .. } => {
-                rect.inflate(*thickness, *thickness)
-            }
+            AnnotationKind::Rectangle {
+                rect, thickness, ..
+            } => rect.inflate(*thickness, *thickness),
             AnnotationKind::Arrow {
                 start,
                 end,
@@ -187,7 +192,9 @@ impl AnnotationObject {
     /// Tests if point `pt` hits this annotation object.
     pub fn hit_test(&self, pt: (i32, i32)) -> bool {
         match &self.kind {
-            AnnotationKind::Rectangle { rect, thickness, .. } => {
+            AnnotationKind::Rectangle {
+                rect, thickness, ..
+            } => {
                 let tol = (*thickness).max(6);
                 let outer = rect.inflate(tol, tol);
                 if !outer.contains(pt.0, pt.1) {
@@ -323,7 +330,11 @@ impl AnnotationObject {
                 let null_brush = unsafe { GetStockObject(NULL_BRUSH) };
                 let old_brush = unsafe { SelectObject(hdc, null_brush) };
 
-                let _pen_guard = PenGuard { hdc, old: old_pen, pen };
+                let _pen_guard = PenGuard {
+                    hdc,
+                    old: old_pen,
+                    pen,
+                };
                 let _brush_guard = BrushGuard {
                     hdc,
                     old: old_brush,
@@ -350,25 +361,20 @@ impl AnnotationObject {
                 let colorref = bgra_to_colorref(*color);
                 let pen = unsafe { CreatePen(PS_SOLID, *thickness, colorref) };
                 let old_pen = unsafe { SelectObject(hdc, HGDIOBJ(pen.0)) };
-                let _pen_guard = PenGuard { hdc, old: old_pen, pen };
+                let _pen_guard = PenGuard {
+                    hdc,
+                    old: old_pen,
+                    pen,
+                };
 
                 let u = (dx / len, dy / len);
                 let perp = (-u.1, u.0);
                 let head_len = (*thickness as f64 * 4.5).clamp(16.0, 36.0).min(len * 0.5);
                 let head_width = head_len * 0.65;
 
-                let base = (
-                    end.0 as f64 - u.0 * head_len,
-                    end.1 as f64 - u.1 * head_len,
-                );
-                let p_left = (
-                    base.0 + perp.0 * head_width,
-                    base.1 + perp.1 * head_width,
-                );
-                let p_right = (
-                    base.0 - perp.0 * head_width,
-                    base.1 - perp.1 * head_width,
-                );
+                let base = (end.0 as f64 - u.0 * head_len, end.1 as f64 - u.1 * head_len);
+                let p_left = (base.0 + perp.0 * head_width, base.1 + perp.1 * head_width);
+                let p_right = (base.0 - perp.0 * head_width, base.1 - perp.1 * head_width);
 
                 // Draw shaft
                 let shaft_points = [
@@ -395,10 +401,7 @@ impl AnnotationObject {
                 };
 
                 let arrow_points = [
-                    POINT {
-                        x: end.0,
-                        y: end.1,
-                    },
+                    POINT { x: end.0, y: end.1 },
                     POINT {
                         x: p_left.0.round() as i32,
                         y: p_left.1.round() as i32,
@@ -416,22 +419,7 @@ impl AnnotationObject {
                 points,
                 color,
                 thickness,
-            } => {
-                if points.len() < 2 {
-                    return;
-                }
-                let pen = unsafe { CreatePen(PS_SOLID, *thickness, bgra_to_colorref(*color)) };
-                let old_pen = unsafe { SelectObject(hdc, HGDIOBJ(pen.0)) };
-                let _pen_guard = PenGuard { hdc, old: old_pen, pen };
-
-                let win_points: Vec<POINT> = points
-                    .iter()
-                    .map(|p| POINT { x: p.0, y: p.1 })
-                    .collect();
-                unsafe {
-                    let _ = Polyline(hdc, &win_points);
-                }
-            }
+            } => render_pen_preview(hdc, points, *color, *thickness),
             AnnotationKind::Text {
                 pos,
                 text,
@@ -461,7 +449,11 @@ impl AnnotationObject {
                     )
                 };
                 let old_font = unsafe { SelectObject(hdc, HGDIOBJ(font.0)) };
-                let _font_guard = FontGuard { hdc, old: old_font, font };
+                let _font_guard = FontGuard {
+                    hdc,
+                    old: old_font,
+                    font,
+                };
 
                 unsafe {
                     let _ = SetTextColor(hdc, bgra_to_colorref(*color));
@@ -505,7 +497,11 @@ impl AnnotationObject {
         let null_brush = unsafe { GetStockObject(NULL_BRUSH) };
         let old_brush = unsafe { SelectObject(hdc, null_brush) };
 
-        let _pen_guard = PenGuard { hdc, old: old_pen, pen };
+        let _pen_guard = PenGuard {
+            hdc,
+            old: old_pen,
+            pen,
+        };
         let _brush_guard = BrushGuard {
             hdc,
             old: old_brush,
@@ -654,8 +650,16 @@ pub fn snap_angle_45(start: (i32, i32), current: (i32, i32)) -> (i32, i32) {
 pub enum EditCommand {
     Add(AnnotationObject),
     Delete(AnnotationObject),
-    Move { id: usize, dx: i32, dy: i32 },
-    Modify { id: usize, old_kind: AnnotationKind, new_kind: AnnotationKind },
+    Move {
+        id: usize,
+        dx: i32,
+        dy: i32,
+    },
+    Modify {
+        id: usize,
+        old_kind: AnnotationKind,
+        new_kind: AnnotationKind,
+    },
 }
 
 /// Manages the Undo / Redo history stack (capped at 50 commands).
@@ -725,10 +729,18 @@ impl HistoryManager {
                     self.redo_stack.push(EditCommand::Move { id, dx, dy });
                 }
             }
-            EditCommand::Modify { id, old_kind, new_kind } => {
+            EditCommand::Modify {
+                id,
+                old_kind,
+                new_kind,
+            } => {
                 if let Some(obj) = objects.iter_mut().find(|o| o.id == id) {
                     obj.kind = old_kind.clone();
-                    self.redo_stack.push(EditCommand::Modify { id, old_kind, new_kind });
+                    self.redo_stack.push(EditCommand::Modify {
+                        id,
+                        old_kind,
+                        new_kind,
+                    });
                 }
             }
         }
@@ -761,10 +773,18 @@ impl HistoryManager {
                     self.undo_stack.push(EditCommand::Move { id, dx, dy });
                 }
             }
-            EditCommand::Modify { id, old_kind, new_kind } => {
+            EditCommand::Modify {
+                id,
+                old_kind,
+                new_kind,
+            } => {
                 if let Some(obj) = objects.iter_mut().find(|o| o.id == id) {
                     obj.kind = new_kind.clone();
-                    self.undo_stack.push(EditCommand::Modify { id, old_kind, new_kind });
+                    self.undo_stack.push(EditCommand::Modify {
+                        id,
+                        old_kind,
+                        new_kind,
+                    });
                 }
             }
         }

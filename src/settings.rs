@@ -1,28 +1,13 @@
-use crate::annotation::bgra_to_colorref;
+use crate::annotation::ToolKind;
 use crate::hotkey::HotkeyConfig;
 use crate::save::default_save_directory;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
-use windows::core::{w, PCWSTR, Result};
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateFontW, CreatePen, CreateSolidBrush, DeleteObject, DrawTextW, EndPaint,
-    GetStockObject, InvalidateRect, RoundRect, SelectObject, SetBkMode, SetTextColor,
-    CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DEFAULT_QUALITY, DT_CENTER, DT_LEFT,
-    DT_SINGLELINE, DT_VCENTER, FF_DONTCARE, FW_BOLD, FW_NORMAL, HBRUSH, HDC, HGDIOBJ, HPEN,
-    NULL_BRUSH, PS_SOLID, TRANSPARENT,
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use windows::Win32::Storage::FileSystem::{
+    MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
 };
-use windows::Win32::UI::Input::KeyboardAndMouse::{SetFocus, VK_ESCAPE};
-use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
-    GetSystemMetrics, GetWindowLongPtrW, PostQuitMessage, RegisterClassExW, SetCursor,
-    SetForegroundWindow, SetWindowLongPtrW, ShowWindow, TranslateMessage, GWLP_USERDATA, IDC_ARROW,
-    IDC_HAND, MSG, SM_CXSCREEN, SM_CYSCREEN, SW_SHOW, WM_CLOSE, WM_DESTROY, WM_ERASEBKGND,
-    WM_KEYDOWN, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_PAINT, WM_SETCURSOR, WNDCLASSEXW,
-    WS_CAPTION, WS_EX_TOPMOST, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU,
-};
-
-const SETTINGS_CLASS_NAME: windows::core::PCWSTR = w!("isolmaSS_SettingsClass");
+use windows::core::PCWSTR;
 
 pub const PRESET_COLORS: [[u8; 4]; 8] = [
     [49, 49, 224, 255],   // Red (#E03131)
@@ -41,6 +26,27 @@ fn default_true() -> bool {
     true
 }
 
+fn default_jpeg_quality() -> u8 {
+    90
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SaveFormat {
+    #[default]
+    Png,
+    Jpeg,
+}
+
+impl SaveFormat {
+    pub const fn extension(self) -> &'static str {
+        match self {
+            Self::Png => "png",
+            Self::Jpeg => "jpg",
+        }
+    }
+}
+
 /// Persistent application settings model.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
@@ -52,6 +58,22 @@ pub struct Settings {
     pub enable_window_snap: bool,
     #[serde(default = "default_true")]
     pub close_after_action: bool,
+    #[serde(default)]
+    pub start_with_windows: bool,
+    #[serde(default = "default_true")]
+    pub notify_after_save: bool,
+    #[serde(default)]
+    pub capture_delay_ms: u32,
+    #[serde(default)]
+    pub save_format: SaveFormat,
+    #[serde(default = "default_jpeg_quality")]
+    pub jpeg_quality: u8,
+    #[serde(default = "default_true")]
+    pub check_updates_automatically: bool,
+    #[serde(default)]
+    pub install_updates_automatically: bool,
+    #[serde(default)]
+    pub last_tool: ToolKind,
 }
 
 impl Default for Settings {
@@ -60,9 +82,17 @@ impl Default for Settings {
             hotkey: HotkeyConfig::default(),
             save_directory: default_save_directory(),
             default_color: PRESET_COLORS[0], // Default vibrant red
-            default_thickness: 3,
+            default_thickness: 4,
             enable_window_snap: true,
             close_after_action: true,
+            start_with_windows: false,
+            notify_after_save: true,
+            capture_delay_ms: 0,
+            save_format: SaveFormat::Png,
+            jpeg_quality: default_jpeg_quality(),
+            check_updates_automatically: true,
+            install_updates_automatically: false,
+            last_tool: ToolKind::default(),
         }
     }
 }
@@ -73,34 +103,98 @@ impl Settings {
         crate::hotkey::settings_path()
     }
 
-    /// Loads settings from disk or returns default configuration.
-    pub fn load_or_default() -> Self {
-        if let Some(settings) = Self::config_path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|c| serde_json::from_str::<Settings>(&c).ok())
-        {
-            return settings;
+    /// Loads settings and returns a user-visible warning when recovery was required.
+    pub fn load_with_warning() -> (Self, Option<String>) {
+        let Some(path) = Self::config_path() else {
+            return (
+                Self::default(),
+                Some("Settings could not be loaded because %APPDATA% is unavailable.".to_string()),
+            );
+        };
+
+        match Self::load_from_path(&path) {
+            Ok(settings) => (settings, None),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (Self::default(), None),
+            Err(error) => {
+                let backup = path.with_extension(format!(
+                    "corrupt-{}.json",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_or(0, |duration| duration.as_secs())
+                ));
+                let backup_note = match std::fs::copy(&path, &backup) {
+                    Ok(_) => format!(" A copy was preserved at {}.", backup.display()),
+                    Err(_) => String::new(),
+                };
+                (
+                    Self::default(),
+                    Some(format!(
+                        "Settings were reset because settings.json is invalid: {error}.{backup_note}"
+                    )),
+                )
+            }
         }
-        Self::default()
     }
 
-    /// Saves settings to an arbitrary path on disk as formatted JSON.
-    pub fn save_to_path(&self, path: &std::path::Path) -> std::io::Result<()> {
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty() && !p.exists()) {
-            std::fs::create_dir_all(parent)?;
+    /// Loads settings from disk or returns default configuration.
+    pub fn load_or_default() -> Self {
+        Self::load_with_warning().0
+    }
+
+    /// Saves settings through a same-directory temporary file and an atomic replacement.
+    pub fn save_to_path(&self, path: &Path) -> std::io::Result<()> {
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "settings path has no parent directory",
+                )
+            })?;
+        std::fs::create_dir_all(parent)?;
+
+        let json = serde_json::to_vec_pretty(self)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
+        let temp_path = parent.join(format!(".settings-{}-{unique}.tmp", std::process::id()));
+
+        let result = (|| -> std::io::Result<()> {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp_path)?;
+            file.write_all(&json)?;
+            file.sync_all()?;
+            drop(file);
+
+            use std::os::windows::ffi::OsStrExt;
+            let source: Vec<u16> = temp_path.as_os_str().encode_wide().chain(Some(0)).collect();
+            let destination: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+            unsafe {
+                MoveFileExW(
+                    PCWSTR(source.as_ptr()),
+                    PCWSTR(destination.as_ptr()),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            }
+            .map_err(std::io::Error::other)
+        })();
+
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp_path);
         }
-        let json = serde_json::to_string_pretty(self)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        std::fs::write(path, json)?;
-        Ok(())
+        result
     }
 
     /// Loads settings from an arbitrary path on disk.
-    pub fn load_from_path(path: &std::path::Path) -> std::io::Result<Self> {
-        let content = std::fs::read_to_string(path)?;
-        let settings = serde_json::from_str::<Settings>(&content)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-        Ok(settings)
+    pub fn load_from_path(path: &Path) -> std::io::Result<Self> {
+        let mut content = String::new();
+        std::fs::File::open(path)?.read_to_string(&mut content)?;
+        serde_json::from_str::<Settings>(&content)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
     }
 
     fn save_to_config_path(&self, path: Option<&std::path::Path>) -> std::io::Result<()> {
@@ -120,813 +214,7 @@ impl Settings {
     }
 }
 
-pub struct SettingsWindowState {
-    settings: Settings,
-    saved: bool,
-    hovered_elem: Option<usize>, // 0..8 colors, 10..12 thickness, 20 save, 21 cancel
-    pub last_error: Option<String>,
-}
-
-struct GdiResourceGuard {
-    hdc: HDC,
-    old_pen: HGDIOBJ,
-    pen: HPEN,
-    old_brush: HGDIOBJ,
-    brush: HBRUSH,
-}
-
-impl Drop for GdiResourceGuard {
-    fn drop(&mut self) {
-        unsafe {
-            SelectObject(self.hdc, self.old_pen);
-            let _ = DeleteObject(HGDIOBJ(self.pen.0));
-            SelectObject(self.hdc, self.old_brush);
-            let _ = DeleteObject(HGDIOBJ(self.brush.0));
-        }
-    }
-}
-
-unsafe extern "system" fn settings_wnd_proc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
-    let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut SettingsWindowState;
-
-    match msg {
-        WM_ERASEBKGND => LRESULT(1),
-
-        WM_SETCURSOR => {
-            if !state_ptr.is_null() {
-                let state = unsafe { &*state_ptr };
-                let cursor_id = if state.hovered_elem.is_some() {
-                    IDC_HAND
-                } else {
-                    IDC_ARROW
-                };
-                let cur = unsafe {
-                    windows::Win32::UI::WindowsAndMessaging::LoadCursorW(
-                        HINSTANCE::default(),
-                        cursor_id,
-                    )
-                    .unwrap_or_default()
-                };
-                unsafe {
-                    SetCursor(cur);
-                }
-                return LRESULT(1);
-            }
-            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
-        }
-
-        WM_PAINT => {
-            if !state_ptr.is_null() {
-                let state = unsafe { &*state_ptr };
-                let mut ps = windows::Win32::Graphics::Gdi::PAINTSTRUCT::default();
-                let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
-
-                render_settings_ui(hdc, state);
-
-                let _ = unsafe { EndPaint(hwnd, &ps) };
-                return LRESULT(0);
-            }
-            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
-        }
-
-        WM_MOUSEMOVE => {
-            if !state_ptr.is_null() {
-                let state = unsafe { &mut *state_ptr };
-                let x = (lparam.0 as i32) as i16 as i32;
-                let y = ((lparam.0 >> 16) as i32) as i16 as i32;
-
-                let new_hover = hit_test_settings(x, y);
-                if state.hovered_elem != new_hover {
-                    state.hovered_elem = new_hover;
-                    unsafe {
-                        let _ = InvalidateRect(hwnd, None, false);
-                    }
-                }
-            }
-            LRESULT(0)
-        }
-
-        WM_LBUTTONDOWN => {
-            if !state_ptr.is_null() {
-                let state = unsafe { &mut *state_ptr };
-                let x = (lparam.0 as i32) as i16 as i32;
-                let y = ((lparam.0 >> 16) as i32) as i16 as i32;
-
-                if let Some(elem) = hit_test_settings(x, y) {
-                    match elem {
-                        0..=7 => {
-                            // Color preset selected
-                            state.settings.default_color = PRESET_COLORS[elem];
-                            unsafe {
-                                let _ = InvalidateRect(hwnd, None, false);
-                            }
-                        }
-                        10..=12 => {
-                            // Thickness preset selected
-                            state.settings.default_thickness = PRESET_THICKNESSES[elem - 10];
-                            unsafe {
-                                let _ = InvalidateRect(hwnd, None, false);
-                            }
-                        }
-                        20 => {
-                            // Save button clicked
-                            match state.settings.save() {
-                                Ok(()) => {
-                                    state.last_error = None;
-                                    state.saved = true;
-                                    let _ = unsafe { DestroyWindow(hwnd) };
-                                }
-                                Err(e) => {
-                                    state.last_error = Some(format!("Save failed: {e}"));
-                                    unsafe {
-                                        let _ = InvalidateRect(hwnd, None, false);
-                                    }
-                                }
-                            }
-                        }
-                        21 => {
-                            // Cancel button clicked
-                            let _ = unsafe { DestroyWindow(hwnd) };
-                        }
-                        30 => {
-                            // PrintScreen preset selected
-                            state.settings.hotkey = HotkeyConfig::default();
-                            unsafe {
-                                let _ = InvalidateRect(hwnd, None, false);
-                            }
-                        }
-                        31 => {
-                            // Ctrl+Shift+S fallback preset selected
-                            state.settings.hotkey = HotkeyConfig::fallback();
-                            unsafe {
-                                let _ = InvalidateRect(hwnd, None, false);
-                            }
-                        }
-                        32 => {
-                            // Alt+PrintScreen preset selected
-                            state.settings.hotkey = HotkeyConfig::alt_print_screen();
-                            unsafe {
-                                let _ = InvalidateRect(hwnd, None, false);
-                            }
-                        }
-                        40 => {
-                            // Toggle enable_window_snap
-                            state.settings.enable_window_snap = !state.settings.enable_window_snap;
-                            unsafe {
-                                let _ = InvalidateRect(hwnd, None, false);
-                            }
-                        }
-                        41 => {
-                            // Toggle close_after_action
-                            state.settings.close_after_action = !state.settings.close_after_action;
-                            unsafe {
-                                let _ = InvalidateRect(hwnd, None, false);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            LRESULT(0)
-        }
-
-        WM_KEYDOWN => {
-            if wparam.0 == VK_ESCAPE.0 as usize {
-                let _ = unsafe { DestroyWindow(hwnd) };
-                return LRESULT(0);
-            }
-            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
-        }
-
-        WM_CLOSE => {
-            let _ = unsafe { DestroyWindow(hwnd) };
-            LRESULT(0)
-        }
-
-        WM_DESTROY => {
-            unsafe {
-                PostQuitMessage(0);
-            }
-            LRESULT(0)
-        }
-
-        _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
-    }
-}
-
-fn hit_test_settings(x: i32, y: i32) -> Option<usize> {
-    // 1. Color swatches (x: 40 + i * 36, y: 155, w: 26, h: 26)
-    for i in 0..8 {
-        let cx = 40 + (i as i32) * 36;
-        let cy = 155;
-        if x >= cx && x <= cx + 26 && y >= cy && y <= cy + 26 {
-            return Some(i);
-        }
-    }
-
-    // 2. Thickness presets (x: 40 + i * 50, y: 225, w: 42, h: 28)
-    for i in 0..3 {
-        let tx = 40 + (i as i32) * 50;
-        let ty = 225;
-        if x >= tx && x <= tx + 42 && y >= ty && y <= ty + 28 {
-            return Some(10 + i);
-        }
-    }
-
-    // 3. Save button (x: 240..=350, y: 350..=384)
-    if (240..=350).contains(&x) && (350..=384).contains(&y) {
-        return Some(20);
-    }
-
-    // 4. Cancel button (x: 360..=440, y: 350..=384)
-    if (360..=440).contains(&x) && (350..=384).contains(&y) {
-        return Some(21);
-    }
-
-    // 5. Hotkey presets: PrtScn (30), Ctrl+Shift+S (31), Alt+PrtScn (32)
-    if (56..=82).contains(&y) {
-        if (140..=220).contains(&x) {
-            return Some(30);
-        }
-        if (228..=330).contains(&x) {
-            return Some(31);
-        }
-        if (338..=440).contains(&x) {
-            return Some(32);
-        }
-    }
-
-    // 6. Checkbox 1: Enable single-click window snap (x: 30..=450, y: 268..=294)
-    if (30..=450).contains(&x) && (268..=294).contains(&y) {
-        return Some(40);
-    }
-
-    // 7. Checkbox 2: Close overlay automatically after Copy / Save (x: 30..=450, y: 302..=328)
-    if (30..=450).contains(&x) && (302..=328).contains(&y) {
-        return Some(41);
-    }
-
-    None
-}
-
-fn render_settings_ui(hdc: HDC, state: &SettingsWindowState) {
-    let width = 480;
-    let height = 420;
-
-    // 1. Fill background
-    let bg_color = COLORREF(0x00242220); // Dark background
-    let border_color = COLORREF(0x0044403C);
-    let pen = unsafe { CreatePen(PS_SOLID, 1, bg_color) };
-    let brush = unsafe { CreateSolidBrush(bg_color) };
-    let op = unsafe { SelectObject(hdc, HGDIOBJ(pen.0)) };
-    let ob = unsafe { SelectObject(hdc, HGDIOBJ(brush.0)) };
-    let _guard = GdiResourceGuard {
-        hdc,
-        old_pen: op,
-        pen,
-        old_brush: ob,
-        brush,
-    };
-
-    unsafe {
-        let _ = RoundRect(hdc, 0, 0, width, height, 0, 0);
-        let _ = SetBkMode(hdc, TRANSPARENT);
-    }
-
-    // 2. Fonts
-    let wide_face: Vec<u16> = "Segoe UI\0".encode_utf16().collect();
-    let title_font = unsafe {
-        CreateFontW(
-            20,
-            0,
-            0,
-            0,
-            FW_BOLD.0 as i32,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET.0 as u32,
-            CLIP_DEFAULT_PRECIS.0 as u32,
-            CLIP_DEFAULT_PRECIS.0 as u32,
-            DEFAULT_QUALITY.0 as u32,
-            (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
-            PCWSTR(wide_face.as_ptr()),
-        )
-    };
-    let normal_font = unsafe {
-        CreateFontW(
-            14,
-            0,
-            0,
-            0,
-            FW_NORMAL.0 as i32,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET.0 as u32,
-            CLIP_DEFAULT_PRECIS.0 as u32,
-            CLIP_DEFAULT_PRECIS.0 as u32,
-            DEFAULT_QUALITY.0 as u32,
-            (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
-            PCWSTR(wide_face.as_ptr()),
-        )
-    };
-    let bold_font = unsafe {
-        CreateFontW(
-            13,
-            0,
-            0,
-            0,
-            FW_BOLD.0 as i32,
-            0,
-            0,
-            0,
-            DEFAULT_CHARSET.0 as u32,
-            CLIP_DEFAULT_PRECIS.0 as u32,
-            CLIP_DEFAULT_PRECIS.0 as u32,
-            DEFAULT_QUALITY.0 as u32,
-            (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
-            PCWSTR(wide_face.as_ptr()),
-        )
-    };
-
-    // Header Title
-    let old_font = unsafe { SelectObject(hdc, HGDIOBJ(title_font.0)) };
-    unsafe {
-        let _ = SetTextColor(hdc, COLORREF(0x00FFFFFF));
-        let mut title = "isolmaSS Settings\0".encode_utf16().collect::<Vec<u16>>();
-        let mut rc = RECT {
-            left: 30,
-            top: 20,
-            right: 400,
-            bottom: 50,
-        };
-        let _ = DrawTextW(hdc, &mut title, &mut rc, DT_LEFT | DT_SINGLELINE);
-    }
-
-    // Switch to normal font for labels
-    unsafe {
-        SelectObject(hdc, HGDIOBJ(normal_font.0));
-    }
-
-    // Section 1: Hotkey Presets
-    unsafe {
-        let _ = SetTextColor(hdc, COLORREF(0x00A09C96));
-        let mut label = "Global Hotkey:\0".encode_utf16().collect::<Vec<u16>>();
-        let mut rc = RECT {
-            left: 30,
-            top: 60,
-            right: 135,
-            bottom: 85,
-        };
-        let _ = DrawTextW(hdc, &mut label, &mut rc, DT_LEFT | DT_SINGLELINE);
-    }
-
-    let hotkey_presets = [
-        (30, "PrintScreen", "PrtScn", 140, 220),
-        (31, "Ctrl+Shift+S", "Ctrl+Shift+S", 228, 330),
-        (32, "Alt+PrintScreen", "Alt+PrtScn", 338, 440),
-    ];
-
-    unsafe {
-        SelectObject(hdc, HGDIOBJ(bold_font.0));
-    }
-    for (id, desc, label_str, left, right) in hotkey_presets {
-        let is_selected = state.settings.hotkey.description.eq_ignore_ascii_case(desc);
-        let is_hovered = state.hovered_elem == Some(id);
-
-        let bg = if is_selected {
-            COLORREF(0x00D77800)
-        } else if is_hovered {
-            COLORREF(0x003A3632)
-        } else {
-            COLORREF(0x002E2B27)
-        };
-        let border = if is_selected {
-            COLORREF(0x00FA8919)
-        } else {
-            border_color
-        };
-        let brush = unsafe { CreateSolidBrush(bg) };
-        let pen = unsafe { CreatePen(PS_SOLID, 1, border) };
-        let p_old = unsafe { SelectObject(hdc, HGDIOBJ(pen.0)) };
-        let b_old = unsafe { SelectObject(hdc, HGDIOBJ(brush.0)) };
-
-        unsafe {
-            let _ = RoundRect(hdc, left, 56, right, 82, 4, 4);
-            SelectObject(hdc, p_old);
-            let _ = DeleteObject(HGDIOBJ(pen.0));
-            SelectObject(hdc, b_old);
-            let _ = DeleteObject(HGDIOBJ(brush.0));
-
-            let _ = SetTextColor(
-                hdc,
-                if is_selected {
-                    COLORREF(0x00FFFFFF)
-                } else {
-                    COLORREF(0x00D0CCC8)
-                },
-            );
-            let mut label = format!("{}\0", label_str)
-                .encode_utf16()
-                .collect::<Vec<u16>>();
-            let mut rc = RECT {
-                left,
-                top: 56,
-                right,
-                bottom: 82,
-            };
-            let _ = DrawTextW(hdc, &mut label, &mut rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        }
-    }
-
-    // Switch back to normal font
-    unsafe {
-        SelectObject(hdc, HGDIOBJ(normal_font.0));
-    }
-
-    // Section 2: Save Folder
-    unsafe {
-        let _ = SetTextColor(hdc, COLORREF(0x00A09C96));
-        let mut label = "Save Folder:\0".encode_utf16().collect::<Vec<u16>>();
-        let mut rc = RECT {
-            left: 30,
-            top: 92,
-            right: 180,
-            bottom: 115,
-        };
-        let _ = DrawTextW(hdc, &mut label, &mut rc, DT_LEFT | DT_SINGLELINE);
-
-        let _ = SetTextColor(hdc, COLORREF(0x00D0CCC8));
-        let display_path = state.settings.save_directory.to_string_lossy();
-        let mut val = format!("{}\0", display_path)
-            .encode_utf16()
-            .collect::<Vec<u16>>();
-        let mut rc_val = RECT {
-            left: 180,
-            top: 92,
-            right: 450,
-            bottom: 115,
-        };
-        let _ = DrawTextW(hdc, &mut val, &mut rc_val, DT_LEFT | DT_SINGLELINE);
-    }
-
-    // Section 3: Default Color
-    unsafe {
-        let _ = SetTextColor(hdc, COLORREF(0x00A09C96));
-        let mut label = "Default Color:\0".encode_utf16().collect::<Vec<u16>>();
-        let mut rc = RECT {
-            left: 30,
-            top: 130,
-            right: 440,
-            bottom: 150,
-        };
-        let _ = DrawTextW(hdc, &mut label, &mut rc, DT_LEFT | DT_SINGLELINE);
-    }
-
-    // Draw 8 Color Swatches
-    for (i, col) in PRESET_COLORS.iter().enumerate() {
-        let cx = 40 + (i as i32) * 36;
-        let cy = 155;
-        let is_selected = state.settings.default_color == *col;
-        let is_hovered = state.hovered_elem == Some(i);
-
-        let brush = unsafe { CreateSolidBrush(bgra_to_colorref(*col)) };
-        let pen_color = if is_selected {
-            COLORREF(0x00FFFFFF)
-        } else if is_hovered {
-            COLORREF(0x00D77800)
-        } else {
-            border_color
-        };
-        let pen = unsafe { CreatePen(PS_SOLID, if is_selected { 2 } else { 1 }, pen_color) };
-
-        let p_old = unsafe { SelectObject(hdc, HGDIOBJ(pen.0)) };
-        let b_old = unsafe { SelectObject(hdc, HGDIOBJ(brush.0)) };
-
-        unsafe {
-            let _ = RoundRect(hdc, cx, cy, cx + 26, cy + 26, 6, 6);
-            SelectObject(hdc, p_old);
-            let _ = DeleteObject(HGDIOBJ(pen.0));
-            SelectObject(hdc, b_old);
-            let _ = DeleteObject(HGDIOBJ(brush.0));
-        }
-    }
-
-    // Section 4: Default Thickness
-    unsafe {
-        let _ = SetTextColor(hdc, COLORREF(0x00A09C96));
-        let mut label = "Default Thickness:\0".encode_utf16().collect::<Vec<u16>>();
-        let mut rc = RECT {
-            left: 30,
-            top: 200,
-            right: 440,
-            bottom: 220,
-        };
-        let _ = DrawTextW(hdc, &mut label, &mut rc, DT_LEFT | DT_SINGLELINE);
-    }
-
-    // Draw 3 Thickness buttons
-    unsafe {
-        SelectObject(hdc, HGDIOBJ(bold_font.0));
-    }
-    for (i, thick) in PRESET_THICKNESSES.iter().enumerate() {
-        let tx = 40 + (i as i32) * 50;
-        let ty = 225;
-        let is_selected = state.settings.default_thickness == *thick;
-        let is_hovered = state.hovered_elem == Some(10 + i);
-
-        let bg = if is_selected {
-            COLORREF(0x00D77800)
-        } else if is_hovered {
-            COLORREF(0x003A3632)
-        } else {
-            COLORREF(0x002E2B27)
-        };
-        let brush = unsafe { CreateSolidBrush(bg) };
-        let pen = unsafe { CreatePen(PS_SOLID, 1, border_color) };
-        let p_old = unsafe { SelectObject(hdc, HGDIOBJ(pen.0)) };
-        let b_old = unsafe { SelectObject(hdc, HGDIOBJ(brush.0)) };
-
-        unsafe {
-            let _ = RoundRect(hdc, tx, ty, tx + 42, ty + 28, 4, 4);
-            SelectObject(hdc, p_old);
-            let _ = DeleteObject(HGDIOBJ(pen.0));
-            SelectObject(hdc, b_old);
-            let _ = DeleteObject(HGDIOBJ(brush.0));
-
-            let _ = SetTextColor(
-                hdc,
-                if is_selected {
-                    COLORREF(0x00FFFFFF)
-                } else {
-                    COLORREF(0x00D0CCC8)
-                },
-            );
-            let mut label = format!("{}px\0", thick).encode_utf16().collect::<Vec<u16>>();
-            let mut rc = RECT {
-                left: tx,
-                top: ty,
-                right: tx + 42,
-                bottom: ty + 28,
-            };
-            let _ = DrawTextW(hdc, &mut label, &mut rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        }
-    }
-
-    // Section 5: Behavior Checkboxes
-    let toggles = [
-        (40, state.settings.enable_window_snap, "Enable single-click window snap", 268),
-        (41, state.settings.close_after_action, "Close overlay automatically after Copy / Save", 302),
-    ];
-
-    for (elem_id, is_checked, label_str, top) in toggles {
-        let is_hovered = state.hovered_elem == Some(elem_id);
-        let box_left = 32;
-        let box_top = top + 2;
-        let box_right = box_left + 18;
-        let box_bottom = box_top + 18;
-
-        let (bg, border) = if is_checked {
-            (COLORREF(0x00D77800), COLORREF(0x00FA8919))
-        } else if is_hovered {
-            (COLORREF(0x003A3632), COLORREF(0x00807870))
-        } else {
-            (COLORREF(0x002A2825), border_color)
-        };
-
-        let brush = unsafe { CreateSolidBrush(bg) };
-        let pen = unsafe { CreatePen(PS_SOLID, 1, border) };
-        let p_old = unsafe { SelectObject(hdc, HGDIOBJ(pen.0)) };
-        let b_old = unsafe { SelectObject(hdc, HGDIOBJ(brush.0)) };
-
-        unsafe {
-            let _ = RoundRect(hdc, box_left, box_top, box_right, box_bottom, 4, 4);
-            SelectObject(hdc, p_old);
-            let _ = DeleteObject(HGDIOBJ(pen.0));
-            SelectObject(hdc, b_old);
-            let _ = DeleteObject(HGDIOBJ(brush.0));
-
-            if is_checked {
-                SelectObject(hdc, HGDIOBJ(bold_font.0));
-                let _ = SetTextColor(hdc, COLORREF(0x00FFFFFF));
-                let mut check = "v\0".encode_utf16().collect::<Vec<u16>>();
-                let mut rc_check = RECT {
-                    left: box_left,
-                    top: box_top,
-                    right: box_right,
-                    bottom: box_bottom,
-                };
-                let _ = DrawTextW(hdc, &mut check, &mut rc_check, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            }
-
-            SelectObject(hdc, HGDIOBJ(normal_font.0));
-            let txt_col = if is_hovered {
-                COLORREF(0x00FFFFFF)
-            } else {
-                COLORREF(0x00D0CCC8)
-            };
-            let _ = SetTextColor(hdc, txt_col);
-            let mut label = format!("{}\0", label_str).encode_utf16().collect::<Vec<u16>>();
-            let mut rc_label = RECT {
-                left: box_right + 12,
-                top,
-                right: 460,
-                bottom: top + 24,
-            };
-            let _ = DrawTextW(hdc, &mut label, &mut rc_label, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        }
-    }
-
-    // Section 6: Save & Cancel Buttons
-    // Save button
-    let save_hover = state.hovered_elem == Some(20);
-    let save_bg = if save_hover {
-        COLORREF(0x00FA8919)
-    } else {
-        COLORREF(0x00D77800)
-    };
-    let s_brush = unsafe { CreateSolidBrush(save_bg) };
-    let s_pen = unsafe { CreatePen(PS_SOLID, 1, save_bg) };
-    let po = unsafe { SelectObject(hdc, HGDIOBJ(s_pen.0)) };
-    let bo = unsafe { SelectObject(hdc, HGDIOBJ(s_brush.0)) };
-    unsafe {
-        let _ = RoundRect(hdc, 240, 350, 350, 384, 6, 6);
-        SelectObject(hdc, po);
-        let _ = DeleteObject(HGDIOBJ(s_pen.0));
-        SelectObject(hdc, bo);
-        let _ = DeleteObject(HGDIOBJ(s_brush.0));
-
-        let _ = SetTextColor(hdc, COLORREF(0x00FFFFFF));
-        let mut label = "Save & Apply\0".encode_utf16().collect::<Vec<u16>>();
-        let mut rc = RECT {
-            left: 240,
-            top: 350,
-            right: 350,
-            bottom: 384,
-        };
-        let _ = DrawTextW(hdc, &mut label, &mut rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    }
-
-    // Cancel button
-    let cancel_hover = state.hovered_elem == Some(21);
-    let cancel_bg = if cancel_hover {
-        COLORREF(0x003A3632)
-    } else {
-        COLORREF(0x002A2825)
-    };
-    let c_brush = unsafe { CreateSolidBrush(cancel_bg) };
-    let c_pen = unsafe { CreatePen(PS_SOLID, 1, border_color) };
-    let po = unsafe { SelectObject(hdc, HGDIOBJ(c_pen.0)) };
-    let bo = unsafe { SelectObject(hdc, HGDIOBJ(c_brush.0)) };
-    unsafe {
-        let _ = RoundRect(hdc, 360, 350, 440, 384, 6, 6);
-        SelectObject(hdc, po);
-        let _ = DeleteObject(HGDIOBJ(c_pen.0));
-        SelectObject(hdc, bo);
-        let _ = DeleteObject(HGDIOBJ(c_brush.0));
-
-        let _ = SetTextColor(hdc, COLORREF(0x00A09C96));
-        let mut label = "Cancel\0".encode_utf16().collect::<Vec<u16>>();
-        let mut rc = RECT {
-            left: 360,
-            top: 350,
-            right: 440,
-            bottom: 384,
-        };
-        let _ = DrawTextW(hdc, &mut label, &mut rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    }
-
-    // Render error notification if save failed
-    if let Some(err) = &state.last_error {
-        unsafe {
-            SelectObject(hdc, HGDIOBJ(bold_font.0));
-            SetTextColor(hdc, COLORREF(0x003131E0)); // Vibrant red (#E03131)
-            let mut err_wide = format!("{}\0", err).encode_utf16().collect::<Vec<u16>>();
-            let mut rc = RECT {
-                left: 32,
-                top: 350,
-                right: 230,
-                bottom: 384,
-            };
-            let _ = DrawTextW(hdc, &mut err_wide, &mut rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-        }
-    }
-
-    // Cleanup fonts
-    unsafe {
-        SelectObject(hdc, old_font);
-        let _ = DeleteObject(HGDIOBJ(title_font.0));
-        let _ = DeleteObject(HGDIOBJ(normal_font.0));
-        let _ = DeleteObject(HGDIOBJ(bold_font.0));
-    }
-}
-
-/// Registers the settings window class once.
-fn register_settings_class() -> Result<()> {
-    static REGISTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if REGISTERED.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        return Ok(());
-    }
-
-    let wc = WNDCLASSEXW {
-        cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-        style: windows::Win32::UI::WindowsAndMessaging::CS_HREDRAW
-            | windows::Win32::UI::WindowsAndMessaging::CS_VREDRAW,
-        lpfnWndProc: Some(settings_wnd_proc),
-        cbClsExtra: 0,
-        cbWndExtra: 0,
-        hInstance: HINSTANCE::default(),
-        hIcon: windows::Win32::UI::WindowsAndMessaging::HICON::default(),
-        hCursor: unsafe {
-            windows::Win32::UI::WindowsAndMessaging::LoadCursorW(
-                HINSTANCE::default(),
-                IDC_ARROW,
-            )
-            .unwrap_or_default()
-        },
-        hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH(unsafe {
-            GetStockObject(NULL_BRUSH).0
-        }),
-        lpszMenuName: windows::core::PCWSTR::null(),
-        lpszClassName: SETTINGS_CLASS_NAME,
-        hIconSm: windows::Win32::UI::WindowsAndMessaging::HICON::default(),
-    };
-
-    let atom = unsafe { RegisterClassExW(&wc) };
-    if atom == 0 {
-        return Err(windows::core::Error::from_win32());
-    }
-    Ok(())
-}
-
-/// Displays the native Win32 settings window.
-/// Returns `Some(Settings)` if the user clicked "Save & Apply", or `None` if cancelled.
-pub fn show_settings_dialog(current: &Settings) -> Result<Option<Settings>> {
-    register_settings_class()?;
-
-    let mut state = Box::new(SettingsWindowState {
-        settings: current.clone(),
-        saved: false,
-        hovered_elem: None,
-        last_error: None,
-    });
-
-    let width = 480;
-    let height = 430;
-
-    let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
-    let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
-    let x = (screen_w - width) / 2;
-    let y = (screen_h - height) / 2;
-
-    let hwnd = unsafe {
-        CreateWindowExW(
-            WS_EX_TOPMOST,
-            SETTINGS_CLASS_NAME,
-            w!("isolmaSS Settings"),
-            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
-            x,
-            y,
-            width,
-            height,
-            None,
-            None,
-            HINSTANCE::default(),
-            None,
-        )?
-    };
-
-    unsafe {
-        SetWindowLongPtrW(
-            hwnd,
-            GWLP_USERDATA,
-            state.as_mut() as *mut SettingsWindowState as isize,
-        );
-        let _ = ShowWindow(hwnd, SW_SHOW);
-        let _ = SetForegroundWindow(hwnd);
-        let _ = SetFocus(hwnd);
-    }
-
-    let mut msg = MSG::default();
-    while unsafe { GetMessageW(&mut msg, HWND::default(), 0, 0) }.0 > 0 {
-        unsafe {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
-
-    if state.saved {
-        Ok(Some(state.settings))
-    } else {
-        Ok(None)
-    }
-}
+pub use crate::settings_window::show_settings_dialog;
 
 #[cfg(test)]
 mod tests {
@@ -952,11 +240,19 @@ mod tests {
             "save_directory": defaults.save_directory,
             "default_color": defaults.default_color,
             "default_thickness": defaults.default_thickness,
-        }).to_string();
+        })
+        .to_string();
 
-        let loaded: Settings = serde_json::from_str(&legacy_json).expect("deserialize legacy settings");
-        assert!(loaded.enable_window_snap, "Legacy JSON should default enable_window_snap to true");
-        assert!(loaded.close_after_action, "Legacy JSON should default close_after_action to true");
+        let loaded: Settings =
+            serde_json::from_str(&legacy_json).expect("deserialize legacy settings");
+        assert!(
+            loaded.enable_window_snap,
+            "Legacy JSON should default enable_window_snap to true"
+        );
+        assert!(
+            loaded.close_after_action,
+            "Legacy JSON should default close_after_action to true"
+        );
 
         // Custom toggles
         deserialized.enable_window_snap = false;

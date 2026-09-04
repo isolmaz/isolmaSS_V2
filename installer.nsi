@@ -4,9 +4,11 @@
 ; ==============================================================================
 
 !define PRODUCT_NAME "isolmaSS"
-!define PRODUCT_VERSION "0.1.0"
-!define PRODUCT_PUBLISHER "isolmass"
-!define PRODUCT_WEB_SITE "https://github.com/isolmass/betterSS"
+!ifndef PRODUCT_VERSION
+  !error "PRODUCT_VERSION must be supplied by package.bat"
+!endif
+!define PRODUCT_PUBLISHER "isolmaSS"
+!define PRODUCT_WEB_SITE "https://github.com/isolmaz/isolmaSS_V2"
 !define PRODUCT_DIR_REGKEY "Software\Microsoft\Windows\CurrentVersion\App Paths\isolmass.exe"
 !define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
 !define PRODUCT_UNINST_ROOT_KEY "HKCU"
@@ -15,9 +17,15 @@ RequestExecutionLevel user
 SetCompressor /SOLID lzma
 
 !include "MUI2.nsh"
+!include "FileFunc.nsh"
+!include "LogicLib.nsh"
+
+Var IsUpdate
 
 ; MUI Configuration
 !define MUI_ABORTWARNING
+!define MUI_ICON "resources\app.ico"
+!define MUI_UNICON "resources\app.ico"
 
 ; Pages
 !insertmacro MUI_PAGE_WELCOME
@@ -39,9 +47,19 @@ InstallDirRegKey HKCU "${PRODUCT_DIR_REGKEY}" ""
 ShowInstDetails show
 ShowUnInstDetails show
 
+Function .onInit
+  StrCpy $IsUpdate "0"
+  ${GetParameters} $R0
+  ${GetOptions} $R0 "/UPDATE" $R1
+  ${If} $R1 != ""
+    StrCpy $IsUpdate "1"
+    Sleep 1500
+  ${EndIf}
+FunctionEnd
+
 Section "MainSection" SEC01
   SetOutPath "$INSTDIR"
-  SetOverwrite ifnewer
+  SetOverwrite on
   File "target\release\isolmass.exe"
 
   ; Start Menu Shortcuts
@@ -64,6 +82,10 @@ Section -Post
   WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "DisplayVersion" "${PRODUCT_VERSION}"
   WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "URLInfoAbout" "${PRODUCT_WEB_SITE}"
   WriteRegStr ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}" "Publisher" "${PRODUCT_PUBLISHER}"
+
+  ${If} $IsUpdate == "1"
+    Exec '"$INSTDIR\isolmass.exe"'
+  ${EndIf}
 SectionEnd
 
 Section Uninstall
@@ -80,5 +102,6 @@ Section Uninstall
 
   DeleteRegKey ${PRODUCT_UNINST_ROOT_KEY} "${PRODUCT_UNINST_KEY}"
   DeleteRegKey HKCU "${PRODUCT_DIR_REGKEY}"
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "isolmaSS"
   SetAutoClose true
 SectionEnd

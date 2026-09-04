@@ -1,8 +1,9 @@
 use crate::capture::Rect;
+use crate::settings::SaveFormat;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
-use windows::core::{GUID, PCWSTR};
 use windows::Win32::System::SystemInformation::GetLocalTime;
+use windows::core::{GUID, PCWSTR};
 
 #[repr(C)]
 struct GdiplusStartupInput {
@@ -10,6 +11,20 @@ struct GdiplusStartupInput {
     debug_event_callback: usize,
     suppress_background_thread: i32,
     suppress_external_codecs: i32,
+}
+
+#[repr(C)]
+struct EncoderParameter {
+    guid: GUID,
+    number_of_values: u32,
+    value_type: u32,
+    value: *mut c_void,
+}
+
+#[repr(C)]
+struct EncoderParameters {
+    count: u32,
+    parameter: [EncoderParameter; 1],
 }
 
 #[link(name = "gdiplus")]
@@ -37,39 +52,175 @@ unsafe extern "system" {
     fn GdipDisposeImage(image: *mut c_void) -> i32;
 }
 
-// Standard Windows PNG Encoder CLSID: {557cf406-1a04-11d3-9a73-0000f81ef32e}
 pub const CLSID_PNG: GUID = GUID::from_u128(0x557cf406_1a04_11d3_9a73_0000f81ef32e);
-
-// PixelFormat32bppARGB = 0x0026200A (top-down 32-bit BGRA in Windows memory)
+const CLSID_JPEG: GUID = GUID::from_u128(0x557cf401_1a04_11d3_9a73_0000f81ef32e);
+const ENCODER_QUALITY: GUID = GUID::from_u128(0x1d5be4b5_fa4a_452d_9cdd_5db35105e7eb);
+const ENCODER_PARAMETER_VALUE_TYPE_LONG: u32 = 4;
 const PIXEL_FORMAT_32BPP_ARGB: i32 = 0x0026200A;
 
-/// Generates a timestamped filename: `Screenshot_YYYY-MM-DD_HH-MM-SS.png`.
+struct GdiPlusToken(usize);
+
+impl GdiPlusToken {
+    fn start() -> Result<Self, String> {
+        let mut token = 0usize;
+        let input = GdiplusStartupInput {
+            gdiplus_version: 1,
+            debug_event_callback: 0,
+            suppress_background_thread: 0,
+            suppress_external_codecs: 0,
+        };
+        let status = unsafe { GdiplusStartup(&mut token, &input, std::ptr::null_mut()) };
+        if status == 0 {
+            Ok(Self(token))
+        } else {
+            Err(format!("GDI+ startup failed with status {status}"))
+        }
+    }
+}
+
+impl Drop for GdiPlusToken {
+    fn drop(&mut self) {
+        unsafe { GdiplusShutdown(self.0) };
+    }
+}
+
+struct GdiPlusBitmap(*mut c_void);
+
+impl Drop for GdiPlusBitmap {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                let _ = GdipDisposeImage(self.0);
+            }
+        }
+    }
+}
+
 pub fn generate_screenshot_filename() -> String {
+    generate_screenshot_filename_for(SaveFormat::Png)
+}
+
+pub fn generate_screenshot_filename_for(format: SaveFormat) -> String {
     let st = unsafe { GetLocalTime() };
     format!(
-        "Screenshot_{:04}-{:02}-{:02}_{:02}-{:02}-{:02}.png",
-        st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond
+        "Screenshot_{:04}-{:02}-{:02}_{:02}-{:02}-{:02}-{:03}.{}",
+        st.wYear,
+        st.wMonth,
+        st.wDay,
+        st.wHour,
+        st.wMinute,
+        st.wSecond,
+        st.wMilliseconds,
+        format.extension()
     )
 }
 
-/// Returns the default screenshot save directory: `%USERPROFILE%\Pictures\Screenshots`.
-/// Creates the directory if it does not exist.
 pub fn default_save_directory() -> PathBuf {
-    if let Some(user_profile) = std::env::var_os("USERPROFILE") {
-        let mut p = PathBuf::from(user_profile);
-        p.push("Pictures");
-        p.push("Screenshots");
-        if !p.exists() {
-            let _ = std::fs::create_dir_all(&p);
-        }
-        if p.exists() {
-            return p;
-        }
-    }
-    PathBuf::from(".")
+    std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .map(|path| path.join("Pictures").join("Screenshots"))
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// Saves a rectangular sub-region from a 32-bit BGRA buffer directly to a PNG file using GDI+.
+fn extract_selection(
+    buffer: &[u8],
+    full_width: i32,
+    full_height: i32,
+    selection: &Rect,
+) -> Result<(Vec<u8>, i32, i32), String> {
+    let clamped = selection.clamp(full_width, full_height);
+    if clamped.is_empty() || full_width <= 0 || full_height <= 0 {
+        return Err("The screenshot selection is empty or invalid.".to_string());
+    }
+
+    let width = clamped.width();
+    let height = clamped.height();
+    let source_stride = full_width as usize * 4;
+    let destination_stride = width as usize * 4;
+    let required = (full_width as usize)
+        .checked_mul(full_height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| "The screenshot dimensions are too large.".to_string())?;
+    if buffer.len() < required {
+        return Err("The screenshot buffer is smaller than its dimensions.".to_string());
+    }
+
+    let mut pixels = vec![0u8; destination_stride * height as usize];
+    for row in 0..height {
+        let source_start = (clamped.top + row) as usize * source_stride + clamped.left as usize * 4;
+        let destination_start = row as usize * destination_stride;
+        pixels[destination_start..destination_start + destination_stride]
+            .copy_from_slice(&buffer[source_start..source_start + destination_stride]);
+    }
+    Ok((pixels, width, height))
+}
+
+pub fn save_buffer_to_image(
+    buffer: &[u8],
+    full_width: i32,
+    full_height: i32,
+    selection: &Rect,
+    output_path: &Path,
+    format: SaveFormat,
+    jpeg_quality: u8,
+) -> Result<PathBuf, String> {
+    let (mut pixels, width, height) =
+        extract_selection(buffer, full_width, full_height, selection)?;
+    let _token = GdiPlusToken::start()?;
+
+    let mut raw_bitmap = std::ptr::null_mut();
+    let status = unsafe {
+        GdipCreateBitmapFromScan0(
+            width,
+            height,
+            width * 4,
+            PIXEL_FORMAT_32BPP_ARGB,
+            pixels.as_mut_ptr(),
+            &mut raw_bitmap,
+        )
+    };
+    if status != 0 || raw_bitmap.is_null() {
+        return Err(format!(
+            "GDI+ could not create the image (status {status})."
+        ));
+    }
+    let bitmap = GdiPlusBitmap(raw_bitmap);
+
+    let wide_path: Vec<u16> = output_path
+        .as_os_str()
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+
+    let mut quality = u32::from(jpeg_quality.clamp(1, 100));
+    let encoder_parameters = EncoderParameters {
+        count: 1,
+        parameter: [EncoderParameter {
+            guid: ENCODER_QUALITY,
+            number_of_values: 1,
+            value_type: ENCODER_PARAMETER_VALUE_TYPE_LONG,
+            value: (&mut quality as *mut u32).cast(),
+        }],
+    };
+    let (encoder, parameters) = match format {
+        SaveFormat::Png => (&CLSID_PNG, std::ptr::null()),
+        SaveFormat::Jpeg => (
+            &CLSID_JPEG,
+            (&encoder_parameters as *const EncoderParameters).cast::<c_void>(),
+        ),
+    };
+
+    let save_status =
+        unsafe { GdipSaveImageToFile(bitmap.0, PCWSTR(wide_path.as_ptr()), encoder, parameters) };
+    if save_status != 0 {
+        return Err(format!(
+            "GDI+ could not save the image (status {save_status})."
+        ));
+    }
+    Ok(output_path.to_path_buf())
+}
+
 pub fn save_buffer_to_png(
     buffer: &[u8],
     full_width: i32,
@@ -77,120 +228,116 @@ pub fn save_buffer_to_png(
     selection: &Rect,
     output_path: &Path,
 ) -> Result<PathBuf, String> {
-    let clamped = selection.clamp(full_width, full_height);
-    if clamped.is_empty() || full_width <= 0 || full_height <= 0 {
-        return Err("Invalid or empty selection rectangle".to_string());
-    }
-
-    let w = clamped.width();
-    let h = clamped.height();
-    let src_stride = full_width as usize * 4;
-    let dst_stride = w as usize * 4;
-
-    // Extract contiguous sub-region pixels
-    let mut pixels = vec![0u8; (w as usize) * (h as usize) * 4];
-    for y in 0..h {
-        let src_y = (clamped.top + y) as usize;
-        let src_offset = (src_y * src_stride) + (clamped.left as usize * 4);
-        let dst_offset = (y as usize) * dst_stride;
-
-        if src_offset + dst_stride <= buffer.len() && dst_offset + dst_stride <= pixels.len() {
-            pixels[dst_offset..dst_offset + dst_stride]
-                .copy_from_slice(&buffer[src_offset..src_offset + dst_stride]);
-        } else {
-            return Err("Buffer bounds exceeded during image extraction".to_string());
-        }
-    }
-
-    // 1. Startup GDI+
-    let mut token = 0usize;
-    let startup_input = GdiplusStartupInput {
-        gdiplus_version: 1,
-        debug_event_callback: 0,
-        suppress_background_thread: 0,
-        suppress_external_codecs: 0,
-    };
-
-    let start_status = unsafe {
-        GdiplusStartup(
-            &mut token,
-            &startup_input,
-            std::ptr::null_mut(),
-        )
-    };
-    if start_status != 0 {
-        return Err(format!("GdiplusStartup failed with status {}", start_status));
-    }
-
-    // 2. Create Bitmap from pixel buffer
-    let mut bitmap: *mut c_void = std::ptr::null_mut();
-    let create_status = unsafe {
-        GdipCreateBitmapFromScan0(
-            w,
-            h,
-            dst_stride as i32,
-            PIXEL_FORMAT_32BPP_ARGB,
-            pixels.as_mut_ptr(),
-            &mut bitmap,
-        )
-    };
-
-    if create_status != 0 || bitmap.is_null() {
-        unsafe {
-            GdiplusShutdown(token);
-        }
-        return Err(format!("GdipCreateBitmapFromScan0 failed with status {}", create_status));
-    }
-
-    // 3. Save Image to PNG
-    let wide_path: Vec<u16> = output_path
-        .to_string_lossy()
-        .encode_utf16()
-        .chain(Some(0))
-        .collect();
-
-    let save_status = unsafe {
-        GdipSaveImageToFile(
-            bitmap,
-            PCWSTR(wide_path.as_ptr()),
-            &CLSID_PNG,
-            std::ptr::null(),
-        )
-    };
-
-    // 4. Dispose Bitmap and Shutdown GDI+
-    unsafe {
-        GdipDisposeImage(bitmap);
-        GdiplusShutdown(token);
-    }
-
-    if save_status != 0 {
-        return Err(format!("GdipSaveImageToFile failed with status {}", save_status));
-    }
-
-    Ok(output_path.to_path_buf())
+    save_buffer_to_image(
+        buffer,
+        full_width,
+        full_height,
+        selection,
+        output_path,
+        SaveFormat::Png,
+        100,
+    )
 }
 
-/// High-level function: saves the current screenshot selection to a PNG file.
+fn unique_output_path(directory: &Path, format: SaveFormat) -> PathBuf {
+    let initial = directory.join(generate_screenshot_filename_for(format));
+    if !initial.exists() {
+        return initial;
+    }
+
+    let stem = initial
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Screenshot");
+    for suffix in 1..=9999 {
+        let candidate = directory.join(format!("{stem}_{suffix:04}.{}", format.extension()));
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    directory.join(format!(
+        "{stem}_{}.{}",
+        std::process::id(),
+        format.extension()
+    ))
+}
+
 pub fn save_screenshot(
     buffer: &[u8],
     full_width: i32,
     full_height: i32,
     selection: &Rect,
     custom_dir: Option<&Path>,
+    format: SaveFormat,
+    jpeg_quality: u8,
 ) -> Result<PathBuf, String> {
-    let dir = match custom_dir {
-        Some(d) => d.to_path_buf(),
-        None => default_save_directory(),
-    };
-
-    if !dir.exists() {
-        let _ = std::fs::create_dir_all(&dir);
+    let directory = custom_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(default_save_directory);
+    std::fs::create_dir_all(&directory).map_err(|error| {
+        format!(
+            "Could not create the screenshot folder '{}': {error}",
+            directory.display()
+        )
+    })?;
+    if !directory.is_dir() {
+        return Err(format!(
+            "The screenshot destination '{}' is not a directory.",
+            directory.display()
+        ));
     }
 
-    let filename = generate_screenshot_filename();
-    let mut file_path = dir;
-    file_path.push(filename);
+    let output_path = unique_output_path(&directory, format);
+    let temp_path = directory.join(format!(
+        ".isolmass-{}-{}.tmp",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos())
+    ));
 
-    save_buffer_to_png(buffer, full_width, full_height, selection, &file_path)
+    let result = (|| {
+        save_buffer_to_image(
+            buffer,
+            full_width,
+            full_height,
+            selection,
+            &temp_path,
+            format,
+            jpeg_quality,
+        )?;
+        std::fs::rename(&temp_path, &output_path).map_err(|error| {
+            format!(
+                "Could not finalize screenshot '{}': {error}",
+                output_path.display()
+            )
+        })?;
+        Ok(output_path)
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    result
+}
+
+pub fn recent_screenshots(directory: &Path, limit: usize) -> std::io::Result<Vec<PathBuf>> {
+    if limit == 0 || !directory.exists() {
+        return Ok(Vec::new());
+    }
+    let mut entries = std::fs::read_dir(directory)?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+            if !matches!(extension.as_str(), "png" | "jpg" | "jpeg") {
+                return None;
+            }
+            let modified = entry.metadata().ok()?.modified().ok()?;
+            Some((modified, path))
+        })
+        .collect::<Vec<_>>();
+    entries.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.0));
+    entries.truncate(limit);
+    Ok(entries.into_iter().map(|(_, path)| path).collect())
 }

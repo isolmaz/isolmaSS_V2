@@ -2,11 +2,11 @@ use crate::capture::Rect;
 use std::ffi::c_void;
 use windows::Win32::Foundation::{BOOL, HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Dwm::{
-    DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
+    DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DwmGetWindowAttribute,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetClassNameW, GetWindowLongW, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, IsIconic, IsWindowVisible, GWL_EXSTYLE, WS_EX_TOOLWINDOW,
+    EnumWindows, GWL_EXSTYLE, GetClassNameW, GetWindowLongW, GetWindowRect, GetWindowTextLengthW,
+    GetWindowTextW, IsIconic, IsWindowVisible, WS_EX_TOOLWINDOW,
 };
 
 /// Information about an enumerated top-level window.
@@ -116,12 +116,7 @@ pub fn get_visible_windows(exclude_hwnd: Option<HWND>) -> Vec<WindowInfo> {
         } else {
             let mut win_rect = RECT::default();
             let _ = unsafe { GetWindowRect(hwnd, &mut win_rect) };
-            Rect::new(
-                win_rect.left,
-                win_rect.top,
-                win_rect.right,
-                win_rect.bottom,
-            )
+            Rect::new(win_rect.left, win_rect.top, win_rect.right, win_rect.bottom)
         };
 
         // Ignore zero-area or inverted windows
@@ -149,15 +144,20 @@ pub fn get_visible_windows(exclude_hwnd: Option<HWND>) -> Vec<WindowInfo> {
     context.windows
 }
 
+pub fn find_window_in_list(
+    windows: &[WindowInfo],
+    screen_point: (i32, i32),
+) -> Option<&WindowInfo> {
+    windows
+        .iter()
+        .find(|window| window.bounds.contains(screen_point.0, screen_point.1))
+}
+
 /// Finds the topmost visible window under the given screen coordinate `(x, y)`.
 pub fn find_window_at_point(
     screen_point: (i32, i32),
     exclude_hwnd: Option<HWND>,
 ) -> Option<WindowInfo> {
     let windows = get_visible_windows(exclude_hwnd);
-    // Windows are returned in top-to-bottom Z-order from EnumWindows,
-    // so the first window containing the point is the topmost window.
-    windows
-        .into_iter()
-        .find(|win| win.bounds.contains(screen_point.0, screen_point.1))
+    find_window_in_list(&windows, screen_point).cloned()
 }

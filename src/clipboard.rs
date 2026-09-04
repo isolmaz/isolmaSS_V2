@@ -1,9 +1,11 @@
 use crate::capture::Rect;
-use windows::core::{Error, Result};
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HWND};
-use windows::Win32::Graphics::Gdi::{BITMAPINFOHEADER, BI_RGB};
-use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
-use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::Graphics::Gdi::{BI_RGB, BITMAPINFOHEADER};
+use windows::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+};
+use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
+use windows::core::{Error, Result};
 
 pub const CF_DIB_FORMAT: u32 = 8; // Standard Windows CF_DIB format
 
@@ -58,10 +60,7 @@ pub fn flatten_selection_to_dib(
     };
 
     let header_slice = unsafe {
-        std::slice::from_raw_parts(
-            &header as *const BITMAPINFOHEADER as *const u8,
-            header_size,
-        )
+        std::slice::from_raw_parts(&header as *const BITMAPINFOHEADER as *const u8, header_size)
     };
     dib_bytes.extend_from_slice(header_slice);
 

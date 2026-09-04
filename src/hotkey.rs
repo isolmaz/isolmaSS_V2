@@ -1,21 +1,21 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
+use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::{self, JoinHandle};
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, GetKeyboardState, RegisterHotKey, ToUnicode, UnregisterHotKey,
-    HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, MOD_SHIFT, MOD_WIN, VK_BACK,
-    VK_CONTROL, VK_DELETE, VK_ESCAPE, VK_LEFT, VK_LWIN, VK_MENU, VK_RETURN, VK_RIGHT, VK_RWIN,
-    VK_SHIFT, VK_SNAPSHOT,
+    GetAsyncKeyState, GetKeyboardState, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT,
+    MOD_SHIFT, MOD_WIN, RegisterHotKey, ToUnicode, UnregisterHotKey, VK_BACK, VK_CONTROL,
+    VK_DELETE, VK_ESCAPE, VK_LEFT, VK_LWIN, VK_MENU, VK_RETURN, VK_RIGHT, VK_RWIN, VK_SHIFT,
+    VK_SNAPSHOT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, GetMessageW, PeekMessageW, PostMessageW, PostThreadMessageW, SetWindowsHookExW,
-    UnhookWindowsHookEx, HHOOK, KBDLLHOOKSTRUCT, KBDLLHOOKSTRUCT_FLAGS, MSG, PM_NOREMOVE,
+    CallNextHookEx, GetMessageW, HHOOK, KBDLLHOOKSTRUCT, KBDLLHOOKSTRUCT_FLAGS, MSG, PM_NOREMOVE,
+    PeekMessageW, PostMessageW, PostThreadMessageW, SetWindowsHookExW, UnhookWindowsHookEx,
     WH_KEYBOARD_LL, WM_HOTKEY, WM_KEYDOWN, WM_KEYUP, WM_QUIT, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_USER,
 };
 
@@ -229,12 +229,7 @@ pub fn register_overlay(hwnd: HWND) {
                 .unwrap_or_default()
         };
         let hook_handle: windows::core::Result<HHOOK> = unsafe {
-            SetWindowsHookExW(
-                WH_KEYBOARD_LL,
-                Some(low_level_keyboard_proc),
-                hinstance,
-                0,
-            )
+            SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_level_keyboard_proc), hinstance, 0)
         };
         if let Ok(hook) = hook_handle {
             OVERLAY_LOCAL_HOOK.store(hook.0 as isize, Ordering::SeqCst);
@@ -387,13 +382,7 @@ pub unsafe fn process_keyboard_hook(
 
                         let mut chars = [0u16; 8];
                         let count = unsafe {
-                            ToUnicode(
-                                kb.vkCode,
-                                kb.scanCode,
-                                Some(&key_state),
-                                &mut chars,
-                                0x04,
-                            )
+                            ToUnicode(kb.vkCode, kb.scanCode, Some(&key_state), &mut chars, 0x04)
                         };
                         if count > 0 {
                             for ch in &chars[..count as usize] {
@@ -561,12 +550,7 @@ pub fn start_hotkey_listener(
         };
 
         let hook_handle: windows::core::Result<HHOOK> = unsafe {
-            SetWindowsHookExW(
-                WH_KEYBOARD_LL,
-                Some(low_level_keyboard_proc),
-                hinstance,
-                0,
-            )
+            SetWindowsHookExW(WH_KEYBOARD_LL, Some(low_level_keyboard_proc), hinstance, 0)
         };
 
         let active_desc = if is_snapshot {
@@ -675,7 +659,7 @@ pub fn start_hotkey_listener(
             return Err(windows::core::Error::new(
                 windows::core::HRESULT(-1),
                 "Hotkey thread exited unexpectedly",
-            ))
+            ));
         }
     };
 
@@ -713,31 +697,51 @@ mod tests {
         // 1. Overlay NOT active: Esc passes through
         OVERLAY_ACTIVE.store(false, Ordering::SeqCst);
         let res1 = unsafe { process_keyboard_hook(0, wparam_down, lparam_esc, 0) };
-        assert_ne!(res1, LRESULT(1), "Esc should pass through when overlay inactive");
+        assert_ne!(
+            res1,
+            LRESULT(1),
+            "Esc should pass through when overlay inactive"
+        );
 
         // 2. Overlay active: Esc is consumed with LRESULT(1)
         OVERLAY_ACTIVE.store(true, Ordering::SeqCst);
         let res2 = unsafe { process_keyboard_hook(0, wparam_down, lparam_esc, 0) };
-        assert_eq!(res2, LRESULT(1), "Esc should be consumed with LRESULT(1) when overlay active");
+        assert_eq!(
+            res2,
+            LRESULT(1),
+            "Esc should be consumed with LRESULT(1) when overlay active"
+        );
 
         // 3. Overlay active, text editing mode: keystroke is consumed
         set_overlay_text_editing(true);
         let kb_a = create_test_kbdllhookstruct(0x41); // 'A' key
         let lparam_a = LPARAM(&kb_a as *const _ as isize);
         let res3 = unsafe { process_keyboard_hook(0, wparam_down, lparam_a, 0) };
-        assert_eq!(res3, LRESULT(1), "Characters should be consumed in text edit mode");
+        assert_eq!(
+            res3,
+            LRESULT(1),
+            "Characters should be consumed in text edit mode"
+        );
 
         // 4. Overlay active, not text editing: shortcuts are consumed
         set_overlay_text_editing(false);
         let kb_r = create_test_kbdllhookstruct(0x52); // 'R' key (Rectangle tool)
         let lparam_r = LPARAM(&kb_r as *const _ as isize);
         let res4 = unsafe { process_keyboard_hook(0, wparam_down, lparam_r, 0) };
-        assert_eq!(res4, LRESULT(1), "Shortcut 'R' should be consumed when overlay active");
+        assert_eq!(
+            res4,
+            LRESULT(1),
+            "Shortcut 'R' should be consumed when overlay active"
+        );
 
         let kb_c = create_test_kbdllhookstruct(0x43); // 'C' key
         let lparam_c = LPARAM(&kb_c as *const _ as isize);
         let res5 = unsafe { process_keyboard_hook(0, wparam_down, lparam_c, MOD_CONTROL.0) };
-        assert_eq!(res5, LRESULT(1), "Shortcut Ctrl+C should be consumed when overlay active");
+        assert_eq!(
+            res5,
+            LRESULT(1),
+            "Shortcut Ctrl+C should be consumed when overlay active"
+        );
 
         // Cleanup
         OVERLAY_ACTIVE.store(false, Ordering::SeqCst);

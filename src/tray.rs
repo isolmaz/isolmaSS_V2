@@ -1,33 +1,101 @@
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use crate::save::recent_screenshots;
+use crate::settings::Settings;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
-use windows::core::{w, PCWSTR, Result};
-use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Foundation::{
+    ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM,
+};
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::{
-    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
+    NIF_ICON, NIF_INFO, NIF_MESSAGE, NIF_TIP, NIIF_INFO, NIIF_RESPECT_QUIET_TIME, NIM_ADD,
+    NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NOTIFYICON_VERSION_4, NOTIFYICONDATAW,
+    Shell_NotifyIconW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    GetCursorPos, GetWindowLongPtrW, LoadIconW, PostQuitMessage, RegisterClassExW,
-    SetForegroundWindow, SetMenuDefaultItem, SetWindowLongPtrW, TrackPopupMenu, GWLP_USERDATA,
-    HICON, IDI_APPLICATION, MF_SEPARATOR, MF_STRING, TPM_BOTTOMALIGN, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, WM_APP, WM_CLOSE, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP,
+    GWLP_USERDATA, GetCursorPos, GetWindowLongPtrW, HICON, IDI_APPLICATION, LoadIconW,
+    MB_ICONERROR, MB_OK, MF_GRAYED, MF_SEPARATOR, MF_STRING, MessageBoxW, PostMessageW,
+    PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SetForegroundWindow,
+    SetMenuDefaultItem, SetWindowLongPtrW, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+    TrackPopupMenu, WM_APP, WM_CLOSE, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP, WM_RBUTTONUP,
     WNDCLASSEXW,
 };
+use windows::core::{PCWSTR, Result, w};
 
 pub const WM_TRAYICON: u32 = WM_APP + 101;
+pub const WM_SHOW_EXISTING: u32 = WM_APP + 102;
 const TRAY_CLASS_NAME: PCWSTR = w!("isolmaSS_TrayClass");
+const TRAY_ICON_ID: u32 = 1001;
+const RESOURCE_ICON_ID: usize = 101;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrayCommand {
     Capture,
     Settings,
+    CheckUpdates,
+    OpenRecent(PathBuf),
     Exit,
 }
 
 static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
+static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
 struct TrayWindowState {
     event_tx: Sender<TrayCommand>,
+}
+
+fn copy_wide<const N: usize>(destination: &mut [u16; N], value: &str) {
+    let wide = value.encode_utf16().chain(Some(0));
+    for (slot, code_unit) in destination.iter_mut().zip(wide) {
+        *slot = code_unit;
+    }
+}
+
+pub fn app_icon() -> HICON {
+    let instance = unsafe {
+        GetModuleHandleW(None)
+            .ok()
+            .map(|module| HINSTANCE(module.0))
+            .unwrap_or_default()
+    };
+    unsafe {
+        LoadIconW(instance, PCWSTR(RESOURCE_ICON_ID as *const u16))
+            .or_else(|_| LoadIconW(HINSTANCE::default(), IDI_APPLICATION))
+            .unwrap_or_default()
+    }
+}
+
+fn base_notify_data(hwnd: HWND) -> NOTIFYICONDATAW {
+    let mut data = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: TRAY_ICON_ID,
+        uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
+        uCallbackMessage: WM_TRAYICON,
+        hIcon: app_icon(),
+        ..Default::default()
+    };
+    copy_wide(&mut data.szTip, "isolmaSS - Screenshot Utility");
+    data
+}
+
+fn add_tray_icon(hwnd: HWND) -> Result<NOTIFYICONDATAW> {
+    let mut data = base_notify_data(hwnd);
+    if !unsafe { Shell_NotifyIconW(NIM_ADD, &data) }.as_bool() {
+        return Err(windows::core::Error::from_win32());
+    }
+    data.Anonymous.uVersion = NOTIFYICON_VERSION_4;
+    if !unsafe { Shell_NotifyIconW(NIM_SETVERSION, &data) }.as_bool() {
+        let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &data) };
+        return Err(windows::core::Error::from_win32());
+    }
+    Ok(data)
+}
+
+fn send_command(state: &TrayWindowState, command: TrayCommand) {
+    let _ = state.event_tx.send(command);
+    notify_tray_wakeup();
 }
 
 unsafe extern "system" fn tray_wnd_proc(
@@ -38,68 +106,42 @@ unsafe extern "system" fn tray_wnd_proc(
 ) -> LRESULT {
     let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut TrayWindowState;
 
+    if msg == TASKBAR_CREATED.load(Ordering::SeqCst) && msg != 0 {
+        if add_tray_icon(hwnd).is_err() {
+            let _ = unsafe {
+                MessageBoxW(
+                    hwnd,
+                    w!("The isolmaSS tray icon could not be restored after Explorer restarted."),
+                    w!("isolmaSS tray error"),
+                    MB_OK | MB_ICONERROR,
+                )
+            };
+        }
+        return LRESULT(0);
+    }
+
     match msg {
-        WM_TRAYICON => {
+        WM_SHOW_EXISTING => {
             if !state_ptr.is_null() {
-                let state = unsafe { &*state_ptr };
-                let mouse_msg = lparam.0 as u32;
-
-                match mouse_msg {
-                    WM_LBUTTONUP | WM_LBUTTONDBLCLK => {
-                        let _ = state.event_tx.send(TrayCommand::Capture);
-                        notify_tray_wakeup();
-                    }
-                    WM_RBUTTONUP => {
-                        let mut pt = POINT::default();
-                        unsafe {
-                            let _ = GetCursorPos(&mut pt);
-                        }
-
-                        if let Ok(hmenu) = unsafe { CreatePopupMenu() } {
-                            unsafe {
-                                let _ = AppendMenuW(hmenu, MF_STRING, 1, w!("Capture Now"));
-                                let _ = AppendMenuW(hmenu, MF_STRING, 2, w!("Settings..."));
-                                let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
-                                let _ = AppendMenuW(hmenu, MF_STRING, 3, w!("Exit"));
-
-                                // Bold the default item (Capture Now)
-                                let _ = SetMenuDefaultItem(hmenu, 1, 0);
-
-                                // Required by TrackPopupMenu for tray icons
-                                let _ = SetForegroundWindow(hwnd);
-
-                                let cmd = TrackPopupMenu(
-                                    hmenu,
-                                    TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RETURNCMD,
-                                    pt.x,
-                                    pt.y,
-                                    0,
-                                    hwnd,
-                                    None,
-                                );
-
-                                let _ = DestroyMenu(hmenu);
-
-                                match cmd.0 {
-                                    1 => {
-                                        let _ = state.event_tx.send(TrayCommand::Capture);
-                                        notify_tray_wakeup();
-                                    }
-                                    2 => {
-                                        let _ = state.event_tx.send(TrayCommand::Settings);
-                                        notify_tray_wakeup();
-                                    }
-                                    3 => {
-                                        let _ = state.event_tx.send(TrayCommand::Exit);
-                                        notify_tray_wakeup();
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                    _ => {}
-                }
+                send_command(unsafe { &*state_ptr }, TrayCommand::Settings);
+            }
+            LRESULT(0)
+        }
+        WM_TRAYICON => {
+            if state_ptr.is_null() {
+                return LRESULT(0);
+            }
+            let packed = lparam.0 as u32;
+            let event = packed & 0xffff;
+            let icon_id = packed >> 16;
+            if icon_id != TRAY_ICON_ID {
+                return LRESULT(0);
+            }
+            let state = unsafe { &*state_ptr };
+            match event {
+                WM_LBUTTONUP | WM_LBUTTONDBLCLK => send_command(state, TrayCommand::Capture),
+                WM_RBUTTONUP => show_context_menu(hwnd, state),
+                _ => {}
             }
             LRESULT(0)
         }
@@ -108,44 +150,94 @@ unsafe extern "system" fn tray_wnd_proc(
             LRESULT(0)
         }
         WM_DESTROY => {
-            unsafe {
-                PostQuitMessage(0);
-            }
+            unsafe { PostQuitMessage(0) };
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
 
+fn show_context_menu(hwnd: HWND, state: &TrayWindowState) {
+    let mut point = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut point);
+    }
+    let Ok(menu) = (unsafe { CreatePopupMenu() }) else {
+        return;
+    };
+
+    let settings = Settings::load_or_default();
+    let recent = recent_screenshots(&settings.save_directory, 5).unwrap_or_default();
+    unsafe {
+        let _ = AppendMenuW(menu, MF_STRING, 1, w!("Capture Now"));
+        let _ = AppendMenuW(menu, MF_STRING, 2, w!("Settings..."));
+        let _ = AppendMenuW(menu, MF_STRING, 3, w!("Check for Updates"));
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        if recent.is_empty() {
+            let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 99, w!("No Recent Captures"));
+        } else {
+            let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 98, w!("Recent Captures"));
+            for (index, path) in recent.iter().enumerate() {
+                let label = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("Screenshot");
+                let wide: Vec<u16> = label.encode_utf16().chain(Some(0)).collect();
+                let _ = AppendMenuW(menu, MF_STRING, 100 + index, PCWSTR(wide.as_ptr()));
+            }
+        }
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+        let _ = AppendMenuW(menu, MF_STRING, 4, w!("Exit"));
+        let _ = SetMenuDefaultItem(menu, 1, 0);
+        let _ = SetForegroundWindow(hwnd);
+
+        let selected = TrackPopupMenu(
+            menu,
+            TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RETURNCMD,
+            point.x,
+            point.y,
+            0,
+            hwnd,
+            None,
+        );
+        let _ = DestroyMenu(menu);
+        match selected.0 {
+            1 => send_command(state, TrayCommand::Capture),
+            2 => send_command(state, TrayCommand::Settings),
+            3 => send_command(state, TrayCommand::CheckUpdates),
+            4 => send_command(state, TrayCommand::Exit),
+            id if id >= 100 && (id as usize) < 100 + recent.len() => {
+                send_command(
+                    state,
+                    TrayCommand::OpenRecent(recent[id as usize - 100].clone()),
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
 fn register_tray_class() -> Result<()> {
     static REGISTERED: AtomicBool = AtomicBool::new(false);
-    if REGISTERED.swap(true, Ordering::SeqCst) {
+    if REGISTERED.load(Ordering::Acquire) {
         return Ok(());
     }
 
-    let wc = WNDCLASSEXW {
+    let class = WNDCLASSEXW {
         cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
-        style: windows::Win32::UI::WindowsAndMessaging::WNDCLASS_STYLES::default(),
         lpfnWndProc: Some(tray_wnd_proc),
-        cbClsExtra: 0,
-        cbWndExtra: 0,
         hInstance: HINSTANCE::default(),
-        hIcon: HICON::default(),
-        hCursor: windows::Win32::UI::WindowsAndMessaging::HCURSOR::default(),
-        hbrBackground: windows::Win32::Graphics::Gdi::HBRUSH::default(),
-        lpszMenuName: PCWSTR::null(),
         lpszClassName: TRAY_CLASS_NAME,
-        hIconSm: HICON::default(),
+        ..Default::default()
     };
-
-    let atom = unsafe { RegisterClassExW(&wc) };
-    if atom == 0 {
+    let atom = unsafe { RegisterClassExW(&class) };
+    if atom == 0 && unsafe { GetLastError() } != ERROR_CLASS_ALREADY_EXISTS {
         return Err(windows::core::Error::from_win32());
     }
+    REGISTERED.store(true, Ordering::Release);
     Ok(())
 }
 
-/// System tray icon manager that ensures cleanup on drop via Shell_NotifyIconW(NIM_DELETE).
 pub struct TrayManager {
     hwnd: HWND,
     nid: NOTIFYICONDATAW,
@@ -155,26 +247,27 @@ pub struct TrayManager {
 impl TrayManager {
     pub fn create(event_tx: Sender<TrayCommand>) -> Result<Self> {
         register_tray_class()?;
-
+        TASKBAR_CREATED.store(
+            unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
+            Ordering::SeqCst,
+        );
         let mut state = Box::new(TrayWindowState { event_tx });
-
         let hwnd = unsafe {
             CreateWindowExW(
-                windows::Win32::UI::WindowsAndMessaging::WINDOW_EX_STYLE::default(),
+                Default::default(),
                 TRAY_CLASS_NAME,
                 w!("isolmaSS_TrayWindow"),
-                windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE::default(),
+                Default::default(),
                 0,
                 0,
                 0,
                 0,
-                HWND::default(),
+                None,
                 None,
                 HINSTANCE::default(),
                 None,
             )?
         };
-
         unsafe {
             SetWindowLongPtrW(
                 hwnd,
@@ -182,30 +275,15 @@ impl TrayManager {
                 state.as_mut() as *mut TrayWindowState as isize,
             );
         }
-
         TRAY_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
-
-        let icon = unsafe { LoadIconW(HINSTANCE::default(), IDI_APPLICATION).unwrap_or_default() };
-
-        let mut nid = NOTIFYICONDATAW {
-            cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
-            hWnd: hwnd,
-            uID: 1001,
-            uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
-            uCallbackMessage: WM_TRAYICON,
-            hIcon: icon,
-            ..Default::default()
+        let nid = match add_tray_icon(hwnd) {
+            Ok(data) => data,
+            Err(error) => {
+                TRAY_HWND.store(0, Ordering::SeqCst);
+                let _ = unsafe { DestroyWindow(hwnd) };
+                return Err(error);
+            }
         };
-
-        let tip_wide: Vec<u16> = "isolmaSS - Screenshot Utility\0".encode_utf16().collect();
-        let copy_len = tip_wide.len().min(nid.szTip.len());
-        nid.szTip[..copy_len].copy_from_slice(&tip_wide[..copy_len]);
-
-        let added = unsafe { Shell_NotifyIconW(NIM_ADD, &nid).as_bool() };
-        if !added {
-            eprintln!("[isolmaSS] Warning: Shell_NotifyIconW(NIM_ADD) returned false.");
-        }
-
         Ok(Self {
             hwnd,
             nid,
@@ -224,17 +302,40 @@ impl Drop for TrayManager {
     }
 }
 
-/// Posts WM_NULL to the tray window to wake up its GetMessage loop.
+pub fn show_notification(title: &str, message: &str) {
+    let raw = TRAY_HWND.load(Ordering::SeqCst);
+    if raw == 0 {
+        return;
+    }
+    let mut data = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: HWND(raw as *mut _),
+        uID: TRAY_ICON_ID,
+        uFlags: NIF_INFO,
+        dwInfoFlags: NIIF_INFO | NIIF_RESPECT_QUIET_TIME,
+        ..Default::default()
+    };
+    copy_wide(&mut data.szInfoTitle, title);
+    copy_wide(&mut data.szInfo, message);
+    unsafe {
+        let _ = Shell_NotifyIconW(NIM_MODIFY, &data);
+    }
+}
+
+pub fn request_exit() {
+    let raw = TRAY_HWND.load(Ordering::SeqCst);
+    if raw != 0 {
+        unsafe {
+            let _ = PostMessageW(HWND(raw as *mut _), WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
 pub fn notify_tray_wakeup() {
     let raw = TRAY_HWND.load(Ordering::SeqCst);
     if raw != 0 {
         unsafe {
-            let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
-                HWND(raw as *mut _),
-                windows::Win32::UI::WindowsAndMessaging::WM_NULL,
-                WPARAM(0),
-                LPARAM(0),
-            );
+            let _ = PostMessageW(HWND(raw as *mut _), 0, WPARAM(0), LPARAM(0));
         }
     }
 }
@@ -249,10 +350,7 @@ mod tests {
         let (tx, _rx) = channel::<TrayCommand>();
         let manager = TrayManager::create(tx);
         assert!(manager.is_ok(), "TrayManager::create should succeed");
-
         notify_tray_wakeup();
-
-        // Dropping manager should unregister NIM_DELETE cleanly
         drop(manager);
         assert_eq!(TRAY_HWND.load(Ordering::SeqCst), 0);
     }
