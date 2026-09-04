@@ -527,9 +527,6 @@ impl Drop for HotkeyHandle {
 pub fn start_hotkey_listener(
     requested_config: HotkeyConfig,
 ) -> windows::core::Result<(Receiver<()>, HotkeyHandle)> {
-    // Automatically apply Windows Registry fix for PrintScreen key
-    let _ = disable_windows_snipping_tool_hotkey();
-
     let (event_tx, event_rx) = channel::<()>();
     let (ready_tx, ready_rx) = channel::<std::result::Result<(u32, String), String>>();
 
