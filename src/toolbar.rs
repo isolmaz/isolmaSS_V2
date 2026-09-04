@@ -300,8 +300,11 @@ impl Toolbar {
             let _ = SetBkMode(hdc, TRANSPARENT);
         }
 
-        let accent_color = COLORREF(0x00D77800); // Windows blue accent (BGR)
-        let hover_color = COLORREF(0x003A3632); // Hover dark highlight (BGR)
+        let accent_color = COLORREF(0x00D77800); // Windows blue/orange accent (BGR)
+        let active_hover_color = COLORREF(0x00E88A1A); // Brighter active highlight
+        let hover_color = COLORREF(0x004A443E); // Hover background (distinctly lighter than 0x00242220)
+        let hover_border = COLORREF(0x008A8278); // Hover border highlight
+        let white_border = COLORREF(0x00FFFFFF); // Pure white border
         let text_normal = COLORREF(0x00E0DCD8); // Soft white text
         let text_disabled = COLORREF(0x0066605A); // Dimmed disabled text
         let text_white = COLORREF(0x00FFFFFF); // Pure white text
@@ -312,30 +315,31 @@ impl Toolbar {
                 ToolbarItem::Tool(k) => {
                     let is_active = k == self.active_tool;
                     let is_hovered = self.hovered_item == Some(btn.item);
-                    let fill_col = if is_active {
-                        Some(accent_color)
+
+                    let (fill_col, pen_col, pen_w) = if is_active && is_hovered {
+                        (active_hover_color, white_border, 2)
+                    } else if is_active {
+                        (accent_color, white_border, 1)
                     } else if is_hovered {
-                        Some(hover_color)
+                        (hover_color, hover_border, 1)
                     } else {
-                        None
+                        (COLORREF(0x002A2724), border_color, 1)
                     };
 
-                    if let Some(col) = fill_col {
-                        let b_brush = unsafe { CreateSolidBrush(col) };
-                        let b_pen = unsafe { CreatePen(PS_SOLID, 1, col) };
-                        let op = unsafe { SelectObject(hdc, HGDIOBJ(b_pen.0)) };
-                        let ob = unsafe { SelectObject(hdc, HGDIOBJ(b_brush.0)) };
-                        unsafe {
-                            let _ = RoundRect(hdc, btn.rect.left, btn.rect.top, btn.rect.right, btn.rect.bottom, 4, 4);
-                            SelectObject(hdc, op);
-                            let _ = DeleteObject(HGDIOBJ(b_pen.0));
-                            SelectObject(hdc, ob);
-                            let _ = DeleteObject(HGDIOBJ(b_brush.0));
-                        }
+                    let b_brush = unsafe { CreateSolidBrush(fill_col) };
+                    let b_pen = unsafe { CreatePen(PS_SOLID, pen_w, pen_col) };
+                    let op = unsafe { SelectObject(hdc, HGDIOBJ(b_pen.0)) };
+                    let ob = unsafe { SelectObject(hdc, HGDIOBJ(b_brush.0)) };
+                    unsafe {
+                        let _ = RoundRect(hdc, btn.rect.left, btn.rect.top, btn.rect.right, btn.rect.bottom, 4, 4);
+                        SelectObject(hdc, op);
+                        let _ = DeleteObject(HGDIOBJ(b_pen.0));
+                        SelectObject(hdc, ob);
+                        let _ = DeleteObject(HGDIOBJ(b_brush.0));
                     }
 
                     unsafe {
-                        let _ = SetTextColor(hdc, if is_active { text_white } else { text_normal });
+                        let _ = SetTextColor(hdc, if is_active || is_hovered { text_white } else { text_normal });
                         let mut wide_label: Vec<u16> = btn.label.encode_utf16().collect();
                         let mut draw_rc = RECT {
                             left: btn.rect.left,
@@ -350,7 +354,7 @@ impl Toolbar {
                     let is_hovered = self.hovered_item == Some(btn.item);
                     if is_hovered && btn.is_enabled {
                         let b_brush = unsafe { CreateSolidBrush(hover_color) };
-                        let b_pen = unsafe { CreatePen(PS_SOLID, 1, border_color) };
+                        let b_pen = unsafe { CreatePen(PS_SOLID, 1, hover_border) };
                         let op = unsafe { SelectObject(hdc, HGDIOBJ(b_pen.0)) };
                         let ob = unsafe { SelectObject(hdc, HGDIOBJ(b_brush.0)) };
                         unsafe {
@@ -363,7 +367,13 @@ impl Toolbar {
                     }
 
                     unsafe {
-                        let txt_color = if !btn.is_enabled { text_disabled } else { text_normal };
+                        let txt_color = if !btn.is_enabled {
+                            text_disabled
+                        } else if is_hovered {
+                            text_white
+                        } else {
+                            text_normal
+                        };
                         let _ = SetTextColor(hdc, txt_color);
                         let mut wide_label: Vec<u16> = btn.label.encode_utf16().collect();
                         let mut draw_rc = RECT {
@@ -381,14 +391,14 @@ impl Toolbar {
 
                     let col_ref = bgra_to_colorref(col);
                     let brush = unsafe { CreateSolidBrush(col_ref) };
-                    let border = if is_active {
-                        COLORREF(0x00FFFFFF)
+                    let (border, pen_w) = if is_active {
+                        (white_border, 2)
                     } else if is_hovered {
-                        accent_color
+                        (active_hover_color, 2)
                     } else {
-                        border_color
+                        (border_color, 1)
                     };
-                    let pen = unsafe { CreatePen(PS_SOLID, if is_active { 2 } else { 1 }, border) };
+                    let pen = unsafe { CreatePen(PS_SOLID, pen_w, border) };
 
                     let op = unsafe { SelectObject(hdc, HGDIOBJ(pen.0)) };
                     let ob = unsafe { SelectObject(hdc, HGDIOBJ(brush.0)) };
@@ -404,16 +414,18 @@ impl Toolbar {
                     let is_active = thick == self.active_thickness;
                     let is_hovered = self.hovered_item == Some(btn.item);
 
-                    let bg = if is_active {
-                        accent_color
+                    let (bg, border, pen_w) = if is_active && is_hovered {
+                        (active_hover_color, white_border, 2)
+                    } else if is_active {
+                        (accent_color, white_border, 1)
                     } else if is_hovered {
-                        hover_color
+                        (hover_color, hover_border, 1)
                     } else {
-                        COLORREF(0x002E2B27)
+                        (COLORREF(0x002E2B27), border_color, 1)
                     };
 
                     let brush = unsafe { CreateSolidBrush(bg) };
-                    let pen = unsafe { CreatePen(PS_SOLID, 1, border_color) };
+                    let pen = unsafe { CreatePen(PS_SOLID, pen_w, border) };
                     let op = unsafe { SelectObject(hdc, HGDIOBJ(pen.0)) };
                     let ob = unsafe { SelectObject(hdc, HGDIOBJ(brush.0)) };
                     unsafe {
@@ -423,7 +435,7 @@ impl Toolbar {
                         SelectObject(hdc, ob);
                         let _ = DeleteObject(HGDIOBJ(brush.0));
 
-                        let txt_col = if is_active { text_white } else { text_normal };
+                        let txt_col = if is_active || is_hovered { text_white } else { text_normal };
                         let _ = SetTextColor(hdc, txt_col);
                         let mut wide_label: Vec<u16> = btn.label.encode_utf16().collect();
                         let mut draw_rc = RECT {

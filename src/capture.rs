@@ -23,6 +23,18 @@ pub struct Rect {
     pub bottom: i32,
 }
 
+/// Hit-testing zones on a committed selection rectangle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionHitZone {
+    TopLeftCorner,
+    TopRightCorner,
+    BottomLeftCorner,
+    BottomRightCorner,
+    BorderEdge,
+    Interior,
+    None,
+}
+
 impl Rect {
     pub const fn new(left: i32, top: i32, right: i32, bottom: i32) -> Self {
         Self {
@@ -106,6 +118,53 @@ impl Rect {
     #[inline]
     pub fn contains(&self, x: i32, y: i32) -> bool {
         x >= self.left && x < self.right && y >= self.top && y < self.bottom
+    }
+
+    /// Hit-tests a point `pt` against this selection rectangle:
+    /// - 4 Corner handles (8x8 px centered on vertices) -> diagonal resize
+    /// - 4 Border edge bands (6-8 px centered on edges, excluding corners) -> drag-to-move
+    /// - Interior -> move (or draw)
+    /// - Outside -> None
+    pub fn hit_test_selection(&self, pt: (i32, i32), band: i32, handle_size: i32) -> SelectionHitZone {
+        if self.is_empty() {
+            return SelectionHitZone::None;
+        }
+
+        let half_h = handle_size / 2;
+        let (x, y) = pt;
+
+        // 1. 4 Corner handles (8x8 px centered on vertices)
+        let tl = Rect::new(self.left - half_h, self.top - half_h, self.left + half_h, self.top + half_h);
+        if tl.contains(x, y) {
+            return SelectionHitZone::TopLeftCorner;
+        }
+        let tr = Rect::new(self.right - half_h, self.top - half_h, self.right + half_h, self.top + half_h);
+        if tr.contains(x, y) {
+            return SelectionHitZone::TopRightCorner;
+        }
+        let bl = Rect::new(self.left - half_h, self.bottom - half_h, self.left + half_h, self.bottom + half_h);
+        if bl.contains(x, y) {
+            return SelectionHitZone::BottomLeftCorner;
+        }
+        let br = Rect::new(self.right - half_h, self.bottom - half_h, self.right + half_h, self.bottom + half_h);
+        if br.contains(x, y) {
+            return SelectionHitZone::BottomRightCorner;
+        }
+
+        // 2. 4 Border edge bands (centered on each border line, thickness = 2 * band, excluding corners)
+        let outer = self.inflate(band, band);
+        let inner = self.inflate(-band, -band);
+
+        if outer.contains(x, y) && (!inner.contains(x, y) || inner.width() <= 0 || inner.height() <= 0) {
+            return SelectionHitZone::BorderEdge;
+        }
+
+        // 3. Interior of selection
+        if self.contains(x, y) {
+            return SelectionHitZone::Interior;
+        }
+
+        SelectionHitZone::None
     }
 }
 
@@ -406,5 +465,117 @@ impl CaptureBuffer {
                 fill_pixel(target, x, y);
             }
         }
+    }
+
+    /// Draws a solid filled rectangle onto the 32-bit BGRA buffer.
+    pub fn fill_rect(
+        target: &mut [u8],
+        width: i32,
+        height: i32,
+        rect: &Rect,
+        color_bgra: [u8; 4],
+    ) {
+        if rect.is_empty() || width <= 0 || height <= 0 {
+            return;
+        }
+        let clamped = rect.clamp(width, height);
+        if clamped.is_empty() {
+            return;
+        }
+        let stride = width as usize * 4;
+        for y in clamped.top..clamped.bottom {
+            let row_offset = y as usize * stride;
+            let start = row_offset + clamped.left as usize * 4;
+            let end = row_offset + clamped.right as usize * 4;
+            for px in (start..end).step_by(4) {
+                if px + 4 <= target.len() {
+                    target[px..px + 4].copy_from_slice(&color_bgra);
+                }
+            }
+        }
+    }
+
+    /// Draws a dual-tone high-contrast selection border and 4 corner resize handles.
+    /// Outer border: 1px black outline.
+    /// Main border: 2px accent outline.
+    /// Corner handles: 8x8 px squares with white fill and 1px black border.
+    pub fn draw_contrast_selection(
+        target: &mut [u8],
+        width: i32,
+        height: i32,
+        rect: &Rect,
+        accent_bgra: [u8; 4],
+    ) {
+        if rect.is_empty() || width <= 0 || height <= 0 {
+            return;
+        }
+
+        let dark_border = [15, 15, 15, 255]; // Deep charcoal/black
+        let handle_fill = [255, 255, 255, 255]; // Crisp white
+
+        // 1. Dual-tone selection rectangle:
+        // Outer 1px dark border
+        let outer = Rect::new(rect.left - 1, rect.top - 1, rect.right + 1, rect.bottom + 1);
+        Self::draw_border(target, width, height, &outer, dark_border, 1);
+
+        // Inner 2px accent border
+        Self::draw_border(target, width, height, rect, accent_bgra, 2);
+
+        // 2. Four 8x8 corner resize handles
+        let half_h = 4;
+        let corners = [
+            (rect.left, rect.top),
+            (rect.right, rect.top),
+            (rect.left, rect.bottom),
+            (rect.right, rect.bottom),
+        ];
+
+        for (cx, cy) in corners {
+            let handle_rect = Rect::new(cx - half_h, cy - half_h, cx + half_h, cy + half_h);
+            Self::fill_rect(target, width, height, &handle_rect, handle_fill);
+            Self::draw_border(target, width, height, &handle_rect, dark_border, 1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_selection_hit_zones() {
+        let sel = Rect::new(100, 100, 300, 200);
+
+        // Corner handles (8x8 px centered on vertices, half_h = 4)
+        assert_eq!(sel.hit_test_selection((100, 100), 4, 8), SelectionHitZone::TopLeftCorner);
+        assert_eq!(sel.hit_test_selection((300, 100), 4, 8), SelectionHitZone::TopRightCorner);
+        assert_eq!(sel.hit_test_selection((100, 200), 4, 8), SelectionHitZone::BottomLeftCorner);
+        assert_eq!(sel.hit_test_selection((300, 200), 4, 8), SelectionHitZone::BottomRightCorner);
+
+        // Border edge band (excluding corners, e.g. midpoint of top border, +/- 4px)
+        assert_eq!(sel.hit_test_selection((200, 100), 4, 8), SelectionHitZone::BorderEdge);
+        assert_eq!(sel.hit_test_selection((200, 98), 4, 8), SelectionHitZone::BorderEdge);
+        assert_eq!(sel.hit_test_selection((200, 102), 4, 8), SelectionHitZone::BorderEdge);
+        assert_eq!(sel.hit_test_selection((100, 150), 4, 8), SelectionHitZone::BorderEdge);
+        assert_eq!(sel.hit_test_selection((300, 150), 4, 8), SelectionHitZone::BorderEdge);
+        assert_eq!(sel.hit_test_selection((200, 200), 4, 8), SelectionHitZone::BorderEdge);
+
+        // Interior (deep inside selection, far from border band)
+        assert_eq!(sel.hit_test_selection((200, 150), 4, 8), SelectionHitZone::Interior);
+
+        // Outside (far from selection)
+        assert_eq!(sel.hit_test_selection((50, 50), 4, 8), SelectionHitZone::None);
+        assert_eq!(sel.hit_test_selection((400, 400), 4, 8), SelectionHitZone::None);
+    }
+
+    #[test]
+    fn test_contrast_selection_and_fill() {
+        let mut buffer = vec![0u8; 100 * 100 * 4];
+        let rect = Rect::new(10, 10, 50, 50);
+        CaptureBuffer::draw_contrast_selection(&mut buffer, 100, 100, &rect, [246, 130, 59, 255]);
+
+        // Corner handle should be filled with white [255, 255, 255, 255]
+        let offset = (10 * 100 + 10) * 4;
+        assert_eq!(&buffer[offset..offset + 4], &[255, 255, 255, 255]);
     }
 }

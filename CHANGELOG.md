@@ -1,0 +1,30 @@
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Fixed
+- **Keyboard Input on Overlay (Slice C1)**:
+  - Routed all overlay keyboard input through the low-level keyboard hook (`WH_KEYBOARD_LL`), ensuring reliable input delivery even with `WS_EX_NOACTIVATE`.
+  - Implemented hierarchical Escape key flow: dismisses active text edit, deselects shape, cancels committed selection, or closes the overlay on first press from idle state.
+  - Implemented full text tool editing support: character insertion at caret, Backspace, Delete, Left/Right arrow caret movement, and Enter to commit and auto-select.
+  - Added a blinking caret (`|`) indicator during text editing.
+  - Added double-click on existing committed text annotations to re-open them in editing mode with caret at the end.
+  - Supported overlay shortcuts when not text editing: `Ctrl+C` (copy), `Ctrl+S` (save), `Ctrl+Z` (undo), `Ctrl+Y` (redo), `Ctrl+,` (settings), `Delete`/`Backspace` (delete shape), `R`/`A`/`P`/`T`/`B` (tool switches).
+  - Ensured foreground and input focus are explicitly requested on overlay click and show.
+
+- **Selection Border Drag-to-Move (Slice C2)**:
+  - Added an explicit 8px hit band along the selection rectangle borders.
+  - Added 4 corner handles (8x8 px) for diagonal resizing of the selection rectangle.
+  - Dragging anywhere on the visible border line or border edge band now smoothly moves the selection and translates all contained annotation objects.
+  - Bound and clamped selection movement and resizing within screen dimensions.
+
+- **Tool Interaction UX Pass (Slice C3)**:
+  - Added distinct active and hovered visual states for all toolbar buttons, tool switches, color swatches, and thickness presets.
+  - Implemented contextual cursors: `IDC_HAND`/`IDC_ARROW` over toolbar, `IDC_SIZENWSE`/`IDC_SIZENESW` over corner resize handles, `IDC_SIZEALL` over border move bands, `IDC_IBEAM` over text objects and active text edits, and `IDC_CROSS` while drawing tools are active.
+  - Added dual-tone high-contrast outlines for the selection rectangle and corner handles (dark outer border + bright accent inner border) for crisp visibility on both 100% white and 100% dark backgrounds.
+  - Added a >= 3px drag movement threshold before committing permanent drawing shapes, preventing stray 1-pixel marks from accidental clicks.
