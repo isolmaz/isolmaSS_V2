@@ -1099,9 +1099,9 @@ fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     println!("  -> Slice C6: PASSED (Settings isolated defaults, round-trips, file IO & error propagation verified)");
 
     // ------------------------------------------------------------
-    // Slice C9: Packaging Artifact & Distribution Budget Verification
+    // C9 packaging check: installer artifact and distribution size budget only
     // ------------------------------------------------------------
-    println!("\n[Slice C9] Testing Packaging Artifact & Distribution Size Budget...");
+    println!("\n[C9 Packaging Check] Verifying Installer Artifact & Distribution Size Budget...");
     const BUDGET_BYTES: u64 = 3 * 1024 * 1024; // 3 MB budget
     let nsi_path = std::path::Path::new("installer.nsi");
     assert!(nsi_path.exists(), "installer.nsi must exist at repository root");
@@ -1170,10 +1170,11 @@ fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         setup_size,
         BUDGET_BYTES
     );
-    println!("  -> Slice C9: PASSED (Installer artifact & <= 3 MB packaging budget verified)");
+    println!("  -> C9 Packaging Check: PASSED (Installer artifact & <= 3 MB size budget verified)");
 
     println!("\n============================================================");
-    println!(" ALL SLICES (A1 - A16, B1 - B5, C1 - C9) FULLY VERIFIED!");
+    println!(" AUTOMATED SMOKE CHECKS PASSED (A1-C8 + C9 packaging checks)");
+    println!(" External runtime budget status is documented separately and is not verified here.");
     println!("============================================================");
     Ok(())
 }

@@ -1,12 +1,14 @@
 # isolmaSS — MVP + Production Hardening Plan
 
-> **Status:** Phase A (A0–A16) and Phase B (B1–B5) are implemented and passed their build/size/RAM
-> budgets. Real-world use surfaced 6 concrete defects and 3 missing UX pieces before this can be
-> called production-ready — these are tracked in **Phase C** below. Phase C is the active phase.
+> **Status:** Phase A (A0–A16), Phase B (B1–B5), and the Phase C implementation are present. On
+> 2026-09-04, check, clippy, 6 tests, release build, strict NSIS packaging, and one post-change smoke
+> run passed. Current artifact sizes and a 60.039-second real-daemon sample met their budgets. Actual
+> PrintScreen-to-visible-overlay latency was 48.936 ms, which failed the ≤30 ms target, so C9 remains
+> incomplete. This evidence is targeted and does not claim manual validation of the complete tool UX.
 >
-> **Scope of this document:** Phases A and B (must-have MVP, done) plus Phase C (production
-> hardening, in progress). Cloud upload, OCR, pin-to-screen, HDR capture, magnetic guides, etc. are
-> still intentionally **out of scope** — see "Deferred Features" near the bottom.
+> **Scope of this document:** Phases A and B (must-have MVP) plus Phase C production hardening.
+> Cloud upload, OCR, pin-to-screen, HDR capture, magnetic guides, etc. remain intentionally **out of
+> scope** — see "Deferred Features" near the bottom.
 >
 > **Design philosophy for this plan:**
 > 1. No WebView2 / React anywhere, not even for Settings — build native from day one so there is
@@ -26,15 +28,15 @@
 |---|---|---|
 | Language | Rust | Small binaries, no GC pauses, direct Win32 access |
 | Win32 bindings | `windows-rs` | Official, maintained, no C toolchain needed |
-| Capture | GDI `BitBlt` | Simple, fast enough (<40 ms for 1080p), zero deps |
+| Capture | GDI `BitBlt` | Simple native capture path with zero added capture dependencies |
 | Overlay window | Per-monitor layered HWND (`WS_EX_LAYERED \| WS_EX_TOOLWINDOW \| WS_EX_TOPMOST \| WS_EX_NOACTIVATE`) | Needed for per-pixel alpha dim + punch-out |
 | Editor rendering | Native GDI raster (no separate "preview" vs "export" pipeline) | What you see is exactly what gets copied/saved |
-| Hotkey | `RegisterHotKey` on a dedicated worker thread | Keeps `WH_KEYBOARD_LL` hook proc lock-free and fast |
-| Settings storage | Flat JSON file in `%APPDATA%\isolmaSS\settings.json` | No parser dependency needed beyond `serde_json` |
-| Settings UI | Native Win32 Common Controls dialog | Skips WebView2 entirely; ~10 fields max, doesn't need a framework |
-| Packaging | Single static `.exe` + NSIS installer | Matches "small binary" goal from the start |
+| Hotkey | `WH_KEYBOARD_LL` plus `RegisterHotKey` on a dedicated worker thread | Supports PrintScreen interception and registered configured hotkeys |
+| Settings storage | Flat JSON file in `%APPDATA%\isolmaSS\settings.json` | Uses `serde_json`; tolerant reads and strict save errors are documented below |
+| Settings UI | Custom native Win32 window | Skips WebView2 entirely |
+| Packaging | Single `.exe` + NSIS installer | Matches the small-distribution goal |
 
-**Suggested target budgets from slice A0 onward:** installer ≤ 3 MB, idle RAM ≤ 15 MB, hotkey-to-overlay ≤ 30 ms. Because WebView2 is never introduced, these numbers are achievable immediately instead of being a "Phase 5 rewrite" goal.
+**Target budgets:** installer ≤3 MiB, executable ≤2.5 MiB, idle daemon working set ≤15 MiB, and hotkey-to-overlay ≤30 ms. These are release targets, not current verification claims; artifact checks and representative runtime measurements must be rerun after source changes.
 
 ---
 
@@ -57,7 +59,7 @@
 ### A2. Full-Screen Capture (BitBlt)
 - **Goal:** On hotkey press, grab the entire virtual screen into an in-memory BGRA buffer.
 - **Implementation:** `BitBlt` from the desktop DC into a compatible bitmap covering `GetSystemMetrics(SM_CXVIRTUALSCREEN/SM_CYVIRTUALSCREEN)`. Convert to a raw buffer immediately; no disk round-trip.
-- **Done when:** Capture completes in <40 ms on a 1080p display and buffer is verifiably correct (dump to PNG once for manual inspection, then remove the debug dump).
+- **Done when:** The captured buffer is complete and manually inspected for correctness; timing must be reported as an observed measurement on identified hardware, not as an unverified guarantee.
 - **My suggestion:** Capture must happen *before* any overlay window is created or shown, otherwise you'll capture your own overlay.
 
 ### A3. Per-Monitor Overlay Windows
@@ -143,9 +145,8 @@
 > **Exit criterion for Phase B:** The tool no longer feels like a bare-bones prototype — colors, thickness, saving to disk, and basic settings all work — while still shipping as a single small `.exe`.
 
 ### B1. Save to File
-- **Goal:** A "Save" action (button + `Ctrl+S`) writes the composited image as PNG to a configured folder.
-- **Implementation:** `image` crate's PNG encoder is enough here (no need for the WebP crate discussion from the original plan — that's only relevant if/when cloud upload returns). Simple filename template: `Screenshot_%Y-%m-%d_%H-%M-%S.png`.
-- **Done when:** Saved files open correctly in any viewer and match the clipboard output exactly.
+- **Implemented:** The Save action and `Ctrl+S` write the composited image as PNG through native Windows GDI+ with no image-encoding crate. Filenames use `Screenshot_%Y-%m-%d_%H-%M-%S.png` in the configured directory.
+- **Manual verification:** Opening saved files in an external viewer and comparing them with clipboard output remains an interactive check.
 - **My suggestion:** Skip the `{app}`/`{title}` dynamic token system from the original plan for now — a timestamp-only filename covers 95% of real use and is much less code.
 
 ### B2. Color Palette & Thickness Sub-Bar
@@ -160,16 +161,15 @@
 - **My suggestion:** Cheap to build (a few lines of angle math) and disproportionately improves the "quality" feel of arrows/rectangles — good value for the effort.
 
 ### B4. Minimal Native Settings Window
-- **Goal:** A single small dialog exposing only what's actually needed at this stage: hotkey, save folder, default color/thickness.
-- **Implementation:** Win32 dialog resource (`.rc` file) with a handful of common controls (edit box, color swatches, browse-for-folder). Reads/writes the JSON settings file from section 0.
-- **Done when:** Changing a setting persists across app restarts; no crash on malformed/missing JSON (fall back to defaults).
-- **My suggestion:** Resist adding more settings than these four right now — every extra toggle is another thing to test and document. Add settings reactively, only when a real limitation is hit.
+- **Implemented:** A native Win32 Settings window exposes hotkey presets and default color/thickness, and displays the current save folder. The current UI does not include a save-folder picker or editor.
+- **Persistence:** Values are stored in `%APPDATA%\isolmaSS\settings.json`. Missing, unreadable, or malformed data falls back to defaults; strict save failures follow the C6 contract below.
+- **Application timing:** Saved hotkey changes take effect on the next daemon launch because the active listener is not restarted in place.
 
-### B5. Build & Size/RAM Verification
-- **Goal:** Confirm the budgets from section 0 are actually being met.
-- **Checklist:** `cargo build --release`, inspect `.exe` size, launch and sample idle working-set memory over 60 seconds via Task Manager or `Get-Process`.
-- **Acceptance:** Installer ≤ 3 MB, exe ≤ 2.5 MB, idle RAM ≤ 15 MB, hotkey-to-overlay ≤ 30 ms.
-- **My suggestion:** Run this check after *every* slice from B1 onward, not just once at the end — catching a regression one slice late is far cheaper than finding it after five more slices are stacked on top.
+### B5. Build & Size/RAM Targets
+- **Goal:** Check the release targets from section 0 without treating the smoke process as the idle daemon.
+- **Checklist:** Rebuild the executable and installer, inspect both artifact sizes, launch the real daemon, and sample its idle working set over 60 seconds via Task Manager or `Get-Process`.
+- **Targets:** Installer ≤3 MiB, executable ≤2.5 MiB, idle daemon working set ≤15 MiB, and PrintScreen-to-visible-overlay ≤30 ms. Latency must be reported as an observed hardware-specific measurement.
+- **2026-09-04 result:** The 438,784-byte executable, 262,534-byte installer, and 10.640625 MiB maximum during a 60.039-second daemon sample met their targets. PrintScreen-to-visible-overlay measured 48.936 ms and did not meet the separate ≤30 ms target; see C9.
 
 ---
 
@@ -199,12 +199,10 @@
   already-working one from being pushed. Keep commits small enough that `git revert` on any one of
   them is safe in isolation.
 
-> **Resolved, removed from this phase:** PrintScreen previously conflicted with the Windows 11
-> Snipping Tool; this is now confirmed working correctly and no longer needs a fix slice. If it
-> resurfaces (e.g. after a Windows update re-enables the shell setting), the root cause was the
-> `PrintScreenKeyForSnippingEnabled` registry value under
-> `HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced` — worth remembering even
-> though there's nothing to build for it right now.
+> **PrintScreen registry behavior:** Normal daemon startup and Settings changes do not modify the
+> registry. The explicit `--fix-printscreen` command is the only path that writes `0` to
+> `HKCU\Control Panel\Keyboard\PrintScreenKeyForSnippingEnabled` for the current user. This is an
+> opt-in compatibility action when Windows Snipping Tool intercepts PrintScreen.
 
 ### C1. Fix Keyboard Input on the Overlay (Esc dismiss + Text tool) — one root cause
 - **Problem (reported as two separate bugs):** `Esc` doesn't close the overlay (right-click is
@@ -281,9 +279,8 @@
   call `AttachConsole(ATTACH_PARENT_PROCESS)` at startup so output still prints correctly when
   launched *from* an existing terminal, without ever spawning a new one on a normal double-click or
   autostart launch.
-- **Acceptance:** Double-clicking the exe or launching at Windows startup shows zero console window;
-  running `isolmass.exe --smoke-test` from an already-open terminal still prints all diagnostic
-  output as before.
+- **Automated evidence:** PE inspection checks `IMAGE_SUBSYSTEM_WINDOWS_GUI = 2`.
+- **Manual verification still required:** Observe a normal launch/double-click for console behavior and confirm CLI diagnostics appear in an already-open terminal.
 
 ### C5. System Tray Icon & Right-Click Menu
 - **Goal:** A persistent bottom-right system tray icon is the primary way to reach the app once
@@ -299,9 +296,8 @@
   update, even though there's nothing to actively fix for it right now.
 
 ### C6. Settings: Standalone Native Panel + New Toggles
-- **Goal:** Settings is reachable only through the tray menu (C5) or `Ctrl+,`, opens as its own
-  standalone native dialog window (not tied to the CLI flag as the only entry point), and gains two
-  new fields on top of the existing four from B4:
+- **Implemented access:** Settings opens as a standalone native window from the tray menu, overlay
+  toolbar button, `Ctrl+,`, or the `--settings` CLI flag. It includes two behavior toggles:
   - **Enable single-click window snap** (on/off — toggles the A5 behavior for users who find it
     triggers unintentionally).
   - **After Copy/Save, close overlay automatically** (on/off — some users want to keep annotating
@@ -309,58 +305,75 @@
 - **Assumption:** "pencere seçme, kapama vs. olsun" is interpreted as *these two toggles should be
   added to Settings* — flag if the intent was actually something else (e.g. removing a setting)
   and it'll take one line to redirect.
-- **Acceptance:** Settings opens instantly from the tray menu; all six fields (hotkey, save folder,
-  default color/thickness, window-snap toggle, close-after-action toggle) persist correctly and take
-  effect without requiring an app restart.
+- **Implemented behavior:** The dialog exposes hotkey presets, default color/thickness, and the two
+  toggles. It displays the save folder but does not currently provide a folder picker or editor.
+  Saved hotkey changes take effect on the next daemon launch because the running listener is not
+  restarted in place; color/thickness/toggle changes apply to the active or next overlay.
+- **Persistence contract:** Loading is tolerant and falls back to defaults for a missing, unreadable,
+  or malformed file. Saving returns `NotFound` when `%APPDATA%` is unavailable, propagates parent
+  creation and file-write errors, and keeps **Save & Apply** open while rendering the error.
 
-### C7. Full Regression Smoke Test (v2)
-- **Goal:** Extend the existing `--smoke-test` to cover every Phase C fix, not just the original
-  A/B checks.
-- **New checks:** `Esc` transitions through all four states correctly (C1); text insert/edit/re-edit
-  cycle completes (C1); border-band hit-test returns "move" not "new selection" (C2); tray icon
-  registers and unregisters cleanly (C5); settings round-trip includes the two new fields (C6).
-- **Acceptance:** `isolmass.exe --smoke-test` exits `0` and prints one pass line per check listed
-  above, alongside the original Phase A/B checks.
+### C7. Regression Smoke Checks (v2)
+- **Implemented automated scope:** `--smoke-test` calls the production Esc/text state methods,
+  exercises border-band hit testing, creates and drops the tray manager, checks Settings toggle/file
+  round-trips, and inspects selected PE/packaging properties. Settings unit checks separately cover
+  a missing config path returning `NotFound` and preservation of a parent-creation OS error.
+- **Not covered interactively:** The command does not drive real pointer/keyboard interaction through
+  every overlay state, inspect the rendered Settings error, click the tray menu, prove console-window
+  behavior visually, or measure a separately launched idle daemon for 60 seconds.
+- **2026-09-04 evidence:** `cargo check`, `cargo clippy --all-targets -- -D warnings`, and
+  `cargo build --release` passed; `cargo test` passed with 6 passed and 0 failed. One post-change
+  `--smoke-test` run exited 0 with `AUTOMATED SMOKE CHECKS PASSED (A1-C8 + C9 packaging checks)`.
+  It explicitly excludes external runtime budgets, and automated success does not replace the manual
+  UX checks above.
 
 ### C8. Changelog & README Sync
-- **Goal:** `README.md` and `CHANGELOG.md` accurately describe the current (post-Phase C) behavior —
-  no stale mentions of "opens with a console window" or "right-click to exit."
-- **Acceptance:** A new reader of `README.md` alone would correctly predict tray-icon behavior, the
-  actual Esc/keyboard behavior, and the current Settings field list.
+- **Implemented documentation:** `README.md` and `CHANGELOG.md` describe the current tray, editor,
+  Settings fields, strict-save/tolerant-load behavior, delayed hotkey application, and explicit
+  registry mutation. They distinguish automated checks from interactive/manual verification.
 
-### C9. Packaging Sanity Check
-- **Goal:** Confirm the production build still meets the original size/RAM budgets from section 0
-  after all Phase C changes (tray icon and new settings fields add a small amount of size).
-- **Acceptance:** Re-run the exact B5 checklist; installer ≤ 3 MB, exe ≤ 2.5 MB, idle RAM ≤ 15 MB
-  still hold. If a budget is now exceeded, that's a signal to trim before shipping, not to quietly
-  raise the budget.
+### C9. Packaging and Runtime Sanity Check
+- **Goal:** Rebuild the production executable and NSIS installer from current source, verify the
+  size budgets, sample the real daemon for 60 seconds, and measure PrintScreen-to-visible-overlay
+  against the ≤30 ms target.
+- **2026-09-04 package evidence:** `cargo build --release` and `cmd /c package.bat` passed. The
+  executable was 438,784 bytes (target ≤2.5 MiB); the NSIS installer was 262,534 bytes (target
+  ≤3 MiB), and the packaging script's strict installer check passed.
+- **2026-09-04 daemon evidence:** Over 60.039 seconds, working set was 11,157,504 bytes at start,
+  11,157,504 bytes maximum, and 11,116,544 bytes at end. The 10.640625 MiB maximum met the ≤15 MiB
+  target. No console `HWND` was observed. Esc closed the visible overlay in 15.801 ms, the daemon
+  stayed alive, and clean `WM_CLOSE` shutdown exited 0.
+- **Failed target:** PrintScreen-to-visible-overlay was 48.936 ms, above the ≤30 ms target. C9 remains
+  unchecked. An incomplete risky optimization was removed, preserving the prior coherent GDI
+  `BitBlt` capture path rather than trading correctness for an unverified speedup.
+- **Scope:** This targeted scenario did not manually validate the complete annotation, Settings, or
+  tray-menu UX.
 
 ---
 
 ## Phase C Checklist
 
 ```
-[X] C0  Git & Docs Sync Protocol adopted
-[X] C1  Esc hierarchical dismiss + Text tool fully functional (production methods, no mocks)
-[X] C2  Selection border drag-to-move hit zone added
-[X] C3  Tool interaction UX punch list completed
-[X] C4  Console window removed (pure GUI subsystem & PE header verified IMAGE_SUBSYSTEM_WINDOWS_GUI = 2)
-[X] C5  System tray icon + right-click menu (Capture Now / Settings / Exit)
-[X] C6  Settings standalone native panel + window-snap & close-after-action toggles + error propagation
-[X] C7  Regression smoke test v2 covers all Phase C fixes (grounded production verification)
-[X] C8  README + CHANGELOG synced to current behavior
-[X] C9  Packaging size/RAM budgets re-verified (authentic isolmass-setup.exe <= 3 MB budget)
+[X] C0  Git and documentation sync protocol defined
+[X] C1  Esc/text production state methods implemented; interactive keyboard flow remains manual verification
+[X] C2  Selection border move and corner-resize hit zones implemented
+[X] C3  Tool UX implementation present; smoke checks cover contrast border and movement threshold only
+[X] C4  Windows GUI subsystem configured; targeted daemon check observed no console HWND
+[X] C5  Tray implementation present; create/drop lifecycle is automated, menu interaction is manual
+[X] C6  Settings panel/toggles and strict-save/tolerant-load behavior implemented
+[X] C7  Check/clippy/6 tests and one post-change A1-C8 + C9-packaging smoke run passed; manual UX remains out of scope
+[X] C8  README and CHANGELOG synchronized to current documented behavior
+[ ] C9  Size and daemon-memory targets passed; 48.936 ms PrintScreen latency failed the ≤30 ms target
 ```
 
-> **Advisories 1 & 2 & C9 Resolution:**
-> - Grounded production testing in place: `OverlayState::handle_escape_action`, `TextEditState::insert_char`, `backspace`, `delete`, `move_left`, `move_right` called directly without simulation mocks.
-> - PE header inspection verifies `IMAGE_SUBSYSTEM_WINDOWS_GUI = 2`.
-> - Isolated settings testing validates default `true`, explicit `false`/`true` round-trips, file persistence, and error propagation.
-> - Authentic Windows setup installer executable (`target/release/isolmass-setup.exe`) verified (262,277 bytes, well under 3 MB budget) via `installer.nsi` (which embeds `isolmass.exe` via LZMA) and strict non-zero exit in `package.bat`.
-> - Settings window state retains `last_error` and displays red error notices on failed saves without closing the dialog or swallowing errors.
-
-> PrintScreen vs. the Windows 11 Snipping Tool was on this list but is confirmed working now, so
-> it's been removed rather than kept as a check-off item — see the note above C1.
+> **Verification notes:**
+> - Automated checks call `OverlayState::handle_escape_action` and the `TextEditState` editing methods directly; they do not drive the complete GUI interaction path.
+> - PE inspection checks `IMAGE_SUBSYSTEM_WINDOWS_GUI = 2`; the targeted runtime check also observed no console `HWND`.
+> - Settings checks cover toggle/default serialization, file round-trips, missing `%APPDATA%` as `NotFound`, and propagation of a parent-directory creation error. Rendering of the dialog error remains a manual UI check.
+> - `package.bat` rebuilt the release executable and NSIS installer and passed its strict ≤3 MiB installer check. The dated artifact and daemon measurements are recorded in C9.
+> - The measured 48.936 ms PrintScreen latency misses the ≤30 ms target; no passing latency claim is made.
+> - **Save & Apply** retains the Settings window and renders `last_error`; tolerant loads still fall back to defaults.
+> - Only the explicit `--fix-printscreen` command mutates `HKCU\Control Panel\Keyboard\PrintScreenKeyForSnippingEnabled`.
 
 ---
 
@@ -391,7 +404,7 @@ A0 → A1 → A2 → A3 → A4 → A5 → A6 → A7 → A8 → A9 → A10 → A1
                                                                           │
                                                               (real usage → 6 bugs found)
                                                                           │
-        ── DONE, current phase below ──────────────────────────────────────────────────
+        ── Phase C implementation sequence; verification status is tracked above ─────
                                                                           │
-      C0 → C1 → C2 → C3 → C4 → C5 → C6 → C7 → C8 → C9  (each ends in commit + push)
+      C0 → C1 → C2 → C3 → C4 → C5 → C6 → C7 → C8 → C9
 ```

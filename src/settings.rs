@@ -87,7 +87,7 @@ impl Settings {
     /// Saves settings to an arbitrary path on disk as formatted JSON.
     pub fn save_to_path(&self, path: &std::path::Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty() && !p.exists()) {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
@@ -103,12 +103,20 @@ impl Settings {
         Ok(settings)
     }
 
+    fn save_to_config_path(&self, path: Option<&std::path::Path>) -> std::io::Result<()> {
+        let path = path.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "cannot save settings: %APPDATA% is unavailable",
+            )
+        })?;
+        self.save_to_path(path)
+    }
+
     /// Saves settings to disk as formatted JSON.
     pub fn save(&self) -> std::io::Result<()> {
-        if let Some(path) = Self::config_path() {
-            self.save_to_path(&path)?;
-        }
-        Ok(())
+        let path = Self::config_path();
+        self.save_to_config_path(path.as_deref())
     }
 }
 
@@ -227,11 +235,6 @@ unsafe extern "system" fn settings_wnd_proc(
                         }
                         20 => {
                             // Save button clicked
-                            if state.settings.hotkey.vk
-                                == windows::Win32::UI::Input::KeyboardAndMouse::VK_SNAPSHOT.0 as u32
-                            {
-                                let _ = crate::hotkey::disable_windows_snipping_tool_hotkey();
-                            }
                             match state.settings.save() {
                                 Ok(()) => {
                                     state.last_error = None;
@@ -253,7 +256,6 @@ unsafe extern "system" fn settings_wnd_proc(
                         30 => {
                             // PrintScreen preset selected
                             state.settings.hotkey = HotkeyConfig::default();
-                            let _ = crate::hotkey::disable_windows_snipping_tool_hotkey();
                             unsafe {
                                 let _ = InvalidateRect(hwnd, None, false);
                             }
@@ -268,7 +270,6 @@ unsafe extern "system" fn settings_wnd_proc(
                         32 => {
                             // Alt+PrintScreen preset selected
                             state.settings.hotkey = HotkeyConfig::alt_print_screen();
-                            let _ = crate::hotkey::disable_windows_snipping_tool_hotkey();
                             unsafe {
                                 let _ = InvalidateRect(hwnd, None, false);
                             }
@@ -969,17 +970,43 @@ mod tests {
     #[test]
     fn test_settings_save_to_path_roundtrip_and_error() {
         let defaults = Settings::default();
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join(format!("isolmass_unit_test_settings_{}.json", std::process::id()));
+        let unique_suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after the Unix epoch")
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!(
+            "isolmass_unit_test_settings_{}_{}",
+            std::process::id(),
+            unique_suffix
+        ));
+        let temp_file = temp_root.join("roundtrip").join("settings.json");
 
-        // Valid save and load
-        defaults.save_to_path(&temp_file).expect("save_to_path should succeed");
+        defaults
+            .save_to_path(&temp_file)
+            .expect("save_to_path should create the parent directory");
         let loaded = Settings::load_from_path(&temp_file).expect("load_from_path should succeed");
         assert_eq!(loaded, defaults);
-        let _ = std::fs::remove_file(&temp_file);
 
-        // Error propagation with invalid empty path
-        let invalid_path = std::path::Path::new("");
-        assert!(defaults.save_to_path(invalid_path).is_err(), "save_to_path with invalid path must return Err");
+        let blocker = temp_root.join("parent_blocker");
+        std::fs::write(&blocker, b"not a directory").expect("create parent blocker");
+        let blocked_parent = blocker.join("missing");
+        let expected_error = std::fs::create_dir_all(&blocked_parent)
+            .expect_err("create_dir_all should fail below a file");
+        let save_error = defaults
+            .save_to_path(&blocked_parent.join("settings.json"))
+            .expect_err("save_to_path should propagate the create_dir_all error");
+        assert_eq!(save_error.kind(), expected_error.kind());
+        assert_eq!(save_error.raw_os_error(), expected_error.raw_os_error());
+
+        let missing_path_error = defaults
+            .save_to_config_path(None)
+            .expect_err("a missing config path should prevent saving");
+        assert_eq!(missing_path_error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(
+            missing_path_error.to_string(),
+            "cannot save settings: %APPDATA% is unavailable"
+        );
+
+        std::fs::remove_dir_all(&temp_root).expect("remove settings test directory");
     }
 }

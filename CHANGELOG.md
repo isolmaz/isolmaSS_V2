@@ -13,11 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added hierarchical Escape action enum and method `OverlayState::handle_escape_action(&mut self) -> EscapeAction`, unified across keyboard and mouse inputs.
   - Added `verify_pe_subsystem_windows_gui` asserting PE Optional Header Subsystem equals 2 (`IMAGE_SUBSYSTEM_WINDOWS_GUI`) directly from binary PE headers.
   - Added isolated settings verification testing `Settings::default()` defaults, explicit round-trips for both false and true, and temporary file save/load.
-  - Added NSIS installer script (`installer.nsi`) and self-contained distribution packaging script (`package.bat`), verifying package size is <= 3 MB.
+  - Added NSIS installer script (`installer.nsi`) and self-contained distribution packaging script (`package.bat`), verifying installer size is ≤3 MiB.
 - **Settings Persistence & Error Propagation (Advisory 2)**:
-  - Added `Settings::save_to_path` and `Settings::load_from_path` for arbitrary file persistence and error propagation testing.
-  - Added `last_error: Option<String>` to `SettingsWindowState`, displaying save errors in vibrant red in the settings dialog UI and preventing dialog dismissal on write failure.
-  - Cleaned up settings callers across `main.rs`, `overlay.rs`, and `tray.rs` to eliminate swallowed errors and redundant `save()` invocations.
+  - Added `Settings::save_to_path` and `Settings::load_from_path` for explicit file persistence checks.
+  - `Settings::save` now returns `NotFound` instead of reporting success when `%APPDATA%` is unavailable.
+  - Parent-directory creation and file-write failures propagate from `save_to_path`.
+  - Added `last_error: Option<String>` to `SettingsWindowState`; **Save & Apply** leaves the dialog open and displays the save error instead of dismissing the window.
+  - Settings loading remains intentionally tolerant: missing, unreadable, or malformed configuration falls back to defaults.
+  - Settings dialog callers consume the saved result without performing redundant persistence writes.
 - **Pure GUI Subsystem without Console (Slice C4)**:
   - Added `#![windows_subsystem = "windows"]` to suppress the console window when launching the executable or daemon.
   - Attached to parent console (`AttachConsole`) on startup when CLI arguments are supplied so terminal output (`--smoke-test`, `--settings`, etc.) displays properly.
@@ -32,8 +35,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Disabling window snap suppresses the window snap hover highlight and avoids accidental snaps on click.
   - Disabling auto-close keeps the capture overlay open after copying or saving so users can continue annotating.
   - Accessible from tray menu, toolbar button, `Ctrl+,` shortcut, and `--settings` CLI flag.
+  - The current window displays the save folder but does not provide a folder picker or editor.
+  - Saved hotkey changes take effect on the next daemon launch; the running listener is not restarted in place.
+
+### Changed
+- Removed an incomplete, risky capture-latency optimization; capture remains on the prior single coherent GDI `BitBlt` path.
+
+### Verification — 2026-09-04
+- `cargo check`, `cargo clippy --all-targets -- -D warnings`, and `cargo build --release` passed.
+- `cargo test` passed: 6 passed, 0 failed.
+- `cmd /c package.bat` passed, including the strict NSIS installer check.
+- One post-change `--smoke-test` run exited 0 with `AUTOMATED SMOKE CHECKS PASSED (A1-C8 + C9 packaging checks)` and reported that external runtime budget status is documented separately and is not verified by that command.
+- `target/release/isolmass.exe` measured 438,784 bytes, below the 2.5 MiB target.
+- `target/release/isolmass-setup.exe` measured 262,534 bytes, below the 3 MiB target.
+- The actual daemon was sampled for 60.039 seconds: 11,157,504 bytes at start, 11,157,504 bytes maximum, and 11,116,544 bytes at end. The 10.640625 MiB maximum was below the 15 MiB target.
+- Actual PrintScreen-to-visible-overlay latency was 48.936 ms, so the ≤30 ms target was **not met**.
+- In the targeted runtime scenario, Esc closed the overlay in 15.801 ms, the daemon remained alive, clean `WM_CLOSE` shutdown exited 0, and no console `HWND` was observed.
+- This evidence does not claim manual validation of the complete annotation, Settings, or tray-menu UX.
 
 ### Fixed
+- **PrintScreen Registry Mutation**:
+  - Starting the hotkey listener and changing Settings no longer modify the registry. Only the explicit `--fix-printscreen` command writes `HKCU\Control Panel\Keyboard\PrintScreenKeyForSnippingEnabled`.
+
 - **Keyboard Input on Overlay (Slice C1)**:
   - Routed all overlay keyboard input through the low-level keyboard hook (`WH_KEYBOARD_LL`), ensuring reliable input delivery even with `WS_EX_NOACTIVATE`.
   - Implemented hierarchical Escape key flow: dismisses active text edit, deselects shape, cancels committed selection, or closes the overlay on first press from idle state.

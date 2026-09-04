@@ -1,5 +1,7 @@
 # isolmaSS — Lean MVP Plan (Phase A + B)
 
+> **Historical plan:** This document preserves the original A+B design and acceptance targets; it is not a record of current implementation or completed verification. See `README.md` and `plan2.md` for current behavior and status.
+
 > **Scope of this document:** Only the "must-have" (A) and "ship right after" (B) tiers from the
 > feature triage. Cloud upload, OCR, pin-to-screen, HDR capture, magnetic guides, etc. are
 > intentionally **out of scope** here — see "Deferred Features" at the bottom.
