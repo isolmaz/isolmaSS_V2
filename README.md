@@ -2,9 +2,9 @@
 
 Lightweight, native Windows screenshot and annotation utility built in Rust with direct Win32/GDI access. It uses a pure GUI subsystem (zero console window on normal launch) and persistent system tray integration. Release targets are ≤2.5 MiB for the executable, ≤3 MiB for the installer, ≤15 MiB for a separately measured idle daemon working set, and ≤30 ms from PrintScreen to a visible overlay.
 
-## Implementation Status: Phases A, B, and C Implemented
+## Implementation Status: Phases A and B Implemented; C0–C8 Implemented, C9 Open
 
-The automated smoke command exercises core model, persistence, Win32 integration, and packaging paths. It is not a substitute for interactive validation of the complete tool UX.
+See [ROADMAP.md](ROADMAP.md) for the durable phase summary, open latency gap, deferred features, and future priorities. The automated smoke command exercises core model, persistence, Win32 integration, and packaging paths. It is not a substitute for interactive validation of the complete tool UX.
 
 ### Verification Snapshot — 2026-09-04
 
@@ -58,7 +58,7 @@ This snapshot does not claim that the complete interactive annotation, Settings,
 - [x] **C6: Settings Standalone Panel & Behavior Toggles** — Native checkboxes for `enable_window_snap` (toggle single-click window snapping) and `close_after_action` (keep overlay open after Copy/Save to continue annotating). Save failures leave the dialog open and render the error.
 - [x] **C7: Regression Smoke Checks v2** — One post-change run exited 0 and reported `AUTOMATED SMOKE CHECKS PASSED (A1-C8 + C9 packaging checks)`. External runtime budgets and interactive behavior are outside that command's verification scope.
 - [x] **C8: Changelog & README Sync** — Documentation describes the implemented desktop, tray, editor, and Settings behavior while separating automated checks from manual/runtime verification.
-- [ ] **C9: Packaging and Runtime Reverification** — Build, package, artifact-size, daemon-memory, shutdown, and console checks passed on 2026-09-04, but PrintScreen-to-visible-overlay measured 48.936 ms and failed the ≤30 ms target. C9 remains incomplete.
+- [ ] **C9: Packaging and Runtime Reverification** — Build, package, artifact-size, daemon-memory, shutdown, and console checks passed on 2026-09-04, but PrintScreen-to-visible-overlay measured 48.936 ms and failed the ≤30 ms target. C9 remains incomplete; follow-up priorities are tracked in [ROADMAP.md](ROADMAP.md).
 
 ## System Tray & Background Daemon
 

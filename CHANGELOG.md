@@ -39,6 +39,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Saved hotkey changes take effect on the next daemon launch; the running listener is not restarted in place.
 
 ### Changed
+- Consolidated the historical implementation plans into `ROADMAP.md`, retaining durable status, verification gaps, deferred features, and future priorities.
 - Removed an incomplete, risky capture-latency optimization; capture remains on the prior single coherent GDI `BitBlt` path.
 
 ### Verification — 2026-09-04
