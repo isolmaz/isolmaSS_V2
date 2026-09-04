@@ -468,7 +468,11 @@ impl OverlayState {
         // 3. Save shortcut: Ctrl+S
         if self.mode == OverlayMode::SelectionActive && ctrl_down && vk == 'S' as usize {
             self.save_selection_to_file();
-            let _ = unsafe { DestroyWindow(hwnd) };
+            if self.settings.close_after_action {
+                let _ = unsafe { DestroyWindow(hwnd) };
+            } else {
+                self.redraw(hwnd);
+            }
             return LRESULT(0);
         }
 
@@ -489,7 +493,11 @@ impl OverlayState {
             && ((ctrl_down && vk == 'C' as usize) || vk == VK_RETURN.0 as usize)
         {
             self.copy_selection_to_clipboard(hwnd);
-            let _ = unsafe { DestroyWindow(hwnd) };
+            if self.settings.close_after_action {
+                let _ = unsafe { DestroyWindow(hwnd) };
+            } else {
+                self.redraw(hwnd);
+            }
             return LRESULT(0);
         }
 
@@ -873,27 +881,32 @@ unsafe extern "system" fn overlay_wnd_proc(
 
                 match state.mode {
                     OverlayMode::Hovering => {
-                        let screen_x = client_x + state.capture.x;
-                        let screen_y = client_y + state.capture.y;
+                        if state.settings.enable_window_snap {
+                            let screen_x = client_x + state.capture.x;
+                            let screen_y = client_y + state.capture.y;
 
-                        let new_snap = if let Some(win) =
-                            find_window_at_point((screen_x, screen_y), Some(hwnd))
-                        {
-                            Some(
-                                Rect::new(
-                                    win.bounds.left - state.capture.x,
-                                    win.bounds.top - state.capture.y,
-                                    win.bounds.right - state.capture.x,
-                                    win.bounds.bottom - state.capture.y,
+                            let new_snap = if let Some(win) =
+                                find_window_at_point((screen_x, screen_y), Some(hwnd))
+                            {
+                                Some(
+                                    Rect::new(
+                                        win.bounds.left - state.capture.x,
+                                        win.bounds.top - state.capture.y,
+                                        win.bounds.right - state.capture.x,
+                                        win.bounds.bottom - state.capture.y,
+                                    )
+                                    .clamp(state.capture.width, state.capture.height),
                                 )
-                                .clamp(state.capture.width, state.capture.height),
-                            )
-                        } else {
-                            None
-                        };
+                            } else {
+                                None
+                            };
 
-                        if state.hover_snap_rect != new_snap {
-                            state.hover_snap_rect = new_snap;
+                            if state.hover_snap_rect != new_snap {
+                                state.hover_snap_rect = new_snap;
+                                state.redraw(hwnd);
+                            }
+                        } else if state.hover_snap_rect.is_some() {
+                            state.hover_snap_rect = None;
                             state.redraw(hwnd);
                         }
                     }
@@ -1073,11 +1086,19 @@ unsafe extern "system" fn overlay_wnd_proc(
                                 }
                                 ToolbarItem::Action(ToolbarAction::Save) => {
                                     state.save_selection_to_file();
-                                    let _ = unsafe { DestroyWindow(hwnd) };
+                                    if state.settings.close_after_action {
+                                        let _ = unsafe { DestroyWindow(hwnd) };
+                                    } else {
+                                        state.redraw(hwnd);
+                                    }
                                 }
                                 ToolbarItem::Action(ToolbarAction::Copy) => {
                                     state.copy_selection_to_clipboard(hwnd);
-                                    let _ = unsafe { DestroyWindow(hwnd) };
+                                    if state.settings.close_after_action {
+                                        let _ = unsafe { DestroyWindow(hwnd) };
+                                    } else {
+                                        state.redraw(hwnd);
+                                    }
                                 }
                                 ToolbarItem::Action(ToolbarAction::Settings) => {
                                     if let Ok(Some(new_cfg)) = show_settings_dialog(&state.settings) {
@@ -1271,21 +1292,26 @@ unsafe extern "system" fn overlay_wnd_proc(
                             let dy = (client_y - start.1).abs();
 
                             if dx <= 3 && dy <= 3 {
-                                let screen_x = client_x + state.capture.x;
-                                let screen_y = client_y + state.capture.y;
+                                if state.settings.enable_window_snap {
+                                    let screen_x = client_x + state.capture.x;
+                                    let screen_y = client_y + state.capture.y;
 
-                                if let Some(win) =
-                                    find_window_at_point((screen_x, screen_y), Some(hwnd))
-                                {
-                                    let snap_rect = Rect::new(
-                                        win.bounds.left - state.capture.x,
-                                        win.bounds.top - state.capture.y,
-                                        win.bounds.right - state.capture.x,
-                                        win.bounds.bottom - state.capture.y,
-                                    )
-                                    .clamp(state.capture.width, state.capture.height);
+                                    if let Some(win) =
+                                        find_window_at_point((screen_x, screen_y), Some(hwnd))
+                                    {
+                                        let snap_rect = Rect::new(
+                                            win.bounds.left - state.capture.x,
+                                            win.bounds.top - state.capture.y,
+                                            win.bounds.right - state.capture.x,
+                                            win.bounds.bottom - state.capture.y,
+                                        )
+                                        .clamp(state.capture.width, state.capture.height);
 
-                                    state.commit_selection(hwnd, snap_rect);
+                                        state.commit_selection(hwnd, snap_rect);
+                                    } else {
+                                        state.mode = OverlayMode::Hovering;
+                                        state.redraw(hwnd);
+                                    }
                                 } else {
                                     state.mode = OverlayMode::Hovering;
                                     state.redraw(hwnd);

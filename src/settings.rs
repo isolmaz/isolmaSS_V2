@@ -37,6 +37,10 @@ pub const PRESET_COLORS: [[u8; 4]; 8] = [
 
 pub const PRESET_THICKNESSES: [i32; 3] = [2, 4, 8];
 
+fn default_true() -> bool {
+    true
+}
+
 /// Persistent application settings model.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Settings {
@@ -44,6 +48,10 @@ pub struct Settings {
     pub save_directory: PathBuf,
     pub default_color: [u8; 4],
     pub default_thickness: i32,
+    #[serde(default = "default_true")]
+    pub enable_window_snap: bool,
+    #[serde(default = "default_true")]
+    pub close_after_action: bool,
 }
 
 impl Default for Settings {
@@ -53,6 +61,8 @@ impl Default for Settings {
             save_directory: default_save_directory(),
             default_color: PRESET_COLORS[0], // Default vibrant red
             default_thickness: 3,
+            enable_window_snap: true,
+            close_after_action: true,
         }
     }
 }
@@ -238,6 +248,20 @@ unsafe extern "system" fn settings_wnd_proc(
                                 let _ = InvalidateRect(hwnd, None, false);
                             }
                         }
+                        40 => {
+                            // Toggle enable_window_snap
+                            state.settings.enable_window_snap = !state.settings.enable_window_snap;
+                            unsafe {
+                                let _ = InvalidateRect(hwnd, None, false);
+                            }
+                        }
+                        41 => {
+                            // Toggle close_after_action
+                            state.settings.close_after_action = !state.settings.close_after_action;
+                            unsafe {
+                                let _ = InvalidateRect(hwnd, None, false);
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -288,13 +312,13 @@ fn hit_test_settings(x: i32, y: i32) -> Option<usize> {
         }
     }
 
-    // 3. Save button (x: 240..=350, y: 290..=324)
-    if (240..=350).contains(&x) && (290..=324).contains(&y) {
+    // 3. Save button (x: 240..=350, y: 350..=384)
+    if (240..=350).contains(&x) && (350..=384).contains(&y) {
         return Some(20);
     }
 
-    // 4. Cancel button (x: 360..=440, y: 290..=324)
-    if (360..=440).contains(&x) && (290..=324).contains(&y) {
+    // 4. Cancel button (x: 360..=440, y: 350..=384)
+    if (360..=440).contains(&x) && (350..=384).contains(&y) {
         return Some(21);
     }
 
@@ -311,12 +335,22 @@ fn hit_test_settings(x: i32, y: i32) -> Option<usize> {
         }
     }
 
+    // 6. Checkbox 1: Enable single-click window snap (x: 30..=450, y: 268..=294)
+    if (30..=450).contains(&x) && (268..=294).contains(&y) {
+        return Some(40);
+    }
+
+    // 7. Checkbox 2: Close overlay automatically after Copy / Save (x: 30..=450, y: 302..=328)
+    if (30..=450).contains(&x) && (302..=328).contains(&y) {
+        return Some(41);
+    }
+
     None
 }
 
 fn render_settings_ui(hdc: HDC, state: &SettingsWindowState) {
     let width = 480;
-    let height = 360;
+    let height = 420;
 
     // 1. Fill background
     let bg_color = COLORREF(0x00242220); // Dark background
@@ -619,7 +653,71 @@ fn render_settings_ui(hdc: HDC, state: &SettingsWindowState) {
         }
     }
 
-    // Section 5: Save & Cancel Buttons
+    // Section 5: Behavior Checkboxes
+    let toggles = [
+        (40, state.settings.enable_window_snap, "Enable single-click window snap", 268),
+        (41, state.settings.close_after_action, "Close overlay automatically after Copy / Save", 302),
+    ];
+
+    for (elem_id, is_checked, label_str, top) in toggles {
+        let is_hovered = state.hovered_elem == Some(elem_id);
+        let box_left = 32;
+        let box_top = top + 2;
+        let box_right = box_left + 18;
+        let box_bottom = box_top + 18;
+
+        let (bg, border) = if is_checked {
+            (COLORREF(0x00D77800), COLORREF(0x00FA8919))
+        } else if is_hovered {
+            (COLORREF(0x003A3632), COLORREF(0x00807870))
+        } else {
+            (COLORREF(0x002A2825), border_color)
+        };
+
+        let brush = unsafe { CreateSolidBrush(bg) };
+        let pen = unsafe { CreatePen(PS_SOLID, 1, border) };
+        let p_old = unsafe { SelectObject(hdc, HGDIOBJ(pen.0)) };
+        let b_old = unsafe { SelectObject(hdc, HGDIOBJ(brush.0)) };
+
+        unsafe {
+            let _ = RoundRect(hdc, box_left, box_top, box_right, box_bottom, 4, 4);
+            SelectObject(hdc, p_old);
+            let _ = DeleteObject(HGDIOBJ(pen.0));
+            SelectObject(hdc, b_old);
+            let _ = DeleteObject(HGDIOBJ(brush.0));
+
+            if is_checked {
+                SelectObject(hdc, HGDIOBJ(bold_font.0));
+                let _ = SetTextColor(hdc, COLORREF(0x00FFFFFF));
+                let mut check = "v\0".encode_utf16().collect::<Vec<u16>>();
+                let mut rc_check = RECT {
+                    left: box_left,
+                    top: box_top,
+                    right: box_right,
+                    bottom: box_bottom,
+                };
+                let _ = DrawTextW(hdc, &mut check, &mut rc_check, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            }
+
+            SelectObject(hdc, HGDIOBJ(normal_font.0));
+            let txt_col = if is_hovered {
+                COLORREF(0x00FFFFFF)
+            } else {
+                COLORREF(0x00D0CCC8)
+            };
+            let _ = SetTextColor(hdc, txt_col);
+            let mut label = format!("{}\0", label_str).encode_utf16().collect::<Vec<u16>>();
+            let mut rc_label = RECT {
+                left: box_right + 12,
+                top,
+                right: 460,
+                bottom: top + 24,
+            };
+            let _ = DrawTextW(hdc, &mut label, &mut rc_label, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        }
+    }
+
+    // Section 6: Save & Cancel Buttons
     // Save button
     let save_hover = state.hovered_elem == Some(20);
     let save_bg = if save_hover {
@@ -632,7 +730,7 @@ fn render_settings_ui(hdc: HDC, state: &SettingsWindowState) {
     let po = unsafe { SelectObject(hdc, HGDIOBJ(s_pen.0)) };
     let bo = unsafe { SelectObject(hdc, HGDIOBJ(s_brush.0)) };
     unsafe {
-        let _ = RoundRect(hdc, 240, 290, 350, 324, 6, 6);
+        let _ = RoundRect(hdc, 240, 350, 350, 384, 6, 6);
         SelectObject(hdc, po);
         let _ = DeleteObject(HGDIOBJ(s_pen.0));
         SelectObject(hdc, bo);
@@ -642,9 +740,9 @@ fn render_settings_ui(hdc: HDC, state: &SettingsWindowState) {
         let mut label = "Save & Apply\0".encode_utf16().collect::<Vec<u16>>();
         let mut rc = RECT {
             left: 240,
-            top: 290,
+            top: 350,
             right: 350,
-            bottom: 324,
+            bottom: 384,
         };
         let _ = DrawTextW(hdc, &mut label, &mut rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
@@ -661,7 +759,7 @@ fn render_settings_ui(hdc: HDC, state: &SettingsWindowState) {
     let po = unsafe { SelectObject(hdc, HGDIOBJ(c_pen.0)) };
     let bo = unsafe { SelectObject(hdc, HGDIOBJ(c_brush.0)) };
     unsafe {
-        let _ = RoundRect(hdc, 360, 290, 440, 324, 6, 6);
+        let _ = RoundRect(hdc, 360, 350, 440, 384, 6, 6);
         SelectObject(hdc, po);
         let _ = DeleteObject(HGDIOBJ(c_pen.0));
         SelectObject(hdc, bo);
@@ -671,9 +769,9 @@ fn render_settings_ui(hdc: HDC, state: &SettingsWindowState) {
         let mut label = "Cancel\0".encode_utf16().collect::<Vec<u16>>();
         let mut rc = RECT {
             left: 360,
-            top: 290,
+            top: 350,
             right: 440,
-            bottom: 324,
+            bottom: 384,
         };
         let _ = DrawTextW(hdc, &mut label, &mut rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
@@ -737,7 +835,7 @@ pub fn show_settings_dialog(current: &Settings) -> Result<Option<Settings>> {
     });
 
     let width = 480;
-    let height = 360;
+    let height = 430;
 
     let screen_w = unsafe { GetSystemMetrics(SM_CXSCREEN) };
     let screen_h = unsafe { GetSystemMetrics(SM_CYSCREEN) };
@@ -784,5 +882,45 @@ pub fn show_settings_dialog(current: &Settings) -> Result<Option<Settings>> {
         Ok(Some(state.settings))
     } else {
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_settings_new_toggles_defaults_and_serde() {
+        let defaults = Settings::default();
+        assert!(defaults.enable_window_snap);
+        assert!(defaults.close_after_action);
+
+        // Serialization round-trip
+        let json = serde_json::to_string(&defaults).expect("serialize settings");
+        assert!(json.contains("enable_window_snap"));
+        assert!(json.contains("close_after_action"));
+
+        let mut deserialized: Settings = serde_json::from_str(&json).expect("deserialize settings");
+        assert_eq!(deserialized, defaults);
+
+        // Backward compatibility: JSON missing the two new fields
+        let legacy_json = serde_json::json!({
+            "hotkey": defaults.hotkey,
+            "save_directory": defaults.save_directory,
+            "default_color": defaults.default_color,
+            "default_thickness": defaults.default_thickness,
+        }).to_string();
+
+        let loaded: Settings = serde_json::from_str(&legacy_json).expect("deserialize legacy settings");
+        assert!(loaded.enable_window_snap, "Legacy JSON should default enable_window_snap to true");
+        assert!(loaded.close_after_action, "Legacy JSON should default close_after_action to true");
+
+        // Custom toggles
+        deserialized.enable_window_snap = false;
+        deserialized.close_after_action = false;
+        let json2 = serde_json::to_string(&deserialized).expect("serialize customized");
+        let loaded2: Settings = serde_json::from_str(&json2).expect("deserialize customized");
+        assert!(!loaded2.enable_window_snap);
+        assert!(!loaded2.close_after_action);
     }
 }

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Pure GUI Subsystem without Console (Slice C4)**:
+  - Added `#![windows_subsystem = "windows"]` to suppress the console window when launching the executable or daemon.
+  - Attached to parent console (`AttachConsole`) on startup when CLI arguments are supplied so terminal output (`--smoke-test`, `--settings`, etc.) displays properly.
+- **System Tray Icon & Right-Click Menu (Slice C5)**:
+  - Added persistent system tray icon in the Windows taskbar notification area via `Shell_NotifyIconW`.
+  - Left-click or double-click on tray icon triggers capture immediately.
+  - Right-click on tray icon opens native context popup menu with "Capture Now" (default), "Settings...", and "Exit".
+  - Cleanly unregisters tray icon with `NIM_DELETE` on shutdown so no ghost icons remain.
+- **Standalone Settings Panel & Behavior Toggles (Slice C6)**:
+  - Added two new persistent boolean toggles to `Settings`: `enable_window_snap` (default: true) and `close_after_action` (default: true).
+  - Designed native checkbox controls in the standalone settings dialog.
+  - Disabling window snap suppresses the window snap hover highlight and avoids accidental snaps on click.
+  - Disabling auto-close keeps the capture overlay open after copying or saving so users can continue annotating.
+  - Accessible from tray menu, toolbar button, `Ctrl+,` shortcut, and `--settings` CLI flag.
+
 ### Fixed
 - **Keyboard Input on Overlay (Slice C1)**:
   - Routed all overlay keyboard input through the low-level keyboard hook (`WH_KEYBOARD_LL`), ensuring reliable input delivery even with `WS_EX_NOACTIVATE`.

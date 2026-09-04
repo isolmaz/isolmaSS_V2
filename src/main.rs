@@ -1,3 +1,5 @@
+#![windows_subsystem = "windows"]
+
 mod annotation;
 mod capture;
 mod clipboard;
@@ -6,6 +8,7 @@ mod overlay;
 mod save;
 mod settings;
 mod toolbar;
+mod tray;
 mod window_snap;
 
 use annotation::{
@@ -18,10 +21,13 @@ use hotkey::{start_hotkey_listener, HotkeyConfig};
 use overlay::show_overlay_session;
 use save::{default_save_directory, generate_screenshot_filename, save_buffer_to_png};
 use settings::{show_settings_dialog, Settings, PRESET_COLORS, PRESET_THICKNESSES};
+use std::sync::mpsc::channel;
 use std::sync::Arc;
 use std::time::Instant;
 use toolbar::{Toolbar, ToolbarAction, ToolbarItem};
+use tray::{TrayCommand, TrayManager};
 use window_snap::{find_window_at_point, get_visible_windows};
+use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows::Win32::System::Threading::GetCurrentProcess;
 use windows::Win32::UI::HiDpi::{
@@ -672,11 +678,24 @@ fn run_interactive_session() -> Result<(), Box<dyn std::error::Error>> {
     let settings = Settings::load_or_default();
     let (event_rx, handle) = start_hotkey_listener(settings.hotkey)?;
 
-    println!("Hotkey daemon active!");
+    let (tray_tx, tray_rx) = channel::<TrayCommand>();
+    let tray_manager = TrayManager::create(tray_tx.clone())?;
+
+    // Forward global hotkey triggers to the daemon event channel
+    let hotkey_tx = tray_tx.clone();
+    let _forward_thread = std::thread::spawn(move || {
+        while let Ok(()) = event_rx.recv() {
+            let _ = hotkey_tx.send(TrayCommand::Capture);
+            tray::notify_tray_wakeup();
+        }
+    });
+
+    println!("Hotkey & System Tray daemon active!");
     println!(
         "  - Active Hotkey:   [{}] (Locked to isolmaSS; Windows Snipping Tool suppressed)",
         handle.active_description
     );
+    println!("  - System Tray:     Active in notification area (Right-click menu: Capture, Settings, Exit)");
     println!("  - Low-Level Hook:  WH_KEYBOARD_LL active (swallows VK_SNAPSHOT keystrokes)");
     println!(
         "  - Registry Fix:    PrintScreenKeyForSnippingEnabled = 0 ({})",
@@ -688,54 +707,84 @@ fn run_interactive_session() -> Result<(), Box<dyn std::error::Error>> {
     );
     println!("  - Save Folder:     [{}]", settings.save_directory.display());
     println!("  - Press [{}] anywhere to capture virtual screen.", handle.active_description);
-    println!("  - In overlay:");
-    println!("      * Drag left mouse to select a custom rectangle");
-    println!("      * Hover over any window to preview window snap; click to snap");
-    println!("      * Hold Shift while dragging for 1:1 squares & 45° angle snapping");
-    println!("      * Use Toolbar or Keys: [R]ect, [A]rrow, [P]en, [T]ext, [B]lur");
-    println!("      * Select preset colors or stroke thickness from sub-bar");
-    println!("      * Click on any shape to select, drag to move, or recolor live");
-    println!("      * Press Delete/Backspace to delete selected shape");
-    println!("      * Press Ctrl+Z to Undo, Ctrl+Y to Redo");
-    println!("      * Press Ctrl+S to save PNG to disk & exit");
-    println!("      * Press Ctrl+C or Enter to copy result to Clipboard & exit");
-    println!("      * Press Ctrl+, or click Settings for options");
-    println!("      * Press Esc (or Right-Click) to cancel current step / close overlay");
-    println!("  - Press Ctrl+C in this console to exit.\n");
+    println!("  - Left-click or double-click tray icon to capture immediately.");
+    println!("  - Right-click tray icon for menu: Capture Now, Settings..., Exit.\n");
 
-    while let Ok(()) = event_rx.recv() {
-        println!("\n[isolmaSS] Hotkey triggered! Capturing screen...");
-        let t0 = Instant::now();
-        match CaptureBuffer::capture_virtual_screen() {
-            Ok(capture) => {
-                let capture_time = t0.elapsed();
-                println!(
-                    "[isolmaSS] Screen frozen in {:.2?}. Resolution: {}x{} at ({}, {}).",
-                    capture_time, capture.width, capture.height, capture.x, capture.y
-                );
-                let capture_arc = Arc::new(capture);
-                match show_overlay_session(capture_arc) {
-                    Ok(Some(selection)) => {
-                        println!(
-                            "[isolmaSS] Capture committed: [({}, {}) to ({}, {})] ({}x{} pixels).",
-                            selection.left, selection.top, selection.right, selection.bottom,
-                            selection.width(), selection.height()
-                        );
+    let mut msg = windows::Win32::UI::WindowsAndMessaging::MSG::default();
+    let mut running = true;
+
+    while running
+        && unsafe {
+            windows::Win32::UI::WindowsAndMessaging::GetMessageW(
+                &mut msg,
+                windows::Win32::Foundation::HWND::default(),
+                0,
+                0,
+            )
+        }
+        .0
+            > 0
+    {
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::TranslateMessage(&msg);
+            windows::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
+        }
+
+        while let Ok(cmd) = tray_rx.try_recv() {
+            match cmd {
+                TrayCommand::Capture => {
+                    println!("\n[isolmaSS] Capture triggered! Capturing screen...");
+                    let t0 = Instant::now();
+                    match CaptureBuffer::capture_virtual_screen() {
+                        Ok(capture) => {
+                            let capture_time = t0.elapsed();
+                            println!(
+                                "[isolmaSS] Screen frozen in {:.2?}. Resolution: {}x{} at ({}, {}).",
+                                capture_time, capture.width, capture.height, capture.x, capture.y
+                            );
+                            let capture_arc = Arc::new(capture);
+                            match show_overlay_session(capture_arc) {
+                                Ok(Some(selection)) => {
+                                    println!(
+                                        "[isolmaSS] Capture committed: [({}, {}) to ({}, {})] ({}x{} pixels).",
+                                        selection.left, selection.top, selection.right, selection.bottom,
+                                        selection.width(), selection.height()
+                                    );
+                                }
+                                Ok(None) => {
+                                    println!("[isolmaSS] Overlay closed (Esc / dismissed).");
+                                }
+                                Err(err) => {
+                                    eprintln!("[isolmaSS] Overlay error: {}", err);
+                                }
+                            }
+                        }
+                        Err(err) => {
+                            eprintln!("[isolmaSS] Capture failed: {}", err);
+                        }
                     }
-                    Ok(None) => {
-                        println!("[isolmaSS] Overlay closed (Esc / dismissed).");
-                    }
-                    Err(err) => {
-                        eprintln!("[isolmaSS] Overlay error: {}", err);
+                    println!("[isolmaSS] Ready for next capture...");
+                }
+                TrayCommand::Settings => {
+                    let current = Settings::load_or_default();
+                    if let Ok(Some(saved)) = show_settings_dialog(&current) {
+                        println!("[isolmaSS] Settings updated and saved successfully.");
+                        let _ = saved.save();
+                    } else {
+                        println!("[isolmaSS] Settings dialog closed.");
                     }
                 }
-            }
-            Err(err) => {
-                eprintln!("[isolmaSS] Capture failed: {}", err);
+                TrayCommand::Exit => {
+                    println!("[isolmaSS] Exiting daemon cleanly...");
+                    running = false;
+                    break;
+                }
             }
         }
-        println!("[isolmaSS] Ready for next capture...");
     }
+
+    drop(tray_manager);
+    drop(handle);
 
     Ok(())
 }
@@ -760,9 +809,16 @@ fn run_capture_once() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 1 {
+        // Attach to parent terminal so CLI flags print output properly
+        unsafe {
+            let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
+
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
 
-    let args: Vec<String> = std::env::args().collect();
     if args.len() > 1 {
         match args[1].as_str() {
             "--fix-printscreen" => {
