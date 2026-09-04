@@ -72,15 +72,100 @@ struct DragSelectionState {
     last_pos: (i32, i32),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EscapeAction {
+    CancelledTextEdit,
+    DeselectedObject(usize),
+    CancelledSelection,
+    CloseOverlay,
+}
+
 #[derive(Debug, Clone)]
-struct TextEditState {
-    pos: (i32, i32),
-    text: String,
-    caret: usize,
-    color: [u8; 4],
-    font_size: i32,
-    editing_id: Option<usize>,
-    caret_visible: bool,
+pub struct TextEditState {
+    pub pos: (i32, i32),
+    pub text: String,
+    pub caret: usize,
+    pub color: [u8; 4],
+    pub font_size: i32,
+    pub editing_id: Option<usize>,
+    pub caret_visible: bool,
+}
+
+impl TextEditState {
+    pub fn new(
+        pos: (i32, i32),
+        text: String,
+        color: [u8; 4],
+        font_size: i32,
+        editing_id: Option<usize>,
+    ) -> Self {
+        let caret = text.chars().count();
+        Self {
+            pos,
+            text,
+            caret,
+            color,
+            font_size,
+            editing_id,
+            caret_visible: true,
+        }
+    }
+
+    pub fn insert_char(&mut self, ch: char) {
+        let mut chars: Vec<char> = self.text.chars().collect();
+        let caret = self.caret.min(chars.len());
+        chars.insert(caret, ch);
+        self.text = chars.into_iter().collect();
+        self.caret = caret + 1;
+        self.caret_visible = true;
+    }
+
+    pub fn backspace(&mut self) -> bool {
+        let mut chars: Vec<char> = self.text.chars().collect();
+        let caret = self.caret.min(chars.len());
+        if caret > 0 {
+            chars.remove(caret - 1);
+            self.text = chars.into_iter().collect();
+            self.caret = caret - 1;
+            self.caret_visible = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn delete(&mut self) -> bool {
+        let mut chars: Vec<char> = self.text.chars().collect();
+        let caret = self.caret.min(chars.len());
+        if caret < chars.len() {
+            chars.remove(caret);
+            self.text = chars.into_iter().collect();
+            self.caret_visible = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn move_left(&mut self) -> bool {
+        if self.caret > 0 {
+            self.caret -= 1;
+            self.caret_visible = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn move_right(&mut self) -> bool {
+        if self.caret < self.text.chars().count() {
+            self.caret += 1;
+            self.caret_visible = true;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -90,7 +175,7 @@ struct DragObjectState {
     last_pos: (i32, i32),
 }
 
-struct OverlayState {
+pub struct OverlayState {
     capture: Arc<CaptureBuffer>,
     mode: OverlayMode,
     drag_start: Option<(i32, i32)>,
@@ -125,14 +210,102 @@ impl Drop for OverlayState {
     fn drop(&mut self) {
         unregister_overlay();
         unsafe {
-            SelectObject(self.mem_dc, self.old_bmp);
-            let _ = DeleteObject(HGDIOBJ(self.dib.0));
-            let _ = DeleteDC(self.mem_dc);
+            if !self.mem_dc.0.is_null() {
+                SelectObject(self.mem_dc, self.old_bmp);
+                let _ = DeleteDC(self.mem_dc);
+            }
+            if !self.dib.0.is_null() {
+                let _ = DeleteObject(HGDIOBJ(self.dib.0));
+            }
         }
     }
 }
 
 impl OverlayState {
+    pub fn handle_escape_action(&mut self) -> EscapeAction {
+        if self.text_edit.is_some() {
+            self.text_edit = None;
+            EscapeAction::CancelledTextEdit
+        } else if let Some(id) = self.selected_id.take() {
+            EscapeAction::DeselectedObject(id)
+        } else if self.mode == OverlayMode::SelectionActive {
+            self.mode = OverlayMode::Hovering;
+            self.committed_selection = None;
+            self.toolbar = None;
+            self.objects.clear();
+            EscapeAction::CancelledSelection
+        } else {
+            EscapeAction::CloseOverlay
+        }
+    }
+
+    pub fn create_test_state(capture: Arc<CaptureBuffer>) -> Self {
+        Self {
+            capture,
+            mode: OverlayMode::Hovering,
+            drag_start: None,
+            committed_selection: None,
+            hover_snap_rect: None,
+            settings: Settings::default(),
+            active_tool: ToolKind::Rectangle,
+            active_color: [49, 49, 224, 255],
+            active_thickness: 3,
+            objects: Vec::new(),
+            selected_id: None,
+            next_id: 1,
+            history: HistoryManager::default(),
+            drawing_shape: None,
+            dragging_object: None,
+            dragging_selection: None,
+            text_edit: None,
+            toolbar: None,
+            mem_dc: HDC::default(),
+            dib: HBITMAP::default(),
+            old_bmp: HGDIOBJ::default(),
+            bits_ptr: std::ptr::null_mut(),
+            committed_result: false,
+        }
+    }
+
+    pub fn mode(&self) -> OverlayMode {
+        self.mode
+    }
+
+    #[allow(dead_code)]
+    pub fn set_mode(&mut self, mode: OverlayMode) {
+        self.mode = mode;
+    }
+
+    pub fn text_edit(&self) -> Option<&TextEditState> {
+        self.text_edit.as_ref()
+    }
+
+    pub fn set_text_edit(&mut self, edit: Option<TextEditState>) {
+        self.text_edit = edit;
+    }
+
+    pub fn selected_id(&self) -> Option<usize> {
+        self.selected_id
+    }
+
+    pub fn set_selected_id(&mut self, id: Option<usize>) {
+        self.selected_id = id;
+    }
+
+    pub fn committed_selection(&self) -> Option<Rect> {
+        self.committed_selection
+    }
+
+    #[allow(dead_code)]
+    pub fn set_committed_selection(&mut self, rect: Option<Rect>) {
+        self.committed_selection = rect;
+    }
+
+    pub fn set_selection_active(&mut self, rect: Rect) {
+        self.mode = OverlayMode::SelectionActive;
+        self.committed_selection = Some(rect);
+    }
+
     fn composite_scene(&mut self) {
         let width = self.capture.width;
         let height = self.capture.height;
@@ -365,104 +538,71 @@ impl OverlayState {
         }
     }
 
-    fn cancel_text_edit(&mut self, hwnd: HWND) {
-        if self.text_edit.is_some() {
-            self.text_edit = None;
-            unsafe {
-                let _ = KillTimer(hwnd, 1);
-            }
-            set_overlay_text_editing(false);
-            self.redraw(hwnd);
-        }
-    }
-
     fn handle_key_down(&mut self, hwnd: HWND, vk: usize, mods: isize) -> LRESULT {
         let ctrl_down = (mods & MOD_CONTROL.0 as isize) != 0
             || ((unsafe { GetKeyState(VK_CONTROL.0 as i32) } as u16 & 0x8000) != 0);
 
-        // 1. If currently in TextEditState:
+        // 1. Hierarchical Escape flow (production method used directly)
+        if vk == VK_ESCAPE.0 as usize {
+            match self.handle_escape_action() {
+                EscapeAction::CancelledTextEdit => {
+                    unsafe {
+                        let _ = KillTimer(hwnd, 1);
+                    }
+                    set_overlay_text_editing(false);
+                    self.redraw(hwnd);
+                }
+                EscapeAction::DeselectedObject(_) | EscapeAction::CancelledSelection => {
+                    self.redraw(hwnd);
+                }
+                EscapeAction::CloseOverlay => {
+                    let _ = unsafe { DestroyWindow(hwnd) };
+                }
+            }
+            return LRESULT(0);
+        }
+
+        // 2. If currently in TextEditState:
         if self.text_edit.is_some() {
             match vk {
-                x if x == VK_ESCAPE.0 as usize => {
-                    self.cancel_text_edit(hwnd);
-                    return LRESULT(0);
-                }
                 x if x == VK_RETURN.0 as usize => {
                     self.commit_text(hwnd);
                     return LRESULT(0);
                 }
                 x if x == VK_BACK.0 as usize => {
-                    if let Some(edit) = &mut self.text_edit {
-                        let mut chars: Vec<char> = edit.text.chars().collect();
-                        let caret = edit.caret.min(chars.len());
-                        if caret > 0 {
-                            chars.remove(caret - 1);
-                            edit.text = chars.into_iter().collect();
-                            edit.caret = caret - 1;
-                            edit.caret_visible = true;
-                            self.redraw(hwnd);
-                        }
+                    if let Some(edit) = &mut self.text_edit
+                        && edit.backspace()
+                    {
+                        self.redraw(hwnd);
                     }
                     return LRESULT(0);
                 }
                 x if x == VK_DELETE.0 as usize => {
-                    if let Some(edit) = &mut self.text_edit {
-                        let mut chars: Vec<char> = edit.text.chars().collect();
-                        let caret = edit.caret.min(chars.len());
-                        if caret < chars.len() {
-                            chars.remove(caret);
-                            edit.text = chars.into_iter().collect();
-                            edit.caret_visible = true;
-                            self.redraw(hwnd);
-                        }
+                    if let Some(edit) = &mut self.text_edit
+                        && edit.delete()
+                    {
+                        self.redraw(hwnd);
                     }
                     return LRESULT(0);
                 }
                 x if x == VK_LEFT.0 as usize => {
                     if let Some(edit) = &mut self.text_edit
-                        && edit.caret > 0
+                        && edit.move_left()
                     {
-                        edit.caret -= 1;
-                        edit.caret_visible = true;
                         self.redraw(hwnd);
                     }
                     return LRESULT(0);
                 }
                 x if x == VK_RIGHT.0 as usize => {
                     if let Some(edit) = &mut self.text_edit
-                        && edit.caret < edit.text.chars().count()
+                        && edit.move_right()
                     {
-                        edit.caret += 1;
-                        edit.caret_visible = true;
                         self.redraw(hwnd);
                     }
                     return LRESULT(0);
                 }
                 _ => return LRESULT(0),
             }
-        }
-
-        // 2. Hierarchical Escape flow when NOT text editing:
-        // Esc from idle closes overlay on FIRST press.
-        // Esc with shape selected deselects it.
-        // Esc with selection committed cancels selection.
-        if vk == VK_ESCAPE.0 as usize {
-            if self.selected_id.is_some() {
-                self.selected_id = None;
-                self.redraw(hwnd);
-                return LRESULT(0);
-            }
-            if self.mode == OverlayMode::SelectionActive {
-                self.mode = OverlayMode::Hovering;
-                self.committed_selection = None;
-                self.toolbar = None;
-                self.objects.clear();
-                self.redraw(hwnd);
-                return LRESULT(0);
-            }
-            // Idle state: Esc closes overlay on FIRST press!
-            let _ = unsafe { DestroyWindow(hwnd) };
-            return LRESULT(0);
         }
 
         // 3. Save shortcut: Ctrl+S
@@ -478,12 +618,17 @@ impl OverlayState {
 
         // 4. Settings shortcut: Ctrl+,
         if ctrl_down && vk == VK_OEM_COMMA.0 as usize {
-            if let Ok(Some(new_cfg)) = show_settings_dialog(&self.settings) {
-                self.active_color = new_cfg.default_color;
-                self.active_thickness = new_cfg.default_thickness;
-                self.settings = new_cfg;
-                let _ = self.settings.save();
-                self.redraw(hwnd);
+            match show_settings_dialog(&self.settings) {
+                Ok(Some(new_cfg)) => {
+                    self.active_color = new_cfg.default_color;
+                    self.active_thickness = new_cfg.default_thickness;
+                    self.settings = new_cfg;
+                    self.redraw(hwnd);
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    eprintln!("[isolmaSS] Settings dialog failed: {e}");
+                }
             }
             return LRESULT(0);
         }
@@ -575,12 +720,7 @@ impl OverlayState {
             && let Some(ch) = char::from_u32(ch_code)
             && (!ch.is_control() || ch == '\t')
         {
-            let mut chars: Vec<char> = edit.text.chars().collect();
-            let caret = edit.caret.min(chars.len());
-            chars.insert(caret, ch);
-            edit.text = chars.into_iter().collect();
-            edit.caret = caret + 1;
-            edit.caret_visible = true;
+            edit.insert_char(ch);
             self.redraw(hwnd);
             return LRESULT(0);
         }
@@ -813,16 +953,13 @@ unsafe extern "system" fn overlay_wnd_proc(
                             font_size,
                         } = obj.kind
                         {
-                            let char_count = text.chars().count();
-                            state.text_edit = Some(TextEditState {
-                                pos: t_pos,
+                            state.text_edit = Some(TextEditState::new(
+                                t_pos,
                                 text,
-                                caret: char_count,
                                 color,
                                 font_size,
-                                editing_id: Some(obj.id),
-                                caret_visible: true,
-                            });
+                                Some(obj.id),
+                            ));
                             unsafe {
                                 let _ = SetTimer(hwnd, 1, 500, None);
                             }
@@ -1101,12 +1238,17 @@ unsafe extern "system" fn overlay_wnd_proc(
                                     }
                                 }
                                 ToolbarItem::Action(ToolbarAction::Settings) => {
-                                    if let Ok(Some(new_cfg)) = show_settings_dialog(&state.settings) {
-                                        state.active_color = new_cfg.default_color;
-                                        state.active_thickness = new_cfg.default_thickness;
-                                        state.settings = new_cfg;
-                                        let _ = state.settings.save();
-                                        state.redraw(hwnd);
+                                    match show_settings_dialog(&state.settings) {
+                                        Ok(Some(new_cfg)) => {
+                                            state.active_color = new_cfg.default_color;
+                                            state.active_thickness = new_cfg.default_thickness;
+                                            state.settings = new_cfg;
+                                            state.redraw(hwnd);
+                                        }
+                                        Ok(None) => {}
+                                        Err(e) => {
+                                            eprintln!("[isolmaSS] Settings dialog error: {e}");
+                                        }
                                     }
                                 }
                                 ToolbarItem::Action(ToolbarAction::Cancel) => {
@@ -1231,15 +1373,13 @@ unsafe extern "system" fn overlay_wnd_proc(
                                         });
                                     }
                                     ToolKind::Text => {
-                                        state.text_edit = Some(TextEditState {
-                                            pos: pt,
-                                            text: String::new(),
-                                            caret: 0,
-                                            color: state.active_color,
-                                            font_size: DEFAULT_FONT_SIZE,
-                                            editing_id: None,
-                                            caret_visible: true,
-                                        });
+                                        state.text_edit = Some(TextEditState::new(
+                                            pt,
+                                            String::new(),
+                                            state.active_color,
+                                            DEFAULT_FONT_SIZE,
+                                            None,
+                                        ));
                                         unsafe {
                                             let _ = SetTimer(hwnd, 1, 500, None);
                                         }
@@ -1492,22 +1632,23 @@ unsafe extern "system" fn overlay_wnd_proc(
         WM_RBUTTONUP => {
             if !state_ptr.is_null() {
                 let state = unsafe { &mut *state_ptr };
-                if state.text_edit.is_some() {
-                    state.cancel_text_edit(hwnd);
-                    return LRESULT(0);
-                }
-                if state.selected_id.is_some() {
-                    state.selected_id = None;
-                    state.redraw(hwnd);
-                    return LRESULT(0);
-                }
-                if state.mode == OverlayMode::SelectionActive {
-                    state.mode = OverlayMode::Hovering;
-                    state.committed_selection = None;
-                    state.toolbar = None;
-                    state.objects.clear();
-                    state.redraw(hwnd);
-                    return LRESULT(0);
+                match state.handle_escape_action() {
+                    EscapeAction::CancelledTextEdit => {
+                        unsafe {
+                            let _ = KillTimer(hwnd, 1);
+                        }
+                        set_overlay_text_editing(false);
+                        state.redraw(hwnd);
+                        return LRESULT(0);
+                    }
+                    EscapeAction::DeselectedObject(_) | EscapeAction::CancelledSelection => {
+                        state.redraw(hwnd);
+                        return LRESULT(0);
+                    }
+                    EscapeAction::CloseOverlay => {
+                        let _ = unsafe { DestroyWindow(hwnd) };
+                        return LRESULT(0);
+                    }
                 }
             }
             let _ = unsafe { DestroyWindow(hwnd) };

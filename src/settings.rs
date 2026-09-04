@@ -84,24 +84,39 @@ impl Settings {
         Self::default()
     }
 
+    /// Saves settings to an arbitrary path on disk as formatted JSON.
+    pub fn save_to_path(&self, path: &std::path::Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty() && !p.exists()) {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        std::fs::write(path, json)?;
+        Ok(())
+    }
+
+    /// Loads settings from an arbitrary path on disk.
+    pub fn load_from_path(path: &std::path::Path) -> std::io::Result<Self> {
+        let content = std::fs::read_to_string(path)?;
+        let settings = serde_json::from_str::<Settings>(&content)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+        Ok(settings)
+    }
+
     /// Saves settings to disk as formatted JSON.
     pub fn save(&self) -> std::io::Result<()> {
         if let Some(path) = Self::config_path() {
-            if let Some(parent) = path.parent().filter(|p| !p.exists()) {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let json = serde_json::to_string_pretty(self)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-            std::fs::write(path, json)?;
+            self.save_to_path(&path)?;
         }
         Ok(())
     }
 }
 
-struct SettingsWindowState {
+pub struct SettingsWindowState {
     settings: Settings,
     saved: bool,
     hovered_elem: Option<usize>, // 0..8 colors, 10..12 thickness, 20 save, 21 cancel
+    pub last_error: Option<String>,
 }
 
 struct GdiResourceGuard {
@@ -217,9 +232,19 @@ unsafe extern "system" fn settings_wnd_proc(
                             {
                                 let _ = crate::hotkey::disable_windows_snipping_tool_hotkey();
                             }
-                            let _ = state.settings.save();
-                            state.saved = true;
-                            let _ = unsafe { DestroyWindow(hwnd) };
+                            match state.settings.save() {
+                                Ok(()) => {
+                                    state.last_error = None;
+                                    state.saved = true;
+                                    let _ = unsafe { DestroyWindow(hwnd) };
+                                }
+                                Err(e) => {
+                                    state.last_error = Some(format!("Save failed: {e}"));
+                                    unsafe {
+                                        let _ = InvalidateRect(hwnd, None, false);
+                                    }
+                                }
+                            }
                         }
                         21 => {
                             // Cancel button clicked
@@ -776,6 +801,22 @@ fn render_settings_ui(hdc: HDC, state: &SettingsWindowState) {
         let _ = DrawTextW(hdc, &mut label, &mut rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     }
 
+    // Render error notification if save failed
+    if let Some(err) = &state.last_error {
+        unsafe {
+            SelectObject(hdc, HGDIOBJ(bold_font.0));
+            SetTextColor(hdc, COLORREF(0x003131E0)); // Vibrant red (#E03131)
+            let mut err_wide = format!("{}\0", err).encode_utf16().collect::<Vec<u16>>();
+            let mut rc = RECT {
+                left: 32,
+                top: 350,
+                right: 230,
+                bottom: 384,
+            };
+            let _ = DrawTextW(hdc, &mut err_wide, &mut rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        }
+    }
+
     // Cleanup fonts
     unsafe {
         SelectObject(hdc, old_font);
@@ -832,6 +873,7 @@ pub fn show_settings_dialog(current: &Settings) -> Result<Option<Settings>> {
         settings: current.clone(),
         saved: false,
         hovered_elem: None,
+        last_error: None,
     });
 
     let width = 480;
@@ -922,5 +964,22 @@ mod tests {
         let loaded2: Settings = serde_json::from_str(&json2).expect("deserialize customized");
         assert!(!loaded2.enable_window_snap);
         assert!(!loaded2.close_after_action);
+    }
+
+    #[test]
+    fn test_settings_save_to_path_roundtrip_and_error() {
+        let defaults = Settings::default();
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join(format!("isolmass_unit_test_settings_{}.json", std::process::id()));
+
+        // Valid save and load
+        defaults.save_to_path(&temp_file).expect("save_to_path should succeed");
+        let loaded = Settings::load_from_path(&temp_file).expect("load_from_path should succeed");
+        assert_eq!(loaded, defaults);
+        let _ = std::fs::remove_file(&temp_file);
+
+        // Error propagation with invalid empty path
+        let invalid_path = std::path::Path::new("");
+        assert!(defaults.save_to_path(invalid_path).is_err(), "save_to_path with invalid path must return Err");
     }
 }

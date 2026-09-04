@@ -46,6 +46,24 @@ fn print_usage() {
     println!("  isolmass --help            Show this help message");
 }
 
+fn verify_pe_subsystem_windows_gui(binary_path: &std::path::Path) -> Result<u16, Box<dyn std::error::Error>> {
+    let data = std::fs::read(binary_path)?;
+    if data.len() < 0x40 || &data[..2] != b"MZ" {
+        return Err("Invalid PE: missing MZ DOS header".into());
+    }
+    let pe_offset = u32::from_le_bytes(data[0x3C..0x40].try_into()?) as usize;
+    if data.len() < pe_offset + 24 + 70 || &data[pe_offset..pe_offset + 4] != b"PE\0\0" {
+        return Err("Invalid PE: missing PE signature".into());
+    }
+    let opt_offset = pe_offset + 24;
+    let magic = u16::from_le_bytes(data[opt_offset..opt_offset + 2].try_into()?);
+    if magic != 0x10b && magic != 0x20b {
+        return Err(format!("Unknown PE optional header magic: 0x{:04x}", magic).into());
+    }
+    let subsystem = u16::from_le_bytes(data[opt_offset + 68..opt_offset + 70].try_into()?);
+    Ok(subsystem)
+}
+
 fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     println!("============================================================");
     println!(" isolmaSS Smoke Test — Full MVP Phase A & B Verification");
@@ -741,105 +759,112 @@ fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
 
     hotkey::unregister_overlay();
 
-    // 2. Hierarchical Esc state machine simulation
-    #[derive(PartialEq, Eq, Debug)]
-    enum OverlayStateSimulation {
-        TextEditing,
-        ObjectSelected,
-        SelectionActive,
-        Idle,
-        Closed,
-    }
+    // 2. Hierarchical Esc flow on production OverlayState
+    let test_capture = Arc::new(CaptureBuffer::dummy(100, 100));
+    let mut overlay_state = overlay::OverlayState::create_test_state(test_capture);
 
-    let simulate_esc = |state: OverlayStateSimulation| -> OverlayStateSimulation {
-        match state {
-            OverlayStateSimulation::TextEditing => OverlayStateSimulation::SelectionActive,
-            OverlayStateSimulation::ObjectSelected => OverlayStateSimulation::SelectionActive,
-            OverlayStateSimulation::SelectionActive => OverlayStateSimulation::Idle,
-            OverlayStateSimulation::Idle => OverlayStateSimulation::Closed,
-            OverlayStateSimulation::Closed => OverlayStateSimulation::Closed,
-        }
-    };
+    // Case 1: In text editing mode -> Esc cancels text editing only
+    overlay_state.set_selection_active(Rect::new(100, 100, 400, 300));
+    overlay_state.set_text_edit(Some(overlay::TextEditState::new(
+        (150, 150),
+        "Testing Esc".to_string(),
+        [255, 255, 255, 255],
+        22,
+        None,
+    )));
+    assert!(overlay_state.text_edit().is_some());
+    let action1 = overlay_state.handle_escape_action();
+    assert_eq!(action1, overlay::EscapeAction::CancelledTextEdit);
+    assert!(overlay_state.text_edit().is_none());
+    assert_eq!(overlay_state.mode(), overlay::OverlayMode::SelectionActive);
 
-    assert_eq!(
-        simulate_esc(OverlayStateSimulation::TextEditing),
-        OverlayStateSimulation::SelectionActive
-    );
-    assert_eq!(
-        simulate_esc(OverlayStateSimulation::ObjectSelected),
-        OverlayStateSimulation::SelectionActive
-    );
-    assert_eq!(
-        simulate_esc(OverlayStateSimulation::SelectionActive),
-        OverlayStateSimulation::Idle
-    );
-    assert_eq!(
-        simulate_esc(OverlayStateSimulation::Idle),
-        OverlayStateSimulation::Closed
+    // Case 2: Object selected -> Esc deselects object
+    overlay_state.set_selected_id(Some(42));
+    let action2 = overlay_state.handle_escape_action();
+    assert_eq!(action2, overlay::EscapeAction::DeselectedObject(42));
+    assert_eq!(overlay_state.selected_id(), None);
+    assert_eq!(overlay_state.mode(), overlay::OverlayMode::SelectionActive);
+
+    // Case 3: Selection active -> Esc cancels selection back to hovering/idle
+    let action3 = overlay_state.handle_escape_action();
+    assert_eq!(action3, overlay::EscapeAction::CancelledSelection);
+    assert_eq!(overlay_state.mode(), overlay::OverlayMode::Hovering);
+    assert!(overlay_state.committed_selection().is_none());
+
+    // Case 4: Idle/Hovering -> Esc closes overlay
+    let action4 = overlay_state.handle_escape_action();
+    assert_eq!(action4, overlay::EscapeAction::CloseOverlay);
+
+    // 3. Text tool editing operations using production TextEditState methods
+    let mut edit_state = overlay::TextEditState::new(
+        (50, 50),
+        String::new(),
+        [255, 255, 255, 255],
+        22,
+        None,
     );
 
-    // 3. Text tool editing operations simulation (insert, backspace, delete, left/right, commit)
-    let mut text = String::new();
-    let mut caret = 0usize;
-
-    // Type "Hello"
+    // Type "Hello" using insert_char
     for ch in "Hello".chars() {
-        let mut chars: Vec<char> = text.chars().collect();
-        chars.insert(caret, ch);
-        text = chars.into_iter().collect();
-        caret += 1;
+        edit_state.insert_char(ch);
     }
-    assert_eq!(text, "Hello");
-    assert_eq!(caret, 5);
+    assert_eq!(edit_state.text, "Hello");
+    assert_eq!(edit_state.caret, 5);
 
     // Move left 1
-    caret = caret.saturating_sub(1);
-    assert_eq!(caret, 4);
+    assert!(edit_state.move_left());
+    assert_eq!(edit_state.caret, 4);
 
     // Insert '!' at caret 4 -> "Hell!o"
-    let mut chars: Vec<char> = text.chars().collect();
-    chars.insert(caret, '!');
-    text = chars.into_iter().collect();
-    caret += 1;
-    assert_eq!(text, "Hell!o");
-    assert_eq!(caret, 5);
+    edit_state.insert_char('!');
+    assert_eq!(edit_state.text, "Hell!o");
+    assert_eq!(edit_state.caret, 5);
 
     // Delete at caret 5 -> deletes character after caret ('o') -> "Hell!"
-    let mut chars: Vec<char> = text.chars().collect();
-    if caret < chars.len() {
-        chars.remove(caret);
-        text = chars.into_iter().collect();
-    }
-    assert_eq!(text, "Hell!");
-    assert_eq!(caret, 5);
+    assert!(edit_state.delete());
+    assert_eq!(edit_state.text, "Hell!");
+    assert_eq!(edit_state.caret, 5);
+
+    // Boundary: cannot delete past end of text
+    assert!(!edit_state.delete());
 
     // Backspace at caret 5 -> deletes character before caret ('!') -> "Hell"
-    let mut chars: Vec<char> = text.chars().collect();
-    if caret > 0 {
-        chars.remove(caret - 1);
-        caret -= 1;
-        text = chars.into_iter().collect();
-    }
-    assert_eq!(text, "Hell");
-    assert_eq!(caret, 4);
+    assert!(edit_state.backspace());
+    assert_eq!(edit_state.text, "Hell");
+    assert_eq!(edit_state.caret, 4);
+
+    // Boundary: move left to beginning and test backspace at 0
+    while edit_state.move_left() {}
+    assert_eq!(edit_state.caret, 0);
+    assert!(!edit_state.backspace());
+
+    // Move right back into text
+    assert!(edit_state.move_right());
+    assert_eq!(edit_state.caret, 1);
 
     // Commit text object
     let text_obj = AnnotationObject::new(
         1,
         AnnotationKind::Text {
-            pos: (50, 50),
-            text: text.clone(),
-            color: [255, 255, 255, 255],
-            font_size: 22,
+            pos: edit_state.pos,
+            text: edit_state.text.clone(),
+            color: edit_state.color,
+            font_size: edit_state.font_size,
         },
     );
     assert!(text_obj.hit_test((55, 55)));
 
     // Re-open in text editing mode (double-click simulation): caret starts at end
-    let reedit_caret = text.chars().count();
-    assert_eq!(reedit_caret, 4);
+    let reedit_state = overlay::TextEditState::new(
+        (50, 50),
+        edit_state.text.clone(),
+        edit_state.color,
+        edit_state.font_size,
+        Some(1),
+    );
+    assert_eq!(reedit_state.caret, 4);
 
-    println!("  -> Slice C1: PASSED (Esc hierarchical dismiss & text tool editing cycle verified)");
+    println!("  -> Slice C1: PASSED (Esc hierarchical dismiss & text tool production methods verified)");
 
     // ------------------------------------------------------------
     // Slice C2: Selection Border Drag-to-Move & Resize
@@ -963,7 +988,29 @@ fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     println!("  - Target Subsystem: #![windows_subsystem = \"windows\"]");
     println!("  - Console Attachment: AttachConsole(ATTACH_PARENT_PROCESS) on CLI arguments");
     println!("  - Daemon Execution: Zero console window on standard launch / double-click");
-    println!("  -> Slice C4: PASSED (Pure GUI subsystem & console attach verified)");
+
+    let release_bin = std::path::Path::new("target/release/isolmass.exe");
+    let current_exe = std::env::current_exe().ok();
+    let target_bin = if release_bin.exists() {
+        release_bin
+    } else if let Some(cur) = &current_exe {
+        cur.as_path()
+    } else {
+        std::path::Path::new("target/debug/isolmass.exe")
+    };
+
+    let subsystem = verify_pe_subsystem_windows_gui(target_bin)?;
+    const IMAGE_SUBSYSTEM_WINDOWS_GUI: u16 = 2;
+    assert_eq!(
+        subsystem, IMAGE_SUBSYSTEM_WINDOWS_GUI,
+        "PE Optional Header Subsystem field must equal 2 (IMAGE_SUBSYSTEM_WINDOWS_GUI)"
+    );
+    println!(
+        "  - PE Optional Header Subsystem verified = {} (IMAGE_SUBSYSTEM_WINDOWS_GUI) on '{}'",
+        subsystem,
+        target_bin.display()
+    );
+    println!("  -> Slice C4: PASSED (Pure GUI subsystem & PE header verified)");
 
     // ------------------------------------------------------------
     // Slice C5: System Tray Icon & Right-Click Menu Lifecycle
@@ -984,28 +1031,59 @@ fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     // Slice C6: Standalone Settings Panel & Behavior Toggles
     // ------------------------------------------------------------
     println!("\n[Slice C6] Testing Standalone Settings Panel & Behavior Toggles...");
-    let settings = Settings::load_or_default();
+    let default_settings = Settings::default();
     assert!(
-        settings.enable_window_snap,
-        "enable_window_snap must default to true"
+        default_settings.enable_window_snap,
+        "Settings::default() enable_window_snap must default to true"
     );
     assert!(
-        settings.close_after_action,
-        "close_after_action must default to true"
+        default_settings.close_after_action,
+        "Settings::default() close_after_action must default to true"
     );
 
-    let settings_json = serde_json::to_string_pretty(&settings)?;
-    assert!(settings_json.contains("enable_window_snap"));
-    assert!(settings_json.contains("close_after_action"));
-
-    let reloaded: Settings = serde_json::from_str(&settings_json)?;
-    assert_eq!(
-        reloaded.enable_window_snap,
-        settings.enable_window_snap
+    // Test explicit round-trip serialization and deserialization with false
+    let mut custom_false = default_settings.clone();
+    custom_false.enable_window_snap = false;
+    custom_false.close_after_action = false;
+    let json_false = serde_json::to_string_pretty(&custom_false)?;
+    let reloaded_false: Settings = serde_json::from_str(&json_false)?;
+    assert!(
+        !reloaded_false.enable_window_snap,
+        "Deserialized enable_window_snap must be false"
     );
-    assert_eq!(
-        reloaded.close_after_action,
-        settings.close_after_action
+    assert!(
+        !reloaded_false.close_after_action,
+        "Deserialized close_after_action must be false"
+    );
+
+    // Test explicit round-trip serialization and deserialization with true
+    let mut custom_true = default_settings.clone();
+    custom_true.enable_window_snap = true;
+    custom_true.close_after_action = true;
+    let json_true = serde_json::to_string_pretty(&custom_true)?;
+    let reloaded_true: Settings = serde_json::from_str(&json_true)?;
+    assert!(
+        reloaded_true.enable_window_snap,
+        "Deserialized enable_window_snap must be true"
+    );
+    assert!(
+        reloaded_true.close_after_action,
+        "Deserialized close_after_action must be true"
+    );
+
+    // Test file save and load round-trip with a temporary file
+    let temp_dir = std::env::temp_dir();
+    let temp_file = temp_dir.join(format!("isolmass_smoke_settings_{}.json", std::process::id()));
+    custom_false.save_to_path(&temp_file)?;
+    let loaded_from_file = Settings::load_from_path(&temp_file)?;
+    assert_eq!(loaded_from_file, custom_false);
+    let _ = std::fs::remove_file(&temp_file);
+
+    // Test error propagation when saving to an invalid path
+    let invalid_path = std::path::Path::new("");
+    assert!(
+        custom_false.save_to_path(invalid_path).is_err(),
+        "save_to_path with invalid path must return Err"
     );
 
     // Verify backward compatibility with older configuration JSON
@@ -1019,10 +1097,64 @@ fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         legacy_settings.close_after_action,
         "Legacy settings must default close_after_action to true"
     );
-    println!("  -> Slice C6: PASSED (Settings standalone panel & new behavior toggles verified)");
+    println!("  -> Slice C6: PASSED (Settings isolated defaults, round-trips, file IO & error propagation verified)");
+
+    // ------------------------------------------------------------
+    // Slice C9: Packaging Artifact & Distribution Budget Verification
+    // ------------------------------------------------------------
+    println!("\n[Slice C9] Testing Packaging Artifact & Distribution Size Budget...");
+    const BUDGET_BYTES: u64 = 3 * 1024 * 1024; // 3 MB budget
+    let nsi_path = std::path::Path::new("installer.nsi");
+    assert!(nsi_path.exists(), "installer.nsi must exist at repository root");
+    let nsi_content = std::fs::read_to_string(nsi_path)?;
+    assert!(nsi_content.contains("PRODUCT_NAME"), "installer.nsi must define PRODUCT_NAME");
+    assert!(nsi_content.contains("OutFile"), "installer.nsi must define OutFile");
+    assert!(nsi_content.contains("SetCompressor"), "installer.nsi must define SetCompressor");
+    println!("  - installer.nsi configuration and directives validated.");
+
+    let setup_path = std::path::Path::new("target/release/isolmass-setup.exe");
+    if !setup_path.exists() {
+        // Attempt to build via makensis if available, else via cargo
+        let makensis_check = std::process::Command::new("makensis")
+            .arg("/VERSION")
+            .output();
+
+        if let Ok(output) = makensis_check && output.status.success() {
+            println!("  - Building installer with makensis...");
+            let compile_status = std::process::Command::new("makensis")
+                .arg("installer.nsi")
+                .status()?;
+            assert!(compile_status.success(), "makensis compilation must succeed");
+        } else {
+            println!("  - Building native installer with cargo build --release --bin isolmass-setup...");
+            let cargo_status = std::process::Command::new("cargo")
+                .args(["build", "--release", "--bin", "isolmass-setup"])
+                .status()?;
+            assert!(cargo_status.success(), "Native installer compilation must succeed");
+        }
+    }
+
+    assert!(
+        setup_path.exists(),
+        "Installer artifact 'target/release/isolmass-setup.exe' MUST exist!"
+    );
+    let setup_size = setup_path.metadata()?.len();
+    assert!(
+        setup_size <= BUDGET_BYTES,
+        "Installer size {} bytes exceeds 3 MB budget ({} bytes)",
+        setup_size,
+        BUDGET_BYTES
+    );
+    println!(
+        "  - Authentic installer executable verified: '{}' ({} bytes, budget: <= {} bytes / 3 MB)",
+        setup_path.display(),
+        setup_size,
+        BUDGET_BYTES
+    );
+    println!("  -> Slice C9: PASSED (Installer artifact & <= 3 MB packaging budget verified)");
 
     println!("\n============================================================");
-    println!(" ALL SLICES (A1 - A16, B1 - B5, C1 - C6) FULLY VERIFIED!");
+    println!(" ALL SLICES (A1 - A16, B1 - B5, C1 - C9) FULLY VERIFIED!");
     println!("============================================================");
     Ok(())
 }
@@ -1126,11 +1258,16 @@ fn run_interactive_session() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 TrayCommand::Settings => {
                     let current = Settings::load_or_default();
-                    if let Ok(Some(saved)) = show_settings_dialog(&current) {
-                        println!("[isolmaSS] Settings updated and saved successfully.");
-                        let _ = saved.save();
-                    } else {
-                        println!("[isolmaSS] Settings dialog closed.");
+                    match show_settings_dialog(&current) {
+                        Ok(Some(_saved)) => {
+                            println!("[isolmaSS] Settings updated and saved successfully.");
+                        }
+                        Ok(None) => {
+                            println!("[isolmaSS] Settings dialog closed.");
+                        }
+                        Err(e) => {
+                            eprintln!("[isolmaSS] Settings dialog failed: {e}");
+                        }
                     }
                 }
                 TrayCommand::Exit => {
@@ -1200,11 +1337,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--settings" => {
                 let current = Settings::load_or_default();
-                if let Ok(Some(saved)) = show_settings_dialog(&current) {
-                    println!("[isolmaSS] Settings updated and saved successfully.");
-                    let _ = saved.save();
-                } else {
-                    println!("[isolmaSS] Settings dialog closed.");
+                match show_settings_dialog(&current) {
+                    Ok(Some(_saved)) => {
+                        println!("[isolmaSS] Settings updated and saved successfully.");
+                    }
+                    Ok(None) => {
+                        println!("[isolmaSS] Settings dialog closed.");
+                    }
+                    Err(e) => {
+                        eprintln!("[isolmaSS] Settings dialog failed: {e}");
+                        return Err(Box::new(e));
+                    }
                 }
                 return Ok(());
             }

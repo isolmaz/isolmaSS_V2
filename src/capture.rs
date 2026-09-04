@@ -221,6 +221,19 @@ impl Drop for GdiObjectGuard {
 }
 
 impl CaptureBuffer {
+    /// Creates a dummy in-memory capture buffer for testing without capturing the display.
+    pub fn dummy(width: i32, height: i32) -> Self {
+        let len = (width.max(1) as usize) * (height.max(1) as usize) * 4;
+        Self {
+            x: 0,
+            y: 0,
+            width,
+            height,
+            original: vec![0u8; len],
+            dimmed: vec![0u8; len],
+        }
+    }
+
     /// Captures the full virtual screen across all connected monitors via BitBlt.
     /// Pre-renders a dimmed backdrop buffer so interactive punch-outs are instant.
     pub fn capture_virtual_screen() -> Result<Self> {

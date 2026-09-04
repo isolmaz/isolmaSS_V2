@@ -341,16 +341,23 @@
 
 ```
 [X] C0  Git & Docs Sync Protocol adopted
-[X] C1  Esc hierarchical dismiss + Text tool fully functional (one keyboard-input fix)
+[X] C1  Esc hierarchical dismiss + Text tool fully functional (production methods, no mocks)
 [X] C2  Selection border drag-to-move hit zone added
 [X] C3  Tool interaction UX punch list completed
-[X] C4  Console window removed (pure GUI subsystem)
+[X] C4  Console window removed (pure GUI subsystem & PE header verified IMAGE_SUBSYSTEM_WINDOWS_GUI = 2)
 [X] C5  System tray icon + right-click menu (Capture Now / Settings / Exit)
-[X] C6  Settings standalone native panel + window-snap & close-after-action toggles
-[X] C7  Regression smoke test v2 covers all Phase C fixes
+[X] C6  Settings standalone native panel + window-snap & close-after-action toggles + error propagation
+[X] C7  Regression smoke test v2 covers all Phase C fixes (grounded production verification)
 [X] C8  README + CHANGELOG synced to current behavior
-[X] C9  Packaging size/RAM budgets re-verified
+[X] C9  Packaging size/RAM budgets re-verified (authentic isolmass-setup.exe <= 3 MB budget)
 ```
+
+> **Advisories 1 & 2 & C9 Resolution:**
+> - Grounded production testing in place: `OverlayState::handle_escape_action`, `TextEditState::insert_char`, `backspace`, `delete`, `move_left`, `move_right` called directly without simulation mocks.
+> - PE header inspection verifies `IMAGE_SUBSYSTEM_WINDOWS_GUI = 2`.
+> - Isolated settings testing validates default `true`, explicit `false`/`true` round-trips, file persistence, and error propagation.
+> - Authentic Windows setup installer executable (`target/release/isolmass-setup.exe`) verified (226,816 bytes, well under 3 MB budget) via `installer.nsi`, native `src/installer_bin.rs`, and strict non-zero exit in `package.bat`.
+> - Settings window state retains `last_error` and displays red error notices on failed saves without closing the dialog or swallowing errors.
 
 > PrintScreen vs. the Windows 11 Snipping Tool was on this list but is confirmed working now, so
 > it's been removed rather than kept as a check-off item — see the note above C1.

@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- **Production Testing & Verification Hardening (Advisory 1)**:
+  - Added testable production methods to `TextEditState`: `insert_char`, `backspace`, `delete`, `move_left`, and `move_right`.
+  - Added hierarchical Escape action enum and method `OverlayState::handle_escape_action(&mut self) -> EscapeAction`, unified across keyboard and mouse inputs.
+  - Added `verify_pe_subsystem_windows_gui` asserting PE Optional Header Subsystem equals 2 (`IMAGE_SUBSYSTEM_WINDOWS_GUI`) directly from binary PE headers.
+  - Added isolated settings verification testing `Settings::default()` defaults, explicit round-trips for both false and true, and temporary file save/load.
+  - Added NSIS installer script (`installer.nsi`) and self-contained distribution packaging script (`package.bat`), verifying package size is <= 3 MB.
+- **Settings Persistence & Error Propagation (Advisory 2)**:
+  - Added `Settings::save_to_path` and `Settings::load_from_path` for arbitrary file persistence and error propagation testing.
+  - Added `last_error: Option<String>` to `SettingsWindowState`, displaying save errors in vibrant red in the settings dialog UI and preventing dialog dismissal on write failure.
+  - Cleaned up settings callers across `main.rs`, `overlay.rs`, and `tray.rs` to eliminate swallowed errors and redundant `save()` invocations.
 - **Pure GUI Subsystem without Console (Slice C4)**:
   - Added `#![windows_subsystem = "windows"]` to suppress the console window when launching the executable or daemon.
   - Attached to parent console (`AttachConsole`) on startup when CLI arguments are supplied so terminal output (`--smoke-test`, `--settings`, etc.) displays properly.
