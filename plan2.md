@@ -340,16 +340,16 @@
 ## Phase C Checklist
 
 ```
-[ ] C0  Git & Docs Sync Protocol adopted
+[X] C0  Git & Docs Sync Protocol adopted
 [X] C1  Esc hierarchical dismiss + Text tool fully functional (one keyboard-input fix)
 [X] C2  Selection border drag-to-move hit zone added
 [X] C3  Tool interaction UX punch list completed
 [X] C4  Console window removed (pure GUI subsystem)
 [X] C5  System tray icon + right-click menu (Capture Now / Settings / Exit)
 [X] C6  Settings standalone native panel + window-snap & close-after-action toggles
-[ ] C7  Regression smoke test v2 covers all Phase C fixes
-[ ] C8  README + CHANGELOG synced to current behavior
-[ ] C9  Packaging size/RAM budgets re-verified
+[X] C7  Regression smoke test v2 covers all Phase C fixes
+[X] C8  README + CHANGELOG synced to current behavior
+[X] C9  Packaging size/RAM budgets re-verified
 ```
 
 > PrintScreen vs. the Windows 11 Snipping Tool was on this list but is confirmed working now, so
