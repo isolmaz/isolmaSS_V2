@@ -15,13 +15,15 @@ use crate::window_snap::{WindowInfo, find_window_in_list, get_visible_windows};
 use std::ffi::c_void;
 use std::rc::Rc;
 use windows::Win32::Foundation::{
-    COLORREF, ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, WPARAM,
+    COLORREF, ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT,
+    RECT as WIN_RECT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, BitBlt, CLIP_DEFAULT_PRECIS,
     CreateCompatibleDC, CreateDIBSection, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH,
     DEFAULT_QUALITY, DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, FF_DONTCARE, FW_BOLD,
-    GdiFlush, GetDC, HBITMAP, HDC, HGDIOBJ, InvalidateRect, RGBQUAD, ReleaseDC, SRCCOPY,
+    GdiFlush, GetDC, GetMonitorInfoW, HBITMAP, HDC, HGDIOBJ, InvalidateRect,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect, RGBQUAD, ReleaseDC, SRCCOPY,
     ScreenToClient, SelectObject, SetBkMode, SetTextColor, TRANSPARENT, TextOutW,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -49,11 +51,62 @@ const OVERLAY_CLASS_NAME: windows::core::PCWSTR = w!("isolmaSS_OverlayClass");
 const DEFAULT_FONT_SIZE: i32 = 22;
 const DEFAULT_BLUR_BLOCK: i32 = 12;
 
+fn selection_work_viewport(capture: &CaptureBuffer, selection: Rect) -> Rect {
+    let screen_selection = WIN_RECT {
+        left: selection.left + capture.x,
+        top: selection.top + capture.y,
+        right: selection.right + capture.x,
+        bottom: selection.bottom + capture.y,
+    };
+    let monitor = unsafe { MonitorFromRect(&screen_selection, MONITOR_DEFAULTTONEAREST) };
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if unsafe { GetMonitorInfoW(monitor, &mut info).as_bool() } {
+        Rect::new(
+            info.rcWork.left - capture.x,
+            info.rcWork.top - capture.y,
+            info.rcWork.right - capture.x,
+            info.rcWork.bottom - capture.y,
+        )
+        .clamp(capture.width, capture.height)
+    } else {
+        Rect::new(0, 0, capture.width, capture.height)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OverlayMode {
     Hovering,
     DraggingSelection,
     SelectionActive,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CompositionPolicy {
+    selection_frame: bool,
+    selected_handles: bool,
+    toolbar_and_tooltip: bool,
+    caret: bool,
+    in_progress_preview: bool,
+}
+
+impl CompositionPolicy {
+    const EDITOR: Self = Self {
+        selection_frame: true,
+        selected_handles: true,
+        toolbar_and_tooltip: true,
+        caret: true,
+        in_progress_preview: true,
+    };
+    const EXPORT: Self = Self {
+        selection_frame: false,
+        selected_handles: false,
+        toolbar_and_tooltip: false,
+        caret: false,
+        in_progress_preview: false,
+    };
 }
 
 #[derive(Debug, Clone)]
@@ -379,6 +432,10 @@ impl OverlayState {
     }
 
     fn composite_scene(&mut self) {
+        self.composite_scene_with(CompositionPolicy::EDITOR);
+    }
+
+    fn composite_scene_with(&mut self, policy: CompositionPolicy) {
         // Synchronize the DIB's GDI target before replacing its pixels on the CPU.
         unsafe {
             let _ = GdiFlush();
@@ -428,7 +485,9 @@ impl OverlayState {
                     obj.render_blur(buffer, width, height);
                 }
 
-                if let Some(InProgressDrawing::Blur { start, current }) = self.drawing_shape {
+                if policy.in_progress_preview
+                    && let Some(InProgressDrawing::Blur { start, current }) = self.drawing_shape
+                {
                     let r = Rect::normalized(start, current).clamp(width, height);
                     crate::annotation::apply_pixelate_blur(
                         buffer,
@@ -439,65 +498,72 @@ impl OverlayState {
                     );
                 }
 
-                // 4. Draw dual-tone high-contrast selection border and handles
-                CaptureBuffer::draw_contrast_selection(
-                    buffer,
-                    width,
-                    height,
-                    &sel,
-                    [246, 130, 59, 255],
-                );
+                // 4. Editor-only selection border. Export pixels remain unframed.
+                if policy.selection_frame {
+                    CaptureBuffer::draw_contrast_selection(
+                        buffer,
+                        width,
+                        height,
+                        &sel,
+                        [246, 130, 59, 255],
+                    );
+                }
 
                 // 5. Render vector annotations
                 for obj in &self.objects {
                     obj.render_gdi(self.mem_dc);
                 }
 
-                // 6. Draw in-progress preview
-                match &self.drawing_shape {
-                    Some(InProgressDrawing::Rectangle { start, current }) => {
-                        let r = Rect::normalized(*start, *current).clamp(width, height);
-                        let preview = AnnotationObject::new(
-                            0,
-                            AnnotationKind::Rectangle {
-                                rect: r,
-                                color: self.active_color,
-                                thickness: self.active_thickness,
-                            },
-                        );
-                        preview.render_gdi(self.mem_dc);
+                // 6. Draw in-progress preview only in the editor frame.
+                if policy.in_progress_preview {
+                    match &self.drawing_shape {
+                        Some(InProgressDrawing::Rectangle { start, current }) => {
+                            let r = Rect::normalized(*start, *current).clamp(width, height);
+                            let preview = AnnotationObject::new(
+                                0,
+                                AnnotationKind::Rectangle {
+                                    rect: r,
+                                    color: self.active_color,
+                                    thickness: self.active_thickness,
+                                },
+                            );
+                            preview.render_gdi(self.mem_dc);
+                        }
+                        Some(InProgressDrawing::Arrow { start, current }) => {
+                            let preview = AnnotationObject::new(
+                                0,
+                                AnnotationKind::Arrow {
+                                    start: *start,
+                                    end: *current,
+                                    color: self.active_color,
+                                    thickness: self.active_thickness,
+                                },
+                            );
+                            preview.render_gdi(self.mem_dc);
+                        }
+                        Some(InProgressDrawing::Pen { points }) => render_pen_preview(
+                            self.mem_dc,
+                            points,
+                            self.active_color,
+                            self.active_thickness,
+                        ),
+                        _ => {}
                     }
-                    Some(InProgressDrawing::Arrow { start, current }) => {
-                        let preview = AnnotationObject::new(
-                            0,
-                            AnnotationKind::Arrow {
-                                start: *start,
-                                end: *current,
-                                color: self.active_color,
-                                thickness: self.active_thickness,
-                            },
-                        );
-                        preview.render_gdi(self.mem_dc);
-                    }
-                    Some(InProgressDrawing::Pen { points }) => render_pen_preview(
-                        self.mem_dc,
-                        points,
-                        self.active_color,
-                        self.active_thickness,
-                    ),
-                    _ => {}
                 }
 
                 // 7. Draw selection handles for selected object
-                if let Some(obj) = self
-                    .selected_id
-                    .and_then(|id| self.objects.iter().find(|o| o.id == id))
+                if policy.selected_handles
+                    && let Some(obj) = self
+                        .selected_id
+                        .and_then(|id| self.objects.iter().find(|o| o.id == id))
                 {
                     obj.render_selection_indicator(self.mem_dc);
                 }
 
                 // 8. Draw active text edit preview with font match & blinking caret
-                if let Some(text_edit) = &self.text_edit {
+                if policy.caret
+                    && let Some(text_edit) = &self.text_edit
+                {
                     let wide_face: Vec<u16> = "Segoe UI\0".encode_utf16().collect();
                     let font = unsafe {
                         CreateFontW(
@@ -540,53 +606,55 @@ impl OverlayState {
                 }
 
                 // 9. Render the contextual L-shaped editor toolbar.
-                let can_undo = self.history.can_undo();
-                let can_redo = self.history.can_redo();
-                let selected = if self.active_tool == ToolKind::Select {
-                    self.selected_id
-                        .and_then(|id| self.objects.iter().find(|object| object.id == id))
-                } else {
-                    None
-                };
-                let (toolbar_color, toolbar_thickness, show_color, show_thickness) =
-                    if let Some(object) = selected {
-                        (
-                            object.get_color().unwrap_or(self.active_color),
-                            object.get_thickness().unwrap_or(self.active_thickness),
-                            object.get_color().is_some(),
-                            object.get_thickness().is_some(),
-                        )
+                if policy.toolbar_and_tooltip {
+                    let can_undo = self.history.can_undo();
+                    let can_redo = self.history.can_redo();
+                    let selected = if self.active_tool == ToolKind::Select {
+                        self.selected_id
+                            .and_then(|id| self.objects.iter().find(|object| object.id == id))
                     } else {
-                        match self.active_tool {
-                            ToolKind::Rectangle | ToolKind::Arrow | ToolKind::Pen => {
-                                (self.active_color, self.active_thickness, true, true)
-                            }
-                            ToolKind::Text => {
-                                (self.active_color, self.active_thickness, true, false)
-                            }
-                            ToolKind::Blur | ToolKind::Select => {
-                                (self.active_color, self.active_thickness, false, false)
-                            }
-                        }
+                        None
                     };
-                let mut tb = Toolbar::layout(
-                    &sel,
-                    self.active_tool,
-                    toolbar_color,
-                    toolbar_thickness,
-                    show_color,
-                    show_thickness,
-                    width,
-                    height,
-                    can_undo,
-                    can_redo,
-                    self.dpi,
-                );
-                if let Some(existing) = &self.toolbar {
-                    tb.hovered_item = existing.hovered_item;
+                    let (toolbar_color, toolbar_thickness, show_color, show_thickness) =
+                        if let Some(object) = selected {
+                            (
+                                object.get_color().unwrap_or(self.active_color),
+                                object.get_thickness().unwrap_or(self.active_thickness),
+                                object.get_color().is_some(),
+                                object.get_thickness().is_some(),
+                            )
+                        } else {
+                            match self.active_tool {
+                                ToolKind::Rectangle | ToolKind::Arrow | ToolKind::Pen => {
+                                    (self.active_color, self.active_thickness, true, true)
+                                }
+                                ToolKind::Text => {
+                                    (self.active_color, self.active_thickness, true, false)
+                                }
+                                ToolKind::Blur | ToolKind::Select => {
+                                    (self.active_color, self.active_thickness, false, false)
+                                }
+                            }
+                        };
+                    let viewport = selection_work_viewport(&self.capture, sel);
+                    let mut tb = Toolbar::layout(
+                        &sel,
+                        viewport,
+                        self.active_tool,
+                        toolbar_color,
+                        toolbar_thickness,
+                        show_color,
+                        show_thickness,
+                        can_undo,
+                        can_redo,
+                        self.dpi,
+                    );
+                    if let Some(existing) = &self.toolbar {
+                        tb.hovered_item = existing.hovered_item;
+                    }
+                    tb.render(self.mem_dc);
+                    self.toolbar = Some(tb);
                 }
-                tb.render(self.mem_dc);
-                self.toolbar = Some(tb);
             }
         }
         // Make the fully rebuilt backbuffer visible to the subsequent WM_PAINT copy.
@@ -751,7 +819,7 @@ impl OverlayState {
 
         // 4. Settings shortcut: Ctrl+,
         if ctrl_down && vk == VK_OEM_COMMA.0 as usize {
-            match show_settings_dialog(&self.settings) {
+            match show_settings_dialog(&self.settings, Some(hwnd)) {
                 Ok(Some(new_cfg)) => {
                     self.active_color = new_cfg.default_color;
                     self.active_thickness = new_cfg.default_thickness;
@@ -916,9 +984,7 @@ impl OverlayState {
             .committed_selection
             .ok_or_else(|| "No screenshot region is selected.".to_string())?;
 
-        let prev_selected = self.selected_id.take();
-        let prev_text = self.text_edit.take();
-        self.composite_scene();
+        self.composite_scene_with(CompositionPolicy::EXPORT);
 
         let width = self.capture.width;
         let height = self.capture.height;
@@ -931,8 +997,7 @@ impl OverlayState {
                     .map_err(|error| format!("Windows rejected the clipboard image: {error}"))
             });
 
-        self.selected_id = prev_selected;
-        self.text_edit = prev_text;
+        self.composite_scene();
         if result.is_ok() {
             self.committed_result = true;
         }
@@ -944,9 +1009,7 @@ impl OverlayState {
             .committed_selection
             .ok_or_else(|| "No screenshot region is selected.".to_string())?;
 
-        let prev_selected = self.selected_id.take();
-        let prev_text = self.text_edit.take();
-        self.composite_scene();
+        self.composite_scene_with(CompositionPolicy::EXPORT);
 
         let width = self.capture.width;
         let height = self.capture.height;
@@ -962,8 +1025,7 @@ impl OverlayState {
             self.settings.jpeg_quality,
         );
 
-        self.selected_id = prev_selected;
-        self.text_edit = prev_text;
+        self.composite_scene();
         if result.is_ok() {
             self.committed_result = true;
         }
@@ -1489,7 +1551,7 @@ unsafe extern "system" fn overlay_wnd_proc(
                                     }
                                 }
                                 ToolbarItem::Action(ToolbarAction::Settings) => {
-                                    match show_settings_dialog(&state.settings) {
+                                    match show_settings_dialog(&state.settings, Some(hwnd)) {
                                         Ok(Some(new_cfg)) => {
                                             state.active_color = new_cfg.default_color;
                                             state.active_thickness = new_cfg.default_thickness;

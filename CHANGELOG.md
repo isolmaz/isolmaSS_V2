@@ -35,7 +35,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Right-click on the tray icon opens a native context menu with Capture Now, Settings, Check for Updates, up to five Recent Captures, and Exit.
   - Cleanly unregisters tray icon with `NIM_DELETE` on shutdown so no ghost icons remain.
 - **Simple/Advanced Settings Panel & Behavior Toggles (Slice C6)**:
-  - Split the 720×720 native Settings window into Simple everyday capture/save controls and Advanced annotation, Windows-integration, and update controls. View switches retain unsaved state and a shared Save & Apply/Cancel footer remains visible.
+  - Split a compact 700×620 light native Settings surface into Simple everyday capture/save cards and Advanced annotation, Windows-integration, and update cards. View switches retain unsaved state, PNG natively disables JPEG quality, and the standard default Save & Apply then Cancel footer remains visible.
   - Added two persistent boolean toggles to `Settings`: `enable_window_snap` (default: true) and `close_after_action` (default: true).
   - Designed native checkbox controls in the standalone settings dialog.
   - Disabling window snap suppresses the window snap hover highlight and avoids accidental snaps on click.
@@ -45,28 +45,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Saved hotkey changes restart the running daemon listener in place; registration failure restores both the previous listener and persisted preference.
 
 ### Changed
-- Reworked the capture controls into one coherent 90° L anchored at the selection's bottom-right: the right rail is bottom-aligned and ordered bottom-up, and the right-aligned contextual color/style/action strip directly meets it along the selection bottom. The whole L flips together to remain in screen bounds at high DPI and with small selections. Every tool, named color, named thickness, and action has a readable, screen-bounded hover label; irrelevant style controls are hidden for the active tool or selected object while core actions remain available.
-- Reorganized Settings into Simple and Advanced views inside a 720×720 native window with a persistent footer; the window no longer forces itself topmost.
+- Reworked the capture controls into one coherent 90° L whose panels meet at exactly one corner. A usual selection places the padded L outside; alternate orientations flip coherently, and constrained/full-work-area selections use a padded inside placement bounded to the selected monitor. Every tool, named color, named thickness, and all four core action icons remain visible with monitor-bounded hover labels; irrelevant style controls are hidden for the active tool or selected object.
+- Reorganized Settings into compact light Simple and Advanced card views with coherent Segoe UI hierarchy and a conventional footer. Both overlay entry paths pass an explicit modal owner so Settings stays above the active overlay while disabling it; standalone/tray Settings remains non-topmost.
 - Windows icon and manifest resources are now compiled from their source files during each build, so visual-style and manifest changes cannot silently remain stale.
 - Consolidated the historical implementation plans into `ROADMAP.md`, retaining durable status, verification gaps, deferred features, and future priorities.
 - Removed an incomplete, risky capture-latency optimization; capture remains on the prior single coherent GDI `BitBlt` path.
 
 ### Verification — 2026-09-04
 - `cargo fmt --check`, `cargo check`, `cargo clippy --all-targets -- -D warnings`, and `cargo build --release` passed.
-- `cargo test` passed: 15 passed, 0 failed.
-- `cmd /c package.bat` passed, including the strict NSIS installer check.
-- `--smoke-test` was intentionally not rerun after cleanup of UI automation that disrupted the user's PrintScreen route. Current editor interactions were not runtime-automated; their verification is model/source plus non-interactive checks.
-- `target/release/isolmass.exe` measured 542,720 bytes, below the 2.5 MiB target.
-- `target/release/isolmass-setup.exe` measured 286,337 bytes, below the 3 MiB target.
-- At 96 DPI, the 720×720 Settings window showed both Simple and Advanced views without clipping, preserved unsaved state across view switches, kept its footer visible, and canceled with `settings.json` byte-identical. Alternate-DPI runtime evidence is unavailable.
+- `cargo test` passed: 17 passed, 0 failed.
+- `cmd /c package.bat` passed, including the strict NSIS installer check. No signing certificate was configured, so the executable and installer are unsigned.
+- `--smoke-test` was intentionally not rerun. Safe direct-HWND automation exercised normal and full-primary-work-area selections without synthesizing PrintScreen; it did not repeat every object-transform path.
+- `target/release/isolmass.exe` measured 546,304 bytes, below the 2.5 MiB target.
+- The unsigned `target/release/isolmass-setup.exe` measured 288,209 bytes, below the 3 MiB target; SHA-256: `a29178bbce0b720becd83efbc8ed18a96aaf66b225e589f7d09e8b653bfd3622`.
+- At 96 DPI, the compact Settings window showed Simple and Advanced without clipping, preserved unsaved state across switches, natively disabled JPEG-quality controls for PNG, retained the default Save & Apply then Cancel footer, and canceled with `settings.json` byte-identical. Both overlay paths were wired to explicit ownership; alternate-DPI runtime was not performed.
 - The actual daemon was sampled for 60.039 seconds: 11,157,504 bytes at start, 11,157,504 bytes maximum, and 11,116,544 bytes at end. The 10.640625 MiB maximum was below the 15 MiB target.
-- Actual PrintScreen-to-visible-overlay latency was 48.936 ms, so the ≤30 ms target was **not met**.
+- Actual PrintScreen-to-visible-overlay latency was 48.936 ms, so the ≤30 ms target was **not met** and C9 remains open.
 - In the targeted runtime scenario, Esc closed the overlay in 15.801 ms, the daemon remained alive, clean `WM_CLOSE` shutdown exited 0, and no console `HWND` was observed.
-- A representative native pass ran with MSI Afterburner and RTSS active: selection creation, rectangle drawing/movement, and selection move/resize visually left only current overlay pixels; the visible tray menu showed update/recent-capture items; Settings opened from the tray, accepted a temporary JPEG selection, and canceled without saving. This was targeted evidence, not exhaustive UX coverage.
+- A representative native pass with MSI Afterburner and RTSS active and the latest full-window pass visually showed no rendering trails. Direct-HWND automation exercised a normal selection with the padded L outside and a full 1920×1032 primary-work-area selection with the full bottom-right L inside at a 10px inset; neither panel crossed the x=1920 seam. Direct image/source inspection confirmed all four core action icons were visible. The saved 1920×1032 output contained no toolbar, border, handles, caret, tooltip, or in-progress preview. This was targeted evidence, not exhaustive hardware or transform coverage.
 
 ### Fixed
 - **Notification-area activation**: the negotiated version-4 tray callback now handles mouse selection, keyboard selection, and context-menu events while retaining legacy mouse callback decoding. Context menus use the Shell-provided anchor when available and post `WM_NULL` after dismissal so repeated openings remain reliable.
-- **Overlay drag trails**: every interaction now rebuilds and invalidates the complete deterministic DIB frame, with explicit GDI synchronization before CPU writes and presentation. This removes stale selection, annotation, and toolbar pixels and remains correct when third-party graphics overlays hook GDI.
+- **Overlay drag trails**: every interaction now rebuilds and invalidates the complete deterministic DIB frame, with explicit GDI synchronization before CPU writes and presentation. Representative MSI Afterburner/RTSS and full-window passes showed no stale selection, annotation, or toolbar pixels; exhaustive third-party hardware compatibility is not claimed.
+- **Clean capture export**: Copy and Save now compose committed source plus committed annotations in place under an explicit export policy, then restore the editor frame even on failure. Selection borders/handles, toolbar/tooltip, caret, and in-progress previews are excluded.
+- **Overlay-owned Settings**: both overlay Settings paths explicitly own and center the modal dialog, disable the active overlay for the modal lifetime, deliberately activate Settings, and restore the owner on exit; standalone/tray Settings remains non-topmost.
 - **PrintScreen Registry Mutation**:
   - Starting the hotkey listener and changing Settings no longer modify the registry. Only the explicit `--fix-printscreen` command writes `HKCU\Control Panel\Keyboard\PrintScreenKeyForSnippingEnabled`.
 

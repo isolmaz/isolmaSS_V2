@@ -44,8 +44,7 @@ pub struct Toolbar {
     pub active_color: [u8; 4],
     pub active_thickness: i32,
     pub dpi: u32,
-    screen_width: i32,
-    screen_height: i32,
+    viewport: Rect,
 }
 
 struct FontGuard {
@@ -72,22 +71,22 @@ impl Toolbar {
     #[allow(clippy::too_many_arguments)]
     pub fn layout(
         selection: &Rect,
+        viewport: Rect,
         active_tool: ToolKind,
         active_color: [u8; 4],
         active_thickness: i32,
         show_color: bool,
         show_thickness: bool,
-        screen_width: i32,
-        screen_height: i32,
         can_undo: bool,
         can_redo: bool,
         dpi: u32,
     ) -> Self {
         let scale = |value: i32| value * dpi as i32 / 96;
-        let margin = scale(6);
+        let outer_pad = scale(8);
+        let gap = scale(8);
+        let inner_pad = scale(10);
         let pad = scale(6);
         let tool_button = scale(Self::TOOL_BUTTON);
-        // First item is physically closest to the selection's bottom edge.
         let tool_items = [
             (ToolbarItem::Tool(ToolKind::Select), true),
             (ToolbarItem::Tool(ToolKind::Rectangle), true),
@@ -128,71 +127,120 @@ impl Toolbar {
             + 4 * action_step
             - (action_step - action_button);
         let action_height = scale(Self::ACTION_HEIGHT);
-
-        // Place both panels from one shared corner. Clamping that corner, rather than
-        // each panel independently, keeps the toolbar a coherent L even when neither
-        // selection-anchored orientation fits at a screen edge.
-        let panel_width = tool_width.max(action_width);
-        let right_join = selection.right + tool_width;
-        let left_join = selection.left - tool_width;
-        let right_min = margin + panel_width;
-        let right_max = screen_width - margin;
-        let left_min = margin;
-        let left_max = screen_width - margin - panel_width;
-        let right_fits = (right_min..=right_max).contains(&right_join);
-        let left_fits = (left_min..=left_max).contains(&left_join);
-        let place_right = right_fits || !left_fits;
-
-        let below_join = selection.bottom;
-        let above_join = selection.top;
-        let below_min = margin + tool_height;
-        let below_max = screen_height - margin - action_height;
-        let above_min = margin + action_height;
-        let above_max = screen_height - margin - tool_height;
-        let below_fits = (below_min..=below_max).contains(&below_join);
-        let above_fits = (above_min..=above_max).contains(&above_join);
-        let place_below = below_fits || !above_fits;
-
-        let clamp_join = |value: i32, min: i32, max: i32| {
-            if min <= max {
-                value.clamp(min, max)
-            } else {
-                min
-            }
-        };
-        let shared_x = if place_right {
-            clamp_join(right_join, right_min, right_max)
-        } else {
-            clamp_join(left_join, left_min, left_max)
-        };
-        let shared_y = if place_below {
-            clamp_join(below_join, below_min, below_max)
-        } else {
-            clamp_join(above_join, above_min, above_max)
-        };
-
-        let tool_x = if place_right {
-            shared_x - tool_width
-        } else {
-            shared_x
-        };
-        let action_x = if place_right {
-            shared_x - action_width
-        } else {
-            shared_x
-        };
-        let (tool_y, action_y) = if place_below {
-            (shared_y - tool_height, shared_y)
-        } else {
-            (shared_y, shared_y - action_height)
-        };
-        let tool_bounds = Rect::new(tool_x, tool_y, tool_x + tool_width, tool_y + tool_height);
-        let action_bounds = Rect::new(
-            action_x,
-            action_y,
-            action_x + action_width,
-            action_y + action_height,
+        let safe = Rect::new(
+            viewport.left + outer_pad,
+            viewport.top + outer_pad,
+            viewport.right - outer_pad,
+            viewport.bottom - outer_pad,
         );
+        let contains = |outer: Rect, inner: Rect| {
+            inner.left >= outer.left
+                && inner.top >= outer.top
+                && inner.right <= outer.right
+                && inner.bottom <= outer.bottom
+        };
+        let make_l = |right: bool, below: bool, shared_x: i32, shared_y: i32| {
+            let tool = match (right, below) {
+                (true, true) => Rect::new(
+                    shared_x - tool_width,
+                    shared_y - tool_height,
+                    shared_x,
+                    shared_y,
+                ),
+                (false, true) => Rect::new(
+                    shared_x,
+                    shared_y - tool_height,
+                    shared_x + tool_width,
+                    shared_y,
+                ),
+                (true, false) => Rect::new(
+                    shared_x - tool_width,
+                    shared_y,
+                    shared_x,
+                    shared_y + tool_height,
+                ),
+                (false, false) => Rect::new(
+                    shared_x,
+                    shared_y,
+                    shared_x + tool_width,
+                    shared_y + tool_height,
+                ),
+            };
+            let action = match (right, below) {
+                (true, true) => Rect::new(
+                    shared_x - action_width,
+                    shared_y,
+                    shared_x,
+                    shared_y + action_height,
+                ),
+                (false, true) => Rect::new(
+                    shared_x,
+                    shared_y,
+                    shared_x + action_width,
+                    shared_y + action_height,
+                ),
+                (true, false) => Rect::new(
+                    shared_x - action_width,
+                    shared_y - action_height,
+                    shared_x,
+                    shared_y,
+                ),
+                (false, false) => Rect::new(
+                    shared_x,
+                    shared_y - action_height,
+                    shared_x + action_width,
+                    shared_y,
+                ),
+            };
+            (tool, action)
+        };
+
+        let outside = [
+            (
+                true,
+                true,
+                selection.right + gap + tool_width,
+                selection.bottom + gap,
+            ),
+            (
+                false,
+                true,
+                selection.left - gap - tool_width,
+                selection.bottom + gap,
+            ),
+            (
+                true,
+                false,
+                selection.right + gap + tool_width,
+                selection.top - gap,
+            ),
+            (
+                false,
+                false,
+                selection.left - gap - tool_width,
+                selection.top - gap,
+            ),
+        ]
+        .into_iter()
+        .map(|(right, below, x, y)| make_l(right, below, x, y))
+        .find(|(tool, action)| contains(safe, *tool) && contains(safe, *action));
+
+        let inside = if selection.width() >= action_width + inner_pad * 2
+            && selection.height() >= tool_height + action_height + inner_pad * 2
+        {
+            let shared_x = selection.right - inner_pad;
+            let shared_y = selection.bottom - inner_pad - action_height;
+            let candidate = make_l(true, true, shared_x, shared_y);
+            (contains(safe, candidate.0) && contains(safe, candidate.1)).then_some(candidate)
+        } else {
+            None
+        };
+
+        let (tool_bounds, action_bounds) = outside.or(inside).unwrap_or_else(|| {
+            // A tiny selection cannot contain the editor. Keep the complete L bounded to
+            // the selected monitor's work area rather than leaking onto another monitor.
+            make_l(true, true, safe.right, safe.bottom - action_height)
+        });
 
         let mut buttons = Vec::with_capacity(
             tool_items.len()
@@ -204,14 +252,18 @@ impl Toolbar {
         for (item, enabled) in tool_items {
             buttons.push(ToolbarButton {
                 item,
-                rect: Rect::new(tool_x + pad, y, tool_x + pad + tool_button, y + tool_button),
+                rect: Rect::new(
+                    tool_bounds.left + pad,
+                    y,
+                    tool_bounds.left + pad + tool_button,
+                    y + tool_button,
+                ),
                 is_enabled: enabled,
             });
             y -= tool_button + scale(3);
         }
-
-        let item_y = action_y + (action_height - color_size) / 2;
-        let mut x = action_x + pad;
+        let item_y = action_bounds.top + (action_height - color_size) / 2;
+        let mut x = action_bounds.left + pad;
         if show_color {
             for color in PRESET_COLORS {
                 buttons.push(ToolbarButton {
@@ -225,7 +277,7 @@ impl Toolbar {
         }
         if show_thickness {
             for thickness in PRESET_THICKNESSES {
-                let y = action_y + (action_height - tool_button) / 2;
+                let y = action_bounds.top + (action_height - tool_button) / 2;
                 buttons.push(ToolbarButton {
                     item: ToolbarItem::Thickness(thickness),
                     rect: Rect::new(x, y, x + thickness_width, y + tool_button),
@@ -241,7 +293,7 @@ impl Toolbar {
             ToolbarAction::Settings,
             ToolbarAction::Cancel,
         ] {
-            let y = action_y + (action_height - action_button) / 2;
+            let y = action_bounds.top + (action_height - action_button) / 2;
             buttons.push(ToolbarButton {
                 item: ToolbarItem::Action(action),
                 rect: Rect::new(x, y, x + action_button, y + action_button),
@@ -249,7 +301,6 @@ impl Toolbar {
             });
             x += action_step;
         }
-
         Self {
             tool_bounds,
             action_bounds,
@@ -259,8 +310,7 @@ impl Toolbar {
             active_color,
             active_thickness,
             dpi,
-            screen_width,
-            screen_height,
+            viewport,
         }
     }
 
@@ -525,14 +575,14 @@ impl Toolbar {
                 .expect("hovered toolbar item must have a button");
             let margin = scale(6);
             let tooltip_width = scale(label.len() as i32 * 7 + 16)
-                .min((self.screen_width - margin * 2).max(scale(80)));
+                .min((self.viewport.width() - margin * 2).max(scale(80)));
             let tooltip_height = scale(28);
             let tooltip_gap = scale(6);
             let is_tool_button = self.tool_bounds.contains(button.rect.left, button.rect.top);
             let (preferred_left, preferred_top) = if is_tool_button {
                 let right = self.tool_bounds.right + tooltip_gap;
                 let left = self.tool_bounds.left - tooltip_gap - tooltip_width;
-                let x = if right + tooltip_width <= self.screen_width - margin {
+                let x = if right + tooltip_width <= self.viewport.right - margin {
                     right
                 } else {
                     left
@@ -550,12 +600,12 @@ impl Toolbar {
                 )
             };
             let left = preferred_left.clamp(
-                margin,
-                (self.screen_width - tooltip_width - margin).max(margin),
+                self.viewport.left + margin,
+                (self.viewport.right - tooltip_width - margin).max(self.viewport.left + margin),
             );
             let top = preferred_top.clamp(
-                margin,
-                (self.screen_height - tooltip_height - margin).max(margin),
+                self.viewport.top + margin,
+                (self.viewport.bottom - tooltip_height - margin).max(self.viewport.top + margin),
             );
             let tooltip_rect = Rect::new(left, top, left + tooltip_width, top + tooltip_height);
             draw_rounded(&tooltip_rect, panel_bg, accent, scale(5));
@@ -609,56 +659,101 @@ impl Toolbar {
 mod tests {
     use super::*;
 
-    fn assert_in_screen(rect: Rect, width: i32, height: i32) {
-        assert!(rect.left >= 0 && rect.top >= 0, "{rect:?}");
-        assert!(rect.right <= width && rect.bottom <= height, "{rect:?}");
+    fn layout(selection: Rect, viewport: Rect) -> Toolbar {
+        Toolbar::layout(
+            &selection,
+            viewport,
+            ToolKind::Rectangle,
+            PRESET_COLORS[0],
+            3,
+            true,
+            true,
+            true,
+            true,
+            96,
+        )
+    }
+
+    fn assert_in_viewport(rect: Rect, viewport: Rect) {
+        assert!(
+            rect.left >= viewport.left && rect.top >= viewport.top,
+            "{rect:?}"
+        );
+        assert!(
+            rect.right <= viewport.right && rect.bottom <= viewport.bottom,
+            "{rect:?}"
+        );
+    }
+
+    fn assert_exact_l_corner(toolbar: &Toolbar) {
+        let tool_corners = [
+            (toolbar.tool_bounds.left, toolbar.tool_bounds.top),
+            (toolbar.tool_bounds.right, toolbar.tool_bounds.top),
+            (toolbar.tool_bounds.left, toolbar.tool_bounds.bottom),
+            (toolbar.tool_bounds.right, toolbar.tool_bounds.bottom),
+        ];
+        let action_corners = [
+            (toolbar.action_bounds.left, toolbar.action_bounds.top),
+            (toolbar.action_bounds.right, toolbar.action_bounds.top),
+            (toolbar.action_bounds.left, toolbar.action_bounds.bottom),
+            (toolbar.action_bounds.right, toolbar.action_bounds.bottom),
+        ];
+        let shared = tool_corners
+            .into_iter()
+            .filter(|corner| action_corners.contains(corner))
+            .count();
+        assert_eq!(
+            shared, 1,
+            "tool={:?}, action={:?}",
+            toolbar.tool_bounds, toolbar.action_bounds
+        );
     }
 
     #[test]
-    fn standard_layout_joins_at_the_selection_bottom_right() {
+    fn normal_region_uses_padded_outside_bottom_right_l() {
         let selection = Rect::new(200, 100, 800, 600);
-        let toolbar = Toolbar::layout(
-            &selection,
-            ToolKind::Rectangle,
-            PRESET_COLORS[0],
-            3,
-            true,
-            true,
-            1920,
-            1080,
-            true,
-            true,
-            96,
-        );
-
-        assert_eq!(toolbar.tool_bounds.left, selection.right);
-        assert_eq!(toolbar.tool_bounds.bottom, selection.bottom);
-        assert_eq!(toolbar.tool_bounds.right, toolbar.action_bounds.right);
-        assert_eq!(toolbar.tool_bounds.bottom, toolbar.action_bounds.top);
-        assert_in_screen(toolbar.tool_bounds, 1920, 1080);
-        assert_in_screen(toolbar.action_bounds, 1920, 1080);
+        let viewport = Rect::new(0, 0, 1920, 1040);
+        let toolbar = layout(selection, viewport);
+        assert_eq!(toolbar.tool_bounds.left, selection.right + 8);
+        assert_eq!(toolbar.action_bounds.top, selection.bottom + 8);
+        assert_exact_l_corner(&toolbar);
+        assert_in_viewport(toolbar.tool_bounds, viewport);
+        assert_in_viewport(toolbar.action_bounds, viewport);
     }
 
     #[test]
-    fn constrained_layout_clamps_one_shared_corner() {
-        let selection = Rect::new(600, 450, 630, 470);
-        let toolbar = Toolbar::layout(
-            &selection,
-            ToolKind::Rectangle,
-            PRESET_COLORS[0],
-            3,
-            true,
-            true,
-            640,
-            480,
-            false,
-            false,
-            96,
-        );
+    fn selection_on_second_monitor_never_uses_neighbor() {
+        let viewport = Rect::new(1920, 0, 3840, 1040);
+        let toolbar = layout(Rect::new(1940, 120, 2520, 680), viewport);
+        assert!(toolbar.tool_bounds.left >= viewport.left + 8);
+        assert!(toolbar.action_bounds.left >= viewport.left + 8);
+        assert_in_viewport(toolbar.tool_bounds, viewport);
+        assert_in_viewport(toolbar.action_bounds, viewport);
+        assert_exact_l_corner(&toolbar);
+    }
 
-        assert_eq!(toolbar.tool_bounds.right, toolbar.action_bounds.right);
-        assert_eq!(toolbar.tool_bounds.bottom, toolbar.action_bounds.top);
-        assert_in_screen(toolbar.tool_bounds, 640, 480);
-        assert_in_screen(toolbar.action_bounds, 640, 480);
+    #[test]
+    fn full_monitor_selection_uses_padded_inside_bottom_right_l() {
+        let viewport = Rect::new(0, 0, 1920, 1040);
+        let toolbar = layout(viewport, viewport);
+        assert_eq!(toolbar.tool_bounds.right, viewport.right - 10);
+        assert_eq!(toolbar.action_bounds.right, viewport.right - 10);
+        assert_eq!(toolbar.action_bounds.bottom, viewport.bottom - 10);
+        assert_exact_l_corner(&toolbar);
+        assert_in_viewport(toolbar.tool_bounds, viewport);
+        assert_in_viewport(toolbar.action_bounds, viewport);
+    }
+
+    #[test]
+    fn tiny_selection_fallback_is_complete_and_monitor_bounded() {
+        let viewport = Rect::new(1920, 40, 3200, 900);
+        let toolbar = layout(Rect::new(2500, 400, 2510, 410), viewport);
+        assert_in_viewport(toolbar.tool_bounds, viewport);
+        assert_in_viewport(toolbar.action_bounds, viewport);
+        assert_exact_l_corner(&toolbar);
+        assert!(toolbar.buttons.iter().all(|button| {
+            button.rect.left >= toolbar.tool_bounds.left.min(toolbar.action_bounds.left)
+                && button.rect.right <= toolbar.tool_bounds.right.max(toolbar.action_bounds.right)
+        }));
     }
 }

@@ -11,17 +11,18 @@ See [ROADMAP.md](ROADMAP.md) for the durable phase summary, open latency gap, de
 - `cargo fmt --check`: passed after applying the formatter.
 - `cargo check`: passed.
 - `cargo clippy --all-targets -- -D warnings`: passed.
-- `cargo test`: passed (15 passed, 0 failed).
+- `cargo test`: passed (17 passed, 0 failed).
 - `cargo build --release`: passed.
-- `cmd /c package.bat`: passed, including the strict NSIS installer check.
-- `--smoke-test` was intentionally not rerun after UI-automation cleanup; the current editor interactions were not runtime-automated.
-- Release executable: 542,720 bytes (0.517578 MiB), under the 2.5 MiB target.
-- NSIS installer: 286,337 bytes (0.273072 MiB), under the 3 MiB target.
+- `cmd /c package.bat`: passed, including the strict NSIS installer check; the executable and installer are unsigned because no signing certificate was configured.
+- `--smoke-test` was intentionally not rerun. Safe direct-HWND automation exercised normal and full-primary-work-area selections without synthesizing the global PrintScreen hotkey; it did not repeat every object-transform path.
+- Release executable: 546,304 bytes (0.520996 MiB), under the 2.5 MiB target.
+- NSIS installer: 288,209 bytes (0.274858 MiB), under the 3 MiB target.
+- Installer SHA-256: `a29178bbce0b720becd83efbc8ed18a96aaf66b225e589f7d09e8b653bfd3622`.
 - Actual daemon sample over 60.039 seconds: 11,157,504 bytes at start, 11,157,504 bytes maximum, and 11,116,544 bytes at end. The 10.640625 MiB maximum is under the 15 MiB target.
 - Actual PrintScreen-to-visible-overlay latency: 48.936 ms. This **does not meet** the ≤30 ms target.
 - In that targeted runtime scenario, Esc closed the overlay in 15.801 ms, the daemon remained alive, clean `WM_CLOSE` shutdown exited with code 0, and no console `HWND` was observed.
 
-A prior representative native runtime pass ran while MSI Afterburner and RTSS were active: it created a selection, drew and moved a rectangle annotation, moved and resized the selection, and visually showed deterministic full-frame rendering without trails. The current Select/object-transform and L-toolbar changes were verified by model/source checks only; editor interactions were intentionally not runtime-automated after test cleanup. The redesigned 720×720 Settings window was exercised at 96 DPI in both Simple and Advanced views: every control remained visible without clipping, switching views retained unsaved state, the footer remained available, and Cancel exited normally with `settings.json` byte-identical. No alternate-DPI monitor was available. A risky incomplete latency optimization was removed; capture remains on the prior single coherent GDI `BitBlt` path.
+A representative native runtime pass with MSI Afterburner and RTSS active, plus the latest full-window pass, showed deterministic full-frame rendering without trails; this is representative evidence, not exhaustive hardware compatibility. Safe direct-HWND automation exercised a normal selection with its padded L outside and a full 1920×1032 primary-work-area selection with the complete bottom-right L inside at a 10px inset, without crossing the x=1920 seam into the adjacent monitor. Direct image and source inspection confirmed that all four core action icons were visible. The saved 1920×1032 output contained no toolbar, border, handles, caret, tooltip, or in-progress preview. The compact 700×620 Settings window was exercised at 96 DPI in both Simple and Advanced views: controls were unclipped, unsaved state survived view switches, PNG disabled the JPEG-quality controls, the standard Save & Apply then Cancel footer remained visible, and Cancel left `settings.json` byte-identical. No alternate-DPI runtime was performed. A risky incomplete latency optimization was removed; capture remains on the prior single coherent GDI `BitBlt` path.
 
 ### Phase A — Core Capture & Annotation Loop
 - [x] **A0: Project Scaffold** — Pure Rust binary crate with size-optimized release profile (`opt-level = "z"`, `lto = true`, `panic = "abort"`, `strip = true`).
@@ -30,7 +31,7 @@ A prior representative native runtime pass ran while MSI Afterburner and RTSS we
 - [x] **A3: Fullscreen Layered Overlay** — `WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE` window covering all monitors seamlessly.
 - [x] **A4: Drag-to-Select Rectangle** — Real-time mouse tracking and scanline copies reveal undimmed pixels inside the selection.
 - [x] **A5: Single-Click Window Snap** — Topmost window detection via `EnumWindows` + `DwmGetWindowAttribute(DWMWA_EXTENDED_FRAME_BOUNDS)` for pixel-perfect window snapping on click.
-- [x] **A6: Selection Commit & L Toolbar** — One coherent 90° L is anchored at the selection's bottom-right: the right rail is bottom-aligned and ordered bottom-up, while the right-aligned color/style/action strip meets it along the selection bottom. The complete L flips together when screen bounds require it, including high-DPI and small-selection layouts. Every tool, color, thickness, and action has a readable, screen-bounded hover name.
+- [x] **A6: Selection Commit & L Toolbar** — One coherent 90° L keeps the rail and contextual strip joined at exactly one corner. A usual selection places the complete L outside with padding and flips it coherently when needed; a full-work-area or otherwise constrained selection places the complete L inside the selected monitor with padding rather than spilling to a neighbor. Every tool, color, thickness, and core action has a readable, monitor-bounded hover name.
 - [x] **A7: Rectangle Tool** — Draw vector rectangles over selection with crisp borders.
 - [x] **A8: Arrow Tool** — Draw directional arrows with calculated triangular arrowheads.
 - [x] **A9: Pen (Freehand) Tool** — Freehand continuous lines following cursor path.
@@ -46,7 +47,7 @@ A prior representative native runtime pass ran while MSI Afterburner and RTSS we
 - [x] **B1: Save to File (PNG/JPEG via GDI+)** — Save button + `Ctrl+S` exports the composited selection in the configured PNG or JPEG format using native Windows GDI+ with zero external dependencies. Files are saved to the configured folder (default `Pictures\Screenshots`) with timestamped `.png` or `.jpg` names.
 - [x] **B2: Contextual Style Strip** — Named hover controls expose 8 preset colors (Red, Orange, Yellow, Green, Blue, Purple, White, Black) and 3 named thickness levels (2px, 4px, 8px). Drawing tools show their applicable defaults; Select shows only controls supported by the selected object, while core actions remain available. A completed drag, resize, recolor, or thickness change records one undoable Modify command.
 - [x] **B3: Shift-Key Angle & Square Snapping** — Holding `Shift` during drawing constrains rectangles to a 1:1 square aspect ratio and snaps arrows to 45° angle increments (0°, 45°, 90°, 135°, etc.).
-- [x] **B4: Simple/Advanced Native Settings Window** — A 720×720 native Win32 dialog separates everyday capture/save choices into Simple and annotation, Windows-integration, and update choices into Advanced, with a persistent Save & Apply/Cancel footer and unsaved state retained across view switches. It is accessible via `--settings`, the toolbar, or `Ctrl+,`. Settings remain tolerantly readable and strictly writable with propagated persistence errors.
+- [x] **B4: Simple/Advanced Native Settings Window** — A compact 700×620 light native Win32 surface uses a clear Segoe UI hierarchy and section cards for Simple everyday capture/save choices and Advanced annotation, Windows-integration, and update choices. PNG natively disables JPEG quality; unsaved state survives view switches; the standard footer orders default Save & Apply before Cancel. Both overlay entry paths pass the overlay as an explicit modal owner, while standalone/tray Settings remains non-topmost. Settings remain tolerantly readable and strictly writable with propagated persistence errors.
 - [x] **B5: Build & Budget Checks** — The current release executable and installer are under their size targets, and the measured 60.039-second daemon maximum is under 15 MiB. The separate ≤30 ms PrintScreen-to-overlay target is not met.
 
 ### Phase C — Production Hardening & Critical Fixes
@@ -116,11 +117,11 @@ When launched without arguments, `isolmass.exe` runs as a pure background GUI pr
 - **Dual-Tone Outline**: A dark outer border, accent inner border, and visible handles retain contrast on white, black, or busy backgrounds.
 
 ## Settings Dialog
-Available via the tray menu (**Settings...**), the overlay button (**Settings**), the **`Ctrl+,`** shortcut, or the **`--settings`** CLI flag. The 720×720 window opens in **Simple** for everyday capture/save settings; **Advanced** exposes annotation defaults, Windows integration, and updates. Switching views preserves unsaved edits, and the Save & Apply/Cancel footer remains available in both views:
+Available via the tray menu (**Settings...**), the overlay button (**Settings**), the **`Ctrl+,`** shortcut, or the **`--settings`** CLI flag. The compact 700×620 light native window opens in **Simple** for everyday capture/save cards; **Advanced** exposes annotation defaults, Windows integration, and updates. Switching views preserves unsaved edits, and the standard default **Save & Apply** then **Cancel** footer remains available in both views. Overlay callers use the active overlay as an explicit modal owner; standalone/tray Settings remains non-topmost:
 - **Global Hotkey Presets**: `PrintScreen`, `Ctrl+Shift+S`, `Alt+PrintScreen`. The running daemon restarts its listener in place after saving; if registration fails, it restores the previous active and persisted hotkey.
 - **Save Folder**: Displays the current target directory (default: `Pictures\Screenshots`) and provides a native **Browse...** folder picker.
 - **Default Color & Thickness**: Pick default drawing styling.
-- **Image Format & Quality**: Save as PNG or JPEG, with 80/90/100 JPEG quality presets.
+- **Image Format & Quality**: Save as PNG or JPEG, with 80/90/100 JPEG quality presets that are natively disabled and keyboard-inactive while PNG is selected.
 - **Capture Delay**: Capture immediately or after 1, 3, or 5 seconds.
 - **Capture Behavior**: Toggle single-click window snapping and whether Copy/Save closes the overlay.
 - **Windows Integration**: Start isolmaSS at sign-in and show save notifications. **Save & Apply** applies the startup setting immediately.
@@ -138,7 +139,7 @@ Settings are loaded tolerantly: a missing, unreadable, or malformed `%APPDATA%\i
 ```bash
 cargo build --release
 ```
-The resulting executable is located at `target/release/isolmass.exe`. In the 2026-09-04 verified build it was 542,720 bytes; `target/release/isolmass-setup.exe` was 286,337 bytes. These measurements apply only to that source/toolchain build and must be refreshed after later changes.
+The resulting executable is located at `target/release/isolmass.exe`. In the 2026-09-04 verified build it was 546,304 bytes; the unsigned `target/release/isolmass-setup.exe` was 288,209 bytes with SHA-256 `a29178bbce0b720becd83efbc8ed18a96aaf66b225e589f7d09e8b653bfd3622`. These measurements apply only to that source/toolchain build and must be refreshed after later changes.
 
 ### Automated Smoke Checks
 Run the automated smoke command for core model, persistence, selected Win32 integration, and packaging checks:

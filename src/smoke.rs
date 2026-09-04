@@ -287,13 +287,12 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     println!("\n[Slice A6] Testing Selection Commit & L Toolbar Layout...");
     let tb = Toolbar::layout(
         &selection,
+        Rect::new(0, 0, capture.width, capture.height),
         ToolKind::Rectangle,
         PRESET_COLORS[0],
         3,
         true,
         true,
-        capture.width,
-        capture.height,
         true,
         false,
         96,

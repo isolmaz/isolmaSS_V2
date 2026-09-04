@@ -223,7 +223,7 @@ fn run_interactive_session() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
-                TrayCommand::Settings => match show_settings_dialog(&settings) {
+                TrayCommand::Settings => match show_settings_dialog(&settings, None) {
                     Ok(Some(mut saved)) => {
                         if saved.hotkey != settings.hotkey {
                             drop(hotkey_handle);
@@ -355,7 +355,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--settings" => {
                 let current = Settings::load_or_default();
-                match show_settings_dialog(&current) {
+                match show_settings_dialog(&current, None) {
                     Ok(Some(_saved)) => {
                         println!("[isolmaSS] Settings updated and applied successfully.");
                     }

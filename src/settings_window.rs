@@ -2,15 +2,26 @@ use crate::hotkey::HotkeyConfig;
 use crate::settings::{PRESET_COLORS, PRESET_THICKNESSES, SaveFormat, Settings};
 use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::{
-    ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM,
+    COLORREF, ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT,
+    RECT, WPARAM,
 };
-use windows::Win32::Graphics::Gdi::{COLOR_WINDOW, HBRUSH};
-use windows::Win32::UI::Input::KeyboardAndMouse::{SetFocus, VK_ESCAPE};
+use windows::Win32::Graphics::Gdi::{
+    BeginPaint, COLOR_WINDOW, CreatePen, CreateSolidBrush, DeleteObject, EndPaint, FillRect,
+    GetMonitorInfoW, HBRUSH, HDC, HGDIOBJ, InvalidateRect, MONITOR_DEFAULTTONEAREST,
+    MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint, MonitorFromWindow, PAINTSTRUCT,
+    PS_SOLID, RoundRect, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+};
+use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    EnableWindow, IsWindowEnabled, SetActiveWindow, SetFocus, VK_ESCAPE,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA, GetMessageW,
-    GetWindowLongPtrW, IDC_ARROW, MSG, PostQuitMessage, RegisterClassExW, SW_HIDE, SW_SHOW,
-    SetForegroundWindow, SetWindowLongPtrW, ShowWindow, TranslateMessage, WM_CLOSE, WM_DESTROY,
-    WM_KEYDOWN, WNDCLASSEXW,
+    BringWindowToTop, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
+    GWLP_USERDATA, GetClientRect, GetDlgCtrlID, GetForegroundWindow, GetMessageW,
+    GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IDC_ARROW, IsWindow, MSG,
+    PM_REMOVE, PeekMessageW, PostQuitMessage, RegisterClassExW, SW_HIDE, SW_SHOW,
+    SetForegroundWindow, SetWindowLongPtrW, ShowWindow, TranslateMessage, WM_CLOSE, WM_CTLCOLORBTN,
+    WM_CTLCOLORSTATIC, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_PAINT, WNDCLASSEXW,
 };
 use windows::core::{PCWSTR, Result, w};
 
@@ -30,16 +41,24 @@ pub struct SettingsWindowState {
     dpi: u32,
     font: windows::Win32::Graphics::Gdi::HFONT,
     title_font: windows::Win32::Graphics::Gdi::HFONT,
+    heading_font: windows::Win32::Graphics::Gdi::HFONT,
+    background_brush: HBRUSH,
+    card_brush: HBRUSH,
 }
 
 impl Drop for SettingsWindowState {
     fn drop(&mut self) {
-        for font in [self.font, self.title_font] {
+        for font in [self.font, self.title_font, self.heading_font] {
             if !font.is_invalid() {
                 unsafe {
-                    let _ = windows::Win32::Graphics::Gdi::DeleteObject(
-                        windows::Win32::Graphics::Gdi::HGDIOBJ(font.0),
-                    );
+                    let _ = DeleteObject(HGDIOBJ(font.0));
+                }
+            }
+        }
+        for brush in [self.background_brush, self.card_brush] {
+            if !brush.is_invalid() {
+                unsafe {
+                    let _ = DeleteObject(HGDIOBJ(brush.0));
                 }
             }
         }
@@ -68,8 +87,15 @@ const ID_DELAY_FIRST: i32 = 500;
 const ID_FORMAT_PNG: i32 = 600;
 const ID_FORMAT_JPEG: i32 = 601;
 const ID_QUALITY_FIRST: i32 = 610;
-const SETTINGS_WIDTH: i32 = 720;
-const SETTINGS_HEIGHT: i32 = 720;
+const SETTINGS_WIDTH: i32 = 700;
+const SETTINGS_HEIGHT: i32 = 620;
+const COLOR_BACKGROUND: COLORREF = COLORREF(0x00f7f5f2);
+const COLOR_CARD: COLORREF = COLORREF(0x00ffffff);
+const COLOR_BORDER: COLORREF = COLORREF(0x00e1ddd7);
+const COLOR_TEXT: COLORREF = COLORREF(0x002b2927);
+const COLOR_PROPERTY: COLORREF = COLORREF(0x005b514a);
+const COLOR_MUTED: COLORREF = COLORREF(0x007b6d64);
+const COLOR_DISABLED: COLORREF = COLORREF(0x0099948f);
 
 fn scale(value: i32, dpi: u32) -> i32 {
     value * dpi as i32 / 96
@@ -132,11 +158,12 @@ fn move_control(hwnd: HWND, id: i32, x: i32, y: i32, width: i32, height: i32, dp
     }
 }
 
-fn create_ui_font(dpi: u32, size: i32, weight: i32) -> windows::Win32::Graphics::Gdi::HFONT {
+fn create_ui_font(dpi: u32, points: i32, weight: i32) -> windows::Win32::Graphics::Gdi::HFONT {
     let face = wide_string("Segoe UI");
+    let pixel_height = (points * dpi as i32 + 36) / 72;
     unsafe {
         windows::Win32::Graphics::Gdi::CreateFontW(
-            -scale(size, dpi),
+            -pixel_height,
             0,
             0,
             0,
@@ -155,11 +182,15 @@ fn create_ui_font(dpi: u32, size: i32, weight: i32) -> windows::Win32::Graphics:
 }
 
 fn create_settings_font(dpi: u32) -> windows::Win32::Graphics::Gdi::HFONT {
-    create_ui_font(dpi, 9, windows::Win32::Graphics::Gdi::FW_NORMAL.0 as i32)
+    create_ui_font(dpi, 10, windows::Win32::Graphics::Gdi::FW_NORMAL.0 as i32)
 }
 
 fn create_title_font(dpi: u32) -> windows::Win32::Graphics::Gdi::HFONT {
-    create_ui_font(dpi, 18, 600)
+    create_ui_font(dpi, 16, 600)
+}
+
+fn create_heading_font(dpi: u32) -> windows::Win32::Graphics::Gdi::HFONT {
+    create_ui_font(dpi, 11, 600)
 }
 
 fn set_controls_font(hwnd: HWND, font: windows::Win32::Graphics::Gdi::HFONT) {
@@ -191,94 +222,145 @@ fn set_control_font(hwnd: HWND, id: i32, font: windows::Win32::Graphics::Gdi::HF
     }
 }
 
-fn layout_controls(hwnd: HWND, dpi: u32) {
-    let row = 24;
-    move_control(hwnd, 700, 24, 16, 670, 32, dpi);
-    move_control(hwnd, 709, 24, 50, 670, 22, dpi);
-    move_control(hwnd, ID_VIEW_SIMPLE, 24, 80, 152, 38, dpi);
-    move_control(hwnd, ID_VIEW_ADVANCED, 182, 80, 152, 38, dpi);
+fn card_rects(view: SettingsView) -> &'static [(i32, i32, i32, i32)] {
+    match view {
+        SettingsView::Simple => &[
+            (24, 114, 676, 224),
+            (24, 230, 676, 350),
+            (24, 356, 676, 462),
+        ],
+        SettingsView::Advanced => &[
+            (24, 114, 676, 262),
+            (24, 268, 676, 368),
+            (24, 378, 676, 518),
+        ],
+    }
+}
 
-    move_control(hwnd, 710, 16, 132, 688, 118, dpi);
-    move_control(hwnd, 701, 34, 157, 116, row, dpi);
-    move_control(hwnd, ID_HOTKEY_PRINT, 154, 155, 116, 25, dpi);
-    move_control(hwnd, ID_HOTKEY_CTRL_SHIFT_S, 276, 155, 132, 25, dpi);
-    move_control(hwnd, ID_HOTKEY_ALT_PRINT, 414, 155, 146, 25, dpi);
-    move_control(hwnd, 705, 34, 199, 116, row, dpi);
+fn paint_settings_surface(hwnd: HWND, state: &SettingsWindowState, hdc: HDC) {
+    let mut client = RECT::default();
+    unsafe {
+        let _ = GetClientRect(hwnd, &mut client);
+        let _ = FillRect(hdc, &client, state.background_brush);
+    }
+
+    let pen = unsafe { CreatePen(PS_SOLID, scale(1, state.dpi), COLOR_BORDER) };
+    let old_pen = unsafe { SelectObject(hdc, HGDIOBJ(pen.0)) };
+    let old_brush = unsafe { SelectObject(hdc, HGDIOBJ(state.card_brush.0)) };
+    for &(left, top, right, bottom) in card_rects(state.active_view) {
+        unsafe {
+            let _ = RoundRect(
+                hdc,
+                scale(left, state.dpi),
+                scale(top, state.dpi),
+                scale(right, state.dpi),
+                scale(bottom, state.dpi),
+                scale(8, state.dpi),
+                scale(8, state.dpi),
+            );
+        }
+    }
+    unsafe {
+        let _ = SelectObject(hdc, old_brush);
+        let _ = SelectObject(hdc, old_pen);
+        let _ = DeleteObject(HGDIOBJ(pen.0));
+    }
+}
+
+fn control_uses_card(id: i32) -> bool {
+    !matches!(
+        id,
+        700 | 709 | ID_VIEW_SIMPLE | ID_VIEW_ADVANCED | ID_SAVE | ID_CANCEL
+    )
+}
+
+fn layout_controls(hwnd: HWND, dpi: u32) {
+    const ROW: i32 = 26;
+    move_control(hwnd, 700, 24, 14, 652, 30, dpi);
+    move_control(hwnd, 709, 24, 44, 652, 22, dpi);
+    move_control(hwnd, ID_VIEW_SIMPLE, 24, 74, 102, 30, dpi);
+    move_control(hwnd, ID_VIEW_ADVANCED, 130, 74, 112, 30, dpi);
+
+    move_control(hwnd, 710, 42, 126, 616, 22, dpi);
+    move_control(hwnd, 701, 42, 158, 110, ROW, dpi);
+    move_control(hwnd, ID_HOTKEY_PRINT, 160, 157, 104, ROW, dpi);
+    move_control(hwnd, ID_HOTKEY_CTRL_SHIFT_S, 270, 157, 120, ROW, dpi);
+    move_control(hwnd, ID_HOTKEY_ALT_PRINT, 396, 157, 136, ROW, dpi);
+    move_control(hwnd, 705, 42, 190, 110, ROW, dpi);
     for index in 0..4 {
         move_control(
             hwnd,
             ID_DELAY_FIRST + index,
-            154 + index * 104,
-            197,
-            98,
-            25,
+            160 + index * 94,
+            189,
+            88,
+            ROW,
             dpi,
         );
     }
 
-    move_control(hwnd, 711, 16, 262, 688, 148, dpi);
-    move_control(hwnd, 702, 34, 288, 116, row, dpi);
-    move_control(hwnd, ID_FOLDER_LABEL, 154, 288, 424, row, dpi);
-    move_control(hwnd, ID_BROWSE, 586, 285, 96, 29, dpi);
-    move_control(hwnd, 706, 34, 330, 116, row, dpi);
-    move_control(hwnd, ID_FORMAT_PNG, 154, 328, 74, 25, dpi);
-    move_control(hwnd, ID_FORMAT_JPEG, 234, 328, 82, 25, dpi);
-    move_control(hwnd, 707, 342, 330, 62, row, dpi);
+    move_control(hwnd, 711, 42, 242, 616, 22, dpi);
+    move_control(hwnd, 702, 42, 274, 110, ROW, dpi);
+    move_control(hwnd, ID_FOLDER_LABEL, 160, 275, 398, 24, dpi);
+    move_control(hwnd, ID_BROWSE, 568, 271, 90, 30, dpi);
+    move_control(hwnd, 706, 42, 308, 110, ROW, dpi);
+    move_control(hwnd, ID_FORMAT_PNG, 160, 307, 68, ROW, dpi);
+    move_control(hwnd, ID_FORMAT_JPEG, 234, 307, 74, ROW, dpi);
+    move_control(hwnd, 707, 338, 308, 96, ROW, dpi);
     for index in 0..3 {
         move_control(
             hwnd,
             ID_QUALITY_FIRST + index,
-            408 + index * 72,
-            328,
-            66,
-            25,
+            438 + index * 64,
+            307,
+            58,
+            ROW,
             dpi,
         );
     }
 
-    move_control(hwnd, 712, 16, 422, 688, 112, dpi);
-    move_control(hwnd, ID_WINDOW_SNAP, 34, 450, 630, 27, dpi);
-    move_control(hwnd, ID_CLOSE_AFTER_ACTION, 34, 488, 630, 27, dpi);
+    move_control(hwnd, 712, 42, 368, 616, 22, dpi);
+    move_control(hwnd, ID_WINDOW_SNAP, 42, 398, 280, ROW, dpi);
+    move_control(hwnd, ID_CLOSE_AFTER_ACTION, 42, 427, 280, ROW, dpi);
 
-    move_control(hwnd, 713, 16, 132, 688, 194, dpi);
-    move_control(hwnd, 703, 34, 159, 116, row, dpi);
+    move_control(hwnd, 713, 42, 126, 616, 22, dpi);
+    move_control(hwnd, 703, 42, 158, 110, ROW, dpi);
     for index in 0..PRESET_COLORS.len() {
         move_control(
             hwnd,
             ID_COLOR_FIRST + index as i32,
-            154 + (index as i32 % 4) * 126,
-            157 + (index as i32 / 4) * 30,
-            120,
-            25,
+            160 + (index as i32 % 4) * 112,
+            157 + (index as i32 / 4) * 29,
+            106,
+            ROW,
             dpi,
         );
     }
-    move_control(hwnd, 704, 34, 267, 116, row, dpi);
+    move_control(hwnd, 704, 42, 219, 110, ROW, dpi);
     for index in 0..PRESET_THICKNESSES.len() {
         move_control(
             hwnd,
             ID_THICKNESS_FIRST + index as i32,
-            154 + index as i32 * 98,
-            265,
-            90,
-            25,
+            160 + index as i32 * 90,
+            218,
+            82,
+            ROW,
             dpi,
         );
     }
 
-    move_control(hwnd, 714, 16, 338, 688, 104, dpi);
-    move_control(hwnd, ID_START_WITH_WINDOWS, 34, 366, 630, 27, dpi);
-    move_control(hwnd, ID_NOTIFY_AFTER_SAVE, 34, 402, 630, 27, dpi);
+    move_control(hwnd, 714, 42, 278, 616, 22, dpi);
+    move_control(hwnd, ID_START_WITH_WINDOWS, 42, 308, 350, ROW, dpi);
+    move_control(hwnd, ID_NOTIFY_AFTER_SAVE, 42, 337, 310, ROW, dpi);
 
-    move_control(hwnd, 715, 16, 454, 688, 150, dpi);
-    move_control(hwnd, ID_CHECK_UPDATES, 34, 480, 630, 27, dpi);
-    move_control(hwnd, ID_AUTO_INSTALL, 34, 514, 630, 27, dpi);
-    move_control(hwnd, ID_CHECK_UPDATE, 34, 553, 148, 30, dpi);
-    move_control(hwnd, 708, 196, 548, 486, 44, dpi);
+    move_control(hwnd, 715, 42, 388, 616, 22, dpi);
+    move_control(hwnd, ID_CHECK_UPDATES, 42, 418, 310, ROW, dpi);
+    move_control(hwnd, ID_AUTO_INSTALL, 42, 447, 380, ROW, dpi);
+    move_control(hwnd, ID_CHECK_UPDATE, 42, 478, 146, 30, dpi);
+    move_control(hwnd, 708, 202, 475, 456, 38, dpi);
 
-    move_control(hwnd, 716, 16, 612, 688, 58, dpi);
-    move_control(hwnd, ID_SAVE, 456, 626, 128, 36, dpi);
-    move_control(hwnd, ID_CANCEL, 594, 626, 96, 36, dpi);
+    move_control(hwnd, ID_SAVE, 462, 529, 108, 34, dpi);
+    move_control(hwnd, ID_CANCEL, 580, 529, 96, 34, dpi);
 }
 
 fn show_controls(hwnd: HWND, ids: &[i32], show: bool) {
@@ -352,6 +434,9 @@ fn set_active_view(hwnd: HWND, view: SettingsView) {
             ID_VIEW_ADVANCED
         },
     );
+    unsafe {
+        let _ = InvalidateRect(hwnd, None, true);
+    }
 }
 
 fn set_check(hwnd: HWND, id: i32, checked: bool) {
@@ -371,6 +456,18 @@ fn set_check(hwnd: HWND, id: i32, checked: bool) {
 fn check_radio(hwnd: HWND, first: i32, last: i32, selected: i32) {
     unsafe {
         let _ = windows::Win32::UI::Controls::CheckRadioButton(hwnd, first, last, selected);
+    }
+}
+
+fn set_jpeg_quality_enabled(hwnd: HWND, enabled: bool) {
+    for id in std::iter::once(707).chain(ID_QUALITY_FIRST..=ID_QUALITY_FIRST + 2) {
+        if let Ok(control) =
+            unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgItem(hwnd, id) }
+        {
+            unsafe {
+                let _ = EnableWindow(control, enabled);
+            }
+        }
     }
 }
 
@@ -434,6 +531,7 @@ fn initialize_control_values(hwnd: HWND, settings: &Settings) {
         _ => ID_QUALITY_FIRST + 2,
     };
     check_radio(hwnd, ID_QUALITY_FIRST, ID_QUALITY_FIRST + 2, quality_id);
+    set_jpeg_quality_enabled(hwnd, settings.save_format == SaveFormat::Jpeg);
     set_check(hwnd, ID_WINDOW_SNAP, settings.enable_window_snap);
     set_check(hwnd, ID_CLOSE_AFTER_ACTION, settings.close_after_action);
     set_check(hwnd, ID_START_WITH_WINDOWS, settings.start_with_windows);
@@ -493,8 +591,8 @@ fn choose_folder(owner: HWND) -> Option<PathBuf> {
 
 fn create_settings_controls(hwnd: HWND) -> Result<()> {
     use windows::Win32::UI::WindowsAndMessaging::{
-        BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON, BS_DEFPUSHBUTTON, BS_GROUPBOX, BS_PUSHBUTTON,
-        BS_PUSHLIKE, WS_GROUP, WS_TABSTOP,
+        BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, BS_PUSHLIKE,
+        WS_GROUP, WS_TABSTOP,
     };
     let label = |id, text| create_control(hwnd, w!("STATIC"), text, Default::default(), id);
 
@@ -516,7 +614,7 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
         BS_AUTORADIOBUTTON | BS_PUSHLIKE | WS_TABSTOP.0 as i32,
     )?;
 
-    create_button(hwnd, 710, "Capture", BS_GROUPBOX)?;
+    label(710, "Capture")?;
     label(701, "Global hotkey")?;
     create_button(
         hwnd,
@@ -555,9 +653,15 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
         )?;
     }
 
-    create_button(hwnd, 711, "Saving", BS_GROUPBOX)?;
+    label(711, "Saving")?;
     label(702, "Save folder")?;
-    label(ID_FOLDER_LABEL, "")?;
+    create_control(
+        hwnd,
+        w!("STATIC"),
+        "",
+        windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(0x0000_4000),
+        ID_FOLDER_LABEL,
+    )?;
     create_button(
         hwnd,
         ID_BROWSE,
@@ -594,7 +698,7 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
         )?;
     }
 
-    create_button(hwnd, 712, "After capture", BS_GROUPBOX)?;
+    label(712, "After capture")?;
     create_button(
         hwnd,
         ID_WINDOW_SNAP,
@@ -608,7 +712,7 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
         BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32,
     )?;
 
-    create_button(hwnd, 713, "Annotation defaults", BS_GROUPBOX)?;
+    label(713, "Annotation defaults")?;
     label(703, "Default color")?;
     for (index, name) in [
         "Red", "Orange", "Yellow", "Green", "Blue", "Purple", "White", "Black",
@@ -646,7 +750,7 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
         )?;
     }
 
-    create_button(hwnd, 714, "Windows", BS_GROUPBOX)?;
+    label(714, "Windows")?;
     create_button(
         hwnd,
         ID_START_WITH_WINDOWS,
@@ -660,7 +764,7 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
         BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32,
     )?;
 
-    create_button(hwnd, 715, "Updates", BS_GROUPBOX)?;
+    label(715, "Updates")?;
     create_button(
         hwnd,
         ID_CHECK_UPDATES,
@@ -684,11 +788,10 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
         "Manual and automatic installs require HTTPS, a GitHub SHA-256 digest, and a valid Authenticode signature.",
     )?;
 
-    create_button(hwnd, 716, "", BS_GROUPBOX)?;
     create_button(
         hwnd,
         ID_SAVE,
-        "Save & Apply",
+        "Save && Apply",
         BS_DEFPUSHBUTTON | WS_GROUP.0 as i32 | WS_TABSTOP.0 as i32,
     )?;
     create_button(
@@ -749,8 +852,14 @@ fn apply_button_action(hwnd: HWND, state: &mut SettingsWindowState, id: i32) {
         ID_DELAY_FIRST..=503 => {
             state.settings.capture_delay_ms = [0, 1000, 3000, 5000][(id - ID_DELAY_FIRST) as usize];
         }
-        ID_FORMAT_PNG => state.settings.save_format = SaveFormat::Png,
-        ID_FORMAT_JPEG => state.settings.save_format = SaveFormat::Jpeg,
+        ID_FORMAT_PNG => {
+            state.settings.save_format = SaveFormat::Png;
+            set_jpeg_quality_enabled(hwnd, false);
+        }
+        ID_FORMAT_JPEG => {
+            state.settings.save_format = SaveFormat::Jpeg;
+            set_jpeg_quality_enabled(hwnd, true);
+        }
         ID_QUALITY_FIRST..=612 => {
             state.settings.jpeg_quality = [80, 90, 100][(id - ID_QUALITY_FIRST) as usize];
         }
@@ -827,6 +936,58 @@ unsafe extern "system" fn settings_wnd_proc(
 ) -> LRESULT {
     let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut SettingsWindowState;
     match msg {
+        WM_PAINT => {
+            if state_ptr.is_null() {
+                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            }
+            let mut paint = PAINTSTRUCT::default();
+            let hdc = unsafe { BeginPaint(hwnd, &mut paint) };
+            paint_settings_surface(hwnd, unsafe { &*state_ptr }, hdc);
+            unsafe {
+                let _ = EndPaint(hwnd, &paint);
+            }
+            LRESULT(0)
+        }
+        WM_ERASEBKGND => {
+            if !state_ptr.is_null() {
+                let state = unsafe { &*state_ptr };
+                let mut client = RECT::default();
+                unsafe {
+                    let _ = GetClientRect(hwnd, &mut client);
+                    let _ = FillRect(HDC(wparam.0 as *mut _), &client, state.background_brush);
+                }
+                return LRESULT(1);
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
+            if state_ptr.is_null() {
+                return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+            }
+            let state = unsafe { &*state_ptr };
+            let child = HWND(lparam.0 as *mut _);
+            let id = unsafe { GetDlgCtrlID(child) };
+            let hdc = HDC(wparam.0 as *mut _);
+            unsafe {
+                let _ = SetBkMode(hdc, TRANSPARENT);
+                let color = if !IsWindowEnabled(child).as_bool() {
+                    COLOR_DISABLED
+                } else if matches!(id, 708 | 709) {
+                    COLOR_MUTED
+                } else if matches!(id, 701..=707) {
+                    COLOR_PROPERTY
+                } else {
+                    COLOR_TEXT
+                };
+                let _ = SetTextColor(hdc, color);
+            }
+            let brush = if control_uses_card(id) {
+                state.card_brush
+            } else {
+                state.background_brush
+            };
+            LRESULT(brush.0 as isize)
+        }
         windows::Win32::UI::WindowsAndMessaging::WM_COMMAND => {
             if !state_ptr.is_null() {
                 apply_button_action(hwnd, unsafe { &mut *state_ptr }, (wparam.0 & 0xffff) as i32);
@@ -852,19 +1013,25 @@ unsafe extern "system" fn settings_wnd_proc(
                 }
                 let new_font = create_settings_font(state.dpi);
                 let new_title_font = create_title_font(state.dpi);
+                let new_heading_font = create_heading_font(state.dpi);
                 let old_font = std::mem::replace(&mut state.font, new_font);
                 let old_title_font = std::mem::replace(&mut state.title_font, new_title_font);
+                let old_heading_font = std::mem::replace(&mut state.heading_font, new_heading_font);
                 set_controls_font(hwnd, new_font);
                 set_control_font(hwnd, 700, new_title_font);
+                for id in 710..=715 {
+                    set_control_font(hwnd, id, new_heading_font);
+                }
                 layout_controls(hwnd, state.dpi);
-                for font in [old_font, old_title_font] {
+                for font in [old_font, old_title_font, old_heading_font] {
                     if !font.is_invalid() {
                         unsafe {
-                            let _ = windows::Win32::Graphics::Gdi::DeleteObject(
-                                windows::Win32::Graphics::Gdi::HGDIOBJ(font.0),
-                            );
+                            let _ = DeleteObject(HGDIOBJ(font.0));
                         }
                     }
+                }
+                unsafe {
+                    let _ = InvalidateRect(hwnd, None, true);
                 }
             }
             LRESULT(0)
@@ -918,7 +1085,121 @@ fn register_settings_class() -> Result<()> {
     Ok(())
 }
 
-pub fn show_settings_dialog(current: &Settings) -> Result<Option<Settings>> {
+struct ModalOwner {
+    hwnd: Option<HWND>,
+    restore_enabled: bool,
+}
+
+impl ModalOwner {
+    fn disable(hwnd: Option<HWND>) -> Self {
+        let restore_enabled = hwnd.is_some_and(|owner| unsafe { IsWindowEnabled(owner).as_bool() });
+        if let Some(owner) = hwnd.filter(|_| restore_enabled) {
+            unsafe {
+                let _ = EnableWindow(owner, false);
+            }
+        }
+        Self {
+            hwnd,
+            restore_enabled,
+        }
+    }
+}
+
+impl Drop for ModalOwner {
+    fn drop(&mut self) {
+        if let Some(owner) = self
+            .hwnd
+            .filter(|owner| unsafe { IsWindow(*owner).as_bool() })
+        {
+            if self.restore_enabled {
+                unsafe {
+                    let _ = EnableWindow(owner, true);
+                }
+            }
+            unsafe {
+                let _ = SetActiveWindow(owner);
+                let _ = SetForegroundWindow(owner);
+            }
+        }
+    }
+}
+
+fn center_dialog(hwnd: HWND, owner: Option<HWND>) {
+    let mut window = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut window) }.is_err() {
+        return;
+    }
+    let width = window.right - window.left;
+    let height = window.bottom - window.top;
+
+    let mut anchor = RECT::default();
+    let monitor = if let Some(owner) = owner {
+        if unsafe { GetWindowRect(owner, &mut anchor) }.is_err() {
+            return;
+        }
+        unsafe { MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST) }
+    } else {
+        let point = POINT { x: 0, y: 0 };
+        unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTOPRIMARY) }
+    };
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !unsafe { GetMonitorInfoW(monitor, &mut info).as_bool() } {
+        return;
+    }
+    if owner.is_none() {
+        anchor = info.rcWork;
+    }
+    let x = (anchor.left + (anchor.right - anchor.left - width) / 2)
+        .clamp(info.rcWork.left, info.rcWork.right - width);
+    let y = (anchor.top + (anchor.bottom - anchor.top - height) / 2)
+        .clamp(info.rcWork.top, info.rcWork.bottom - height);
+    unsafe {
+        let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
+            hwnd,
+            None,
+            x,
+            y,
+            0,
+            0,
+            windows::Win32::UI::WindowsAndMessaging::SWP_NOSIZE
+                | windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE
+                | windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER,
+        );
+    }
+}
+
+fn activate_dialog(hwnd: HWND) {
+    let foreground = unsafe { GetForegroundWindow() };
+    let current_thread = unsafe { GetCurrentThreadId() };
+    let foreground_thread = if foreground.is_invalid() {
+        0
+    } else {
+        unsafe { GetWindowThreadProcessId(foreground, None) }
+    };
+    let attached = foreground_thread != 0
+        && foreground_thread != current_thread
+        && unsafe { AttachThreadInput(current_thread, foreground_thread, true).as_bool() };
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = BringWindowToTop(hwnd);
+        let _ = SetActiveWindow(hwnd);
+        let _ = SetForegroundWindow(hwnd);
+        if let Ok(first) = windows::Win32::UI::WindowsAndMessaging::GetDlgItem(hwnd, ID_VIEW_SIMPLE)
+        {
+            let _ = SetFocus(first);
+        }
+    }
+    if attached {
+        unsafe {
+            let _ = AttachThreadInput(current_thread, foreground_thread, false);
+        }
+    }
+}
+
+pub fn show_settings_dialog(current: &Settings, owner: Option<HWND>) -> Result<Option<Settings>> {
     register_settings_class()?;
     let mut state = Box::new(SettingsWindowState {
         settings: current.clone(),
@@ -928,6 +1209,9 @@ pub fn show_settings_dialog(current: &Settings) -> Result<Option<Settings>> {
         dpi: 96,
         font: Default::default(),
         title_font: Default::default(),
+        heading_font: Default::default(),
+        background_brush: unsafe { CreateSolidBrush(COLOR_BACKGROUND) },
+        card_brush: unsafe { CreateSolidBrush(COLOR_CARD) },
     });
     let hwnd = unsafe {
         CreateWindowExW(
@@ -936,18 +1220,18 @@ pub fn show_settings_dialog(current: &Settings) -> Result<Option<Settings>> {
             w!("isolmaSS Settings"),
             windows::Win32::UI::WindowsAndMessaging::WS_OVERLAPPED
                 | windows::Win32::UI::WindowsAndMessaging::WS_CAPTION
-                | windows::Win32::UI::WindowsAndMessaging::WS_SYSMENU
-                | windows::Win32::UI::WindowsAndMessaging::WS_MINIMIZEBOX,
+                | windows::Win32::UI::WindowsAndMessaging::WS_SYSMENU,
             windows::Win32::UI::WindowsAndMessaging::CW_USEDEFAULT,
             windows::Win32::UI::WindowsAndMessaging::CW_USEDEFAULT,
             SETTINGS_WIDTH,
             SETTINGS_HEIGHT,
-            None,
+            owner.unwrap_or_default(),
             None,
             HINSTANCE::default(),
             None,
         )?
     };
+    let _modal_owner = ModalOwner::disable(owner);
     unsafe {
         SetWindowLongPtrW(
             hwnd,
@@ -971,23 +1255,53 @@ pub fn show_settings_dialog(current: &Settings) -> Result<Option<Settings>> {
     }
     state.font = create_settings_font(state.dpi);
     state.title_font = create_title_font(state.dpi);
-    create_settings_controls(hwnd)?;
+    state.heading_font = create_heading_font(state.dpi);
+    if let Err(error) = create_settings_controls(hwnd) {
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+            let mut quit = MSG::default();
+            let _ = PeekMessageW(
+                &mut quit,
+                None,
+                windows::Win32::UI::WindowsAndMessaging::WM_QUIT,
+                windows::Win32::UI::WindowsAndMessaging::WM_QUIT,
+                PM_REMOVE,
+            );
+        }
+        return Err(error);
+    }
     set_controls_font(hwnd, state.font);
     set_control_font(hwnd, 700, state.title_font);
+    for id in 710..=715 {
+        set_control_font(hwnd, id, state.heading_font);
+    }
     layout_controls(hwnd, state.dpi);
     initialize_control_values(hwnd, &state.settings);
     set_active_view(hwnd, state.active_view);
-    unsafe {
-        let _ = ShowWindow(hwnd, SW_SHOW);
-        let _ = SetForegroundWindow(hwnd);
-        if let Ok(first) = windows::Win32::UI::WindowsAndMessaging::GetDlgItem(hwnd, ID_VIEW_SIMPLE)
-        {
-            let _ = SetFocus(first);
-        }
-    }
+    center_dialog(hwnd, owner);
+    activate_dialog(hwnd);
 
     let mut msg = MSG::default();
-    while unsafe { GetMessageW(&mut msg, HWND::default(), 0, 0) }.0 > 0 {
+    loop {
+        let status = unsafe { GetMessageW(&mut msg, HWND::default(), 0, 0) };
+        if status.0 == -1 {
+            if unsafe { IsWindow(hwnd).as_bool() } {
+                unsafe {
+                    let _ = DestroyWindow(hwnd);
+                    let _ = PeekMessageW(
+                        &mut msg,
+                        None,
+                        windows::Win32::UI::WindowsAndMessaging::WM_QUIT,
+                        windows::Win32::UI::WindowsAndMessaging::WM_QUIT,
+                        PM_REMOVE,
+                    );
+                }
+            }
+            return Err(windows::core::Error::from_win32());
+        }
+        if status.0 == 0 {
+            break;
+        }
         if msg.message == WM_KEYDOWN && msg.wParam.0 == VK_ESCAPE.0 as usize {
             unsafe {
                 let _ = DestroyWindow(hwnd);
