@@ -6,8 +6,10 @@ set NSI_PATH=installer.nsi
 set SETUP_PATH=target\release\isolmass-setup.exe
 set DIGEST_PATH=target\release\isolmass-setup.exe.sha256
 set MAX_BUDGET=3145728
+set MAX_BINARY_BUDGET=2621440
 
-for /f "usebackq delims=" %%V in (`powershell -NoProfile -Command "$metadata = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json; ($metadata.packages | Where-Object name -eq 'isolmass').version"`) do set PRODUCT_VERSION=%%V
+set PRODUCT_VERSION=
+for /f "usebackq delims=" %%V in (`powershell -NoProfile -Command "$ErrorActionPreference='Stop'; $json = cargo metadata --locked --no-deps --format-version 1; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; $metadata = $json | ConvertFrom-Json; $version = ($metadata.packages | Where-Object name -eq 'isolmass').version; if ($version -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid package version' }; $version"`) do set PRODUCT_VERSION=%%V
 if not defined PRODUCT_VERSION (
     echo [ERROR] Could not read the package version from Cargo metadata
     exit /b 1
@@ -18,11 +20,17 @@ echo  isolmaSS %PRODUCT_VERSION% Distribution Packaging
 echo ============================================================
 
 echo [INFO] Building production binary...
-cargo build --release
+cargo build --release --locked
 if errorlevel 1 exit /b 1
 
 call :sign "%BIN_PATH%"
 if errorlevel 1 exit /b 1
+
+for %%I in ("%BIN_PATH%") do set BIN_SIZE=%%~zI
+if !BIN_SIZE! gtr %MAX_BINARY_BUDGET% (
+    echo [ERROR] Executable size !BIN_SIZE! exceeds %MAX_BINARY_BUDGET% bytes
+    exit /b 1
+)
 
 set MAKENSIS_CMD=makensis
 where makensis >nul 2>nul
@@ -46,13 +54,20 @@ if not exist "%SETUP_PATH%" (
 call :sign "%SETUP_PATH%"
 if errorlevel 1 exit /b 1
 
+powershell -NoProfile -Command "$ErrorActionPreference='Stop'; foreach ($path in @('%BIN_PATH%','%SETUP_PATH%')) { $version=(Get-Item -LiteralPath $path).VersionInfo.ProductVersion; if ($version -ne '%PRODUCT_VERSION%') { throw ('Artifact version mismatch: ' + $path) } }"
+if errorlevel 1 exit /b 1
+if /I "%REQUIRE_SIGNING%"=="1" (
+    "%BIN_PATH%" --verify-update "%SETUP_PATH%"
+    if errorlevel 1 exit /b 1
+)
+
 for %%I in ("%SETUP_PATH%") do set SETUP_SIZE=%%~zI
 if !SETUP_SIZE! gtr %MAX_BUDGET% (
     echo [ERROR] Installer size !SETUP_SIZE! exceeds %MAX_BUDGET% bytes
     exit /b 1
 )
 
-powershell -NoProfile -Command "$hash = (Get-FileHash -Algorithm SHA256 '%SETUP_PATH%').Hash.ToLowerInvariant(); Set-Content -Encoding ascii '%DIGEST_PATH%' ($hash + '  isolmass-setup.exe')"
+powershell -NoProfile -Command "$ErrorActionPreference='Stop'; $stream = [IO.File]::OpenRead('%SETUP_PATH%'); $sha = [Security.Cryptography.SHA256]::Create(); try { $hash = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-','').ToLowerInvariant() } finally { $sha.Dispose(); $stream.Dispose() }; if ($hash -notmatch '^[0-9a-f]{64}$') { throw 'Invalid installer checksum' }; [IO.File]::WriteAllText('%DIGEST_PATH%', $hash + '  isolmass-setup.exe' + [Environment]::NewLine, [Text.Encoding]::ASCII)"
 if errorlevel 1 exit /b 1
 
 echo [SUCCESS] Installer: %SETUP_PATH%

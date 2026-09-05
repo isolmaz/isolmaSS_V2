@@ -1,0 +1,46 @@
+name: Windows verification
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      # Use the runner's Git and Rust tools; no third-party workflow actions.
+      - name: Check out the requested revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git init .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git remote add origin "https://github.com/$env:GITHUB_REPOSITORY.git"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $header = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes("x-access-token:$env:GH_TOKEN"))
+          git -c "http.extraHeader=AUTHORIZATION: basic $header" fetch --depth=1 origin $env:GITHUB_SHA
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git checkout --detach FETCH_HEAD
+      - name: Install the pinned toolchain
+        run: rustup toolchain install 1.98.0 --profile minimal --component rustfmt --component clippy
+      - name: Formatting
+        run: cargo fmt --check
+      - name: Check
+        run: cargo check --locked
+      - name: Lint
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Tests without an interactive desktop
+        run: cargo test --locked -- --skip test_tray_manager_lifecycle
+      - name: Release build
+        run: cargo build --release --locked
+      - name: Release size
+        run: |
+          $size = (Get-Item target/release/isolmass.exe).Length
+          if ($size -gt 2621440) { throw "Executable exceeds the 2.5 MiB budget: $size bytes" }
+          "Executable: $size bytes" >> $env:GITHUB_STEP_SUMMARY

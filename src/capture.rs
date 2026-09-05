@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, CAPTUREBLT, CreateCompatibleDC, CreateDIBSection,
-    DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, HBITMAP, HDC, HGDIOBJ, RGBQUAD, ReleaseDC,
-    SRCCOPY, SelectObject,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, GdiFlush, GetDC, HBITMAP, HDC, HGDIOBJ, RGBQUAD,
+    ReleaseDC, SRCCOPY, SelectObject,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
@@ -77,6 +77,8 @@ impl Rect {
 
     /// Clamps the rectangle to fit within `[0, max_width)` and `[0, max_height)`.
     pub fn clamp(&self, max_width: i32, max_height: i32) -> Self {
+        let max_width = max_width.max(0);
+        let max_height = max_height.max(0);
         let left = self.left.clamp(0, max_width);
         let right = self.right.clamp(0, max_width);
         let top = self.top.clamp(0, max_height);
@@ -303,6 +305,8 @@ impl Drop for GdiObjectGuard {
 }
 
 static BUFFER_POOL: LazyLock<Mutex<Option<Vec<u8>>>> = LazyLock::new(|| Mutex::new(None));
+// Do not retain a multi-monitor screenshot's allocation while the daemon is idle.
+const MAX_POOLED_BYTES: usize = 4 * 1024 * 1024;
 
 fn take_dimmed_buffer(size: usize) -> Vec<u8> {
     let mut dimmed = BUFFER_POOL
@@ -317,7 +321,8 @@ fn take_dimmed_buffer(size: usize) -> Vec<u8> {
 impl Drop for CaptureBuffer {
     fn drop(&mut self) {
         let dimmed = std::mem::take(&mut self.dimmed);
-        if let Ok(mut pool) = BUFFER_POOL.lock()
+        if dimmed.capacity() <= MAX_POOLED_BYTES
+            && let Ok(mut pool) = BUFFER_POOL.lock()
             && pool
                 .as_ref()
                 .is_none_or(|current| current.capacity() < dimmed.capacity())
@@ -428,6 +433,13 @@ impl CaptureBuffer {
                 SelectObject(mem_dc, old_obj);
             }
             return Err(error);
+        }
+        // GDI batches writes to DIB sections. Complete them before reading pixels on the CPU.
+        if !unsafe { GdiFlush() }.as_bool() {
+            unsafe {
+                SelectObject(mem_dc, old_obj);
+            }
+            return Err(Error::from_win32());
         }
         let bit_blt = bit_blt_start.elapsed();
 

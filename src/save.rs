@@ -1,9 +1,58 @@
+pub mod recent;
 use crate::capture::Rect;
 use crate::settings::SaveFormat;
 use std::ffi::c_void;
+use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::core::{GUID, PCWSTR};
+
+pub fn choose_output_path(
+    owner: windows::Win32::Foundation::HWND,
+    format: SaveFormat,
+) -> windows::core::Result<Option<PathBuf>> {
+    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree};
+    use windows::Win32::UI::Shell::Common::COMDLG_FILTERSPEC;
+    use windows::Win32::UI::Shell::{
+        FOS_FORCEFILESYSTEM, FOS_OVERWRITEPROMPT, FileSaveDialog, IFileSaveDialog,
+        SIGDN_FILESYSPATH,
+    };
+    let dialog: IFileSaveDialog =
+        unsafe { CoCreateInstance(&FileSaveDialog, None, CLSCTX_INPROC_SERVER)? };
+    let name: Vec<u16> = generate_screenshot_filename_for(format)
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let extension: Vec<u16> = format.extension().encode_utf16().chain(Some(0)).collect();
+    let filter: Vec<u16> = format!("*.{}\0", format.extension())
+        .encode_utf16()
+        .collect();
+    let description: Vec<u16> = format!("{} image\0", format.extension().to_uppercase())
+        .encode_utf16()
+        .collect();
+    unsafe {
+        dialog.SetOptions(dialog.GetOptions()? | FOS_FORCEFILESYSTEM | FOS_OVERWRITEPROMPT)?;
+        dialog.SetTitle(windows::core::w!("Save your screenshot"))?;
+        dialog.SetFileName(PCWSTR(name.as_ptr()))?;
+        dialog.SetDefaultExtension(PCWSTR(extension.as_ptr()))?;
+        dialog.SetFileTypes(&[COMDLG_FILTERSPEC {
+            pszName: PCWSTR(description.as_ptr()),
+            pszSpec: PCWSTR(filter.as_ptr()),
+        }])?;
+    }
+    if let Err(error) = unsafe { dialog.Show(owner) } {
+        if error.code() == windows::core::HRESULT::from_win32(1223) {
+            return Ok(None);
+        }
+        return Err(error);
+    }
+    let raw = unsafe { dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)? };
+    let path = unsafe { raw.to_string() };
+    unsafe {
+        CoTaskMemFree(Some(raw.0.cast()));
+    }
+    Ok(Some(PathBuf::from(path?)))
+}
 
 #[repr(C)]
 struct GdiplusStartupInput {
@@ -58,10 +107,10 @@ const ENCODER_QUALITY: GUID = GUID::from_u128(0x1d5be4b5_fa4a_452d_9cdd_5db35105
 const ENCODER_PARAMETER_VALUE_TYPE_LONG: u32 = 4;
 const PIXEL_FORMAT_32BPP_ARGB: i32 = 0x0026200A;
 
-struct GdiPlusToken(usize);
+pub(crate) struct GdiPlusToken(usize);
 
 impl GdiPlusToken {
-    fn start() -> Result<Self, String> {
+    pub(crate) fn start() -> Result<Self, String> {
         let mut token = 0usize;
         let input = GdiplusStartupInput {
             gdiplus_version: 1,
@@ -84,7 +133,7 @@ impl Drop for GdiPlusToken {
     }
 }
 
-struct GdiPlusBitmap(*mut c_void);
+pub(crate) struct GdiPlusBitmap(pub(crate) *mut c_void);
 
 impl Drop for GdiPlusBitmap {
     fn drop(&mut self) {
@@ -116,6 +165,17 @@ pub fn generate_screenshot_filename_for(format: SaveFormat) -> String {
 }
 
 pub fn default_save_directory() -> PathBuf {
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{FOLDERID_Pictures, KF_FLAG_DEFAULT, SHGetKnownFolderPath};
+    if let Ok(path) = unsafe { SHGetKnownFolderPath(&FOLDERID_Pictures, KF_FLAG_DEFAULT, None) } {
+        let value = unsafe { path.to_string() };
+        unsafe {
+            CoTaskMemFree(Some(path.0.cast()));
+        }
+        if let Ok(value) = value {
+            return PathBuf::from(value).join("Screenshots");
+        }
+    }
     std::env::var_os("USERPROFILE")
         .map(PathBuf::from)
         .map(|path| path.join("Pictures").join("Screenshots"))
@@ -152,10 +212,82 @@ fn extract_selection(
         pixels[destination_start..destination_start + destination_stride]
             .copy_from_slice(&buffer[source_start..source_start + destination_stride]);
     }
+    // Screenshots are opaque. GDI does not preserve alpha when drawing into a DIB.
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        pixel[3] = 255;
+    }
     Ok((pixels, width, height))
 }
 
+/// Save As replaces the destination only after encoding and flushing a complete image.
+#[allow(clippy::too_many_arguments)]
 pub fn save_buffer_to_image(
+    buffer: &[u8],
+    full_width: i32,
+    full_height: i32,
+    selection: &Rect,
+    output_path: &Path,
+    format: SaveFormat,
+    jpeg_quality: u8,
+) -> Result<PathBuf, String> {
+    let directory = output_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?
+        .as_nanos();
+    let temporary = directory.join(format!(".isolmass-{}-{unique}.tmp", std::process::id()));
+    let result = (|| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| error.to_string())?;
+        encode_image(
+            buffer,
+            full_width,
+            full_height,
+            selection,
+            &temporary,
+            format,
+            jpeg_quality,
+        )?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&temporary)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| error.to_string())?;
+        use windows::Win32::Storage::FileSystem::{
+            MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+        };
+        let source: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
+        let destination: Vec<u16> = output_path
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        unsafe {
+            MoveFileExW(
+                PCWSTR(source.as_ptr()),
+                PCWSTR(destination.as_ptr()),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        }
+        .map_err(|error| error.to_string())?;
+        Ok(output_path.to_owned())
+    })();
+    if result.is_err()
+        && let Err(error) = std::fs::remove_file(&temporary)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        crate::diagnostics::record("save cleanup", &error.to_string());
+    }
+    result
+}
+
+fn encode_image(
     buffer: &[u8],
     full_width: i32,
     full_height: i32,
@@ -188,8 +320,7 @@ pub fn save_buffer_to_image(
 
     let wide_path: Vec<u16> = output_path
         .as_os_str()
-        .to_string_lossy()
-        .encode_utf16()
+        .encode_wide()
         .chain(Some(0))
         .collect();
 
@@ -297,7 +428,12 @@ pub fn save_screenshot(
     ));
 
     let result = (|| {
-        save_buffer_to_image(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .map_err(|error| error.to_string())?;
+        encode_image(
             buffer,
             full_width,
             full_height,
@@ -306,13 +442,38 @@ pub fn save_screenshot(
             format,
             jpeg_quality,
         )?;
-        std::fs::rename(&temp_path, &output_path).map_err(|error| {
-            format!(
-                "Could not finalize screenshot '{}': {error}",
-                output_path.display()
-            )
-        })?;
-        Ok(output_path)
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&temp_path)
+            .and_then(|file| file.sync_all())
+            .map_err(|error| error.to_string())?;
+        use windows::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
+        let source: Vec<u16> = temp_path.as_os_str().encode_wide().chain(Some(0)).collect();
+        let mut destination = output_path;
+        for _ in 0..128 {
+            let target: Vec<u16> = destination
+                .as_os_str()
+                .encode_wide()
+                .chain(Some(0))
+                .collect();
+            match unsafe {
+                MoveFileExW(
+                    PCWSTR(source.as_ptr()),
+                    PCWSTR(target.as_ptr()),
+                    MOVEFILE_WRITE_THROUGH,
+                )
+            } {
+                Ok(()) => {
+                    recent::saved(&destination);
+                    return Ok(destination);
+                }
+                Err(error) if matches!(error.code().0 as u32, 0x80070050 | 0x800700b7) => {
+                    destination = unique_output_path(&directory, format)
+                }
+                Err(error) => return Err(format!("Could not finalize the screenshot: {error}")),
+            }
+        }
+        Err("Could not reserve a unique screenshot filename.".to_string())
     })();
 
     if result.is_err() {
@@ -322,22 +483,40 @@ pub fn save_screenshot(
 }
 
 pub fn recent_screenshots(directory: &Path, limit: usize) -> std::io::Result<Vec<PathBuf>> {
-    if limit == 0 || !directory.exists() {
+    if limit == 0 {
         return Ok(Vec::new());
     }
-    let mut entries = std::fs::read_dir(directory)?
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let path = entry.path();
-            let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-            if !matches!(extension.as_str(), "png" | "jpg" | "jpeg") {
-                return None;
-            }
-            let modified = entry.metadata().ok()?.modified().ok()?;
-            Some((modified, path))
-        })
-        .collect::<Vec<_>>();
-    entries.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.0));
-    entries.truncate(limit);
-    Ok(entries.into_iter().map(|(_, path)| path).collect())
+    let mut newest = std::collections::BinaryHeap::new();
+    let started = std::time::Instant::now();
+    for entry in std::fs::read_dir(directory)? {
+        if recent::cancelled() || started.elapsed() > std::time::Duration::from_secs(2) {
+            break;
+        }
+        let entry = entry?;
+        let path = entry.path();
+        if !path
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_some_and(|value| {
+                matches!(value.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg")
+            })
+        {
+            continue;
+        }
+        let metadata = match entry.metadata() {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error),
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        newest.push(std::cmp::Reverse((metadata.modified()?, path)));
+        if newest.len() > limit.min(100) {
+            newest.pop();
+        }
+    }
+    let mut newest = newest.into_iter().map(|entry| entry.0).collect::<Vec<_>>();
+    newest.sort_unstable_by(|a, b| b.cmp(a));
+    Ok(newest.into_iter().map(|(_, path)| path).collect())
 }

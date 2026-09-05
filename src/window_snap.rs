@@ -6,14 +6,13 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GWL_EXSTYLE, GetClassNameW, GetWindowLongW, GetWindowRect, GetWindowTextLengthW,
-    GetWindowTextW, IsIconic, IsWindowVisible, WS_EX_TOOLWINDOW,
+    IsIconic, IsWindowVisible, WS_EX_TOOLWINDOW,
 };
 
 /// Information about an enumerated top-level window.
 #[derive(Debug, Clone)]
 pub struct WindowInfo {
     pub hwnd: HWND,
-    pub title: String,
     pub class_name: String,
     /// True visible bounds in screen coordinates (via DWMWA_EXTENDED_FRAME_BOUNDS).
     pub bounds: Rect,
@@ -66,15 +65,8 @@ pub fn get_visible_windows(exclude_hwnd: Option<HWND>) -> Vec<WindowInfo> {
         let ex_style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32;
         let is_tool_window = (ex_style & WS_EX_TOOLWINDOW.0) != 0;
 
-        // 5. Get window title
-        let text_len = unsafe { GetWindowTextLengthW(hwnd) };
-        let title = if text_len > 0 {
-            let mut buf = vec![0u16; (text_len + 1) as usize];
-            let read = unsafe { GetWindowTextW(hwnd, &mut buf) };
-            String::from_utf16_lossy(&buf[..read as usize])
-        } else {
-            String::new()
-        };
+        // Only title presence is needed to filter tool windows; do not copy user document titles.
+        let has_title = unsafe { GetWindowTextLengthW(hwnd) } > 0;
 
         // 6. Get window class name
         let mut class_buf = [0u16; 256];
@@ -86,13 +78,8 @@ pub fn get_visible_windows(exclude_hwnd: Option<HWND>) -> Vec<WindowInfo> {
         };
 
         // Skip tool windows that don't have titles
-        if is_tool_window && title.is_empty() {
+        if is_tool_window && !has_title {
             return BOOL(1);
-        }
-
-        // Skip internal/shell helper classes that shouldn't be snapped to
-        if class_name == "Shell_TrayWnd" && title.is_empty() {
-            // Taskbar is allowed if desirable, but ignore worker windows
         }
 
         // 7. Get true visible bounds via DWMWA_EXTENDED_FRAME_BOUNDS
@@ -126,7 +113,6 @@ pub fn get_visible_windows(exclude_hwnd: Option<HWND>) -> Vec<WindowInfo> {
 
         ctx.windows.push(WindowInfo {
             hwnd,
-            title,
             class_name,
             bounds: rect,
         });

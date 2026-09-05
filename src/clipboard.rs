@@ -1,15 +1,66 @@
 use crate::capture::Rect;
-use windows::Win32::Foundation::{GlobalFree, HANDLE, HWND};
+use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
 use windows::Win32::Graphics::Gdi::{BI_RGB, BITMAPINFOHEADER};
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
 };
 use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock};
-use windows::core::{Error, Result};
+use windows::Win32::UI::WindowsAndMessaging::{
+    CreateWindowExW, DestroyWindow, HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE,
+};
+use windows::core::{Error, Result, w};
 
 pub const CF_DIB_FORMAT: u32 = 8; // Standard Windows CF_DIB format
 
-struct ClipboardGuard;
+pub fn read_text(owner: HWND) -> Result<String> {
+    use windows::Win32::System::DataExchange::GetClipboardData;
+    use windows::Win32::System::Memory::GlobalSize;
+    unsafe {
+        OpenClipboard(owner)?;
+    }
+    let _clipboard = ClipboardGuard;
+    let handle = unsafe { GetClipboardData(13)? };
+    let memory = HGLOBAL(handle.0);
+    let size = unsafe { GlobalSize(memory) }.min(32_768);
+    let pointer = unsafe { GlobalLock(memory) };
+    if pointer.is_null() {
+        return Err(Error::from_win32());
+    }
+    let units = unsafe { std::slice::from_raw_parts(pointer.cast::<u16>(), size / 2) };
+    let length = units
+        .iter()
+        .position(|unit| *unit == 0)
+        .unwrap_or(units.len());
+    let text = String::from_utf16_lossy(&units[..length]);
+    unsafe {
+        let _ = GlobalUnlock(memory);
+    }
+    Ok(text.replace(['\r', '\n'], " ").replace('\t', "    "))
+}
+
+pub(crate) struct ClipboardGuard;
+
+struct GlobalMemory(HGLOBAL);
+
+impl Drop for GlobalMemory {
+    fn drop(&mut self) {
+        if !self.0.is_invalid() {
+            unsafe {
+                let _ = GlobalFree(self.0);
+            }
+        }
+    }
+}
+
+struct ClipboardOwner(HWND);
+
+impl Drop for ClipboardOwner {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = DestroyWindow(self.0);
+        }
+    }
+}
 
 impl Drop for ClipboardGuard {
     fn drop(&mut self) {
@@ -81,6 +132,9 @@ pub fn flatten_selection_to_dib(
         }
     }
 
+    for pixel in dib_bytes[header_size..].as_chunks_mut::<4>().0 {
+        pixel[3] = 255;
+    }
     Ok(dib_bytes)
 }
 
@@ -90,8 +144,36 @@ pub fn copy_dib_to_clipboard(hwnd: Option<HWND>, dib_data: &[u8]) -> Result<()> 
         return Err(Error::from_win32());
     }
 
-    // 1. Allocate global moveable memory
+    // A NULL owner cannot become the clipboard owner after EmptyClipboard.
+    let temporary_owner = if hwnd.is_none_or(|owner| owner.is_invalid()) {
+        Some(ClipboardOwner(unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("isolmaSS Clipboard"),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                0,
+                0,
+                HWND_MESSAGE,
+                None,
+                None,
+                None,
+            )?
+        }))
+    } else {
+        None
+    };
+    let owner = temporary_owner
+        .as_ref()
+        .map(|window| window.0)
+        .or(hwnd)
+        .unwrap_or_default();
+
+    // Keep ownership on every failure path until SetClipboardData succeeds.
     let hmem = unsafe { GlobalAlloc(GMEM_MOVEABLE, dib_data.len())? };
+    let mut allocation = GlobalMemory(hmem);
     if hmem.is_invalid() {
         return Err(Error::from_win32());
     }
@@ -99,9 +181,6 @@ pub fn copy_dib_to_clipboard(hwnd: Option<HWND>, dib_data: &[u8]) -> Result<()> 
     // 2. Lock memory and copy DIB data
     let ptr = unsafe { GlobalLock(hmem) };
     if ptr.is_null() {
-        unsafe {
-            let _ = GlobalFree(hmem);
-        }
         return Err(Error::from_win32());
     }
 
@@ -112,17 +191,14 @@ pub fn copy_dib_to_clipboard(hwnd: Option<HWND>, dib_data: &[u8]) -> Result<()> 
 
     // 3. Set clipboard data
     unsafe {
-        OpenClipboard(hwnd.unwrap_or_default())?;
+        OpenClipboard(owner)?;
     }
     let _clip_guard = ClipboardGuard;
 
     unsafe {
         EmptyClipboard()?;
-        let res = SetClipboardData(CF_DIB_FORMAT, HANDLE(hmem.0));
-        if res.is_err() {
-            let _ = GlobalFree(hmem);
-            return Err(Error::from_win32());
-        }
+        SetClipboardData(CF_DIB_FORMAT, HANDLE(hmem.0))?;
+        allocation.0 = HGLOBAL::default();
     }
 
     // On success, Windows takes ownership of hmem.

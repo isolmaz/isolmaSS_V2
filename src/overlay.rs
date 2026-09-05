@@ -19,37 +19,65 @@ use windows::Win32::Foundation::{
     RECT as WIN_RECT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, BitBlt, CLIP_DEFAULT_PRECIS,
-    CreateCompatibleDC, CreateDIBSection, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH,
-    DEFAULT_QUALITY, DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, FF_DONTCARE, FW_BOLD,
-    GdiFlush, GetDC, GetMonitorInfoW, HBITMAP, HDC, HGDIOBJ, InvalidateRect,
-    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect, RGBQUAD, ReleaseDC, SRCCOPY,
-    ScreenToClient, SelectObject, SetBkMode, SetTextColor, TRANSPARENT, TextOutW,
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BeginPaint, BitBlt, CreateCompatibleDC, CreateDIBSection,
+    DIB_RGB_COLORS, DeleteDC, DeleteObject, EndPaint, GdiFlush, GetDC, GetMonitorInfoW, HBITMAP,
+    HDC, HGDIOBJ, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromRect, RGBQUAD,
+    ReleaseDC, SRCCOPY, ScreenToClient, SelectObject,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, MOD_CONTROL, ReleaseCapture, SetCapture, SetFocus, VK_BACK, VK_CONTROL, VK_DELETE,
-    VK_ESCAPE, VK_LEFT, VK_OEM_COMMA, VK_RETURN, VK_RIGHT, VK_SHIFT,
+    VK_ESCAPE, VK_OEM_COMMA, VK_RETURN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_DBLCLKS, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GWLP_USERDATA,
-    GetCursorPos, GetMessageW, GetWindowLongPtrW, IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_IBEAM,
-    IDC_SIZEALL, IDC_SIZENESW, IDC_SIZENWSE, KillTimer, LWA_ALPHA, LoadCursorW, MA_ACTIVATE,
-    MB_ICONERROR, MB_OK, MSG, MessageBoxW, PostQuitMessage, RegisterClassExW, SW_SHOW, SetCursor,
-    SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW, ShowWindow,
-    TranslateMessage, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN,
+    CS_DBLCLKS, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetCursorPos,
+    GetWindowLongPtrW, IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_IBEAM, IDC_SIZEALL, IDC_SIZENESW,
+    IDC_SIZENWSE, KillTimer, LWA_ALPHA, LoadCursorW, MA_ACTIVATE, RegisterClassExW, SW_SHOW,
+    SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW,
+    ShowWindow, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN,
     WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_PAINT,
     WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, Result, w};
 
+mod render;
 mod session;
-pub use session::show_overlay_session;
+pub use session::{measure_overlay, show_overlay_session};
 
 const OVERLAY_CLASS_NAME: windows::core::PCWSTR = w!("isolmaSS_OverlayClass");
 
 const DEFAULT_FONT_SIZE: i32 = 22;
 const DEFAULT_BLUR_BLOCK: i32 = 12;
+const WM_EDITOR_SETTINGS: u32 = 0x8000 + 301;
+const WM_EDITOR_ERROR: u32 = 0x8000 + 302;
+const WM_EDITOR_SAVE_AS: u32 = 0x8000 + 303;
+thread_local! { static ACTION_ERROR: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) }; }
+
+pub fn tool_for_key(vk: u32) -> Option<ToolKind> {
+    match vk {
+        0x56 => Some(ToolKind::Select),
+        0x52 => Some(ToolKind::Rectangle),
+        0x41 => Some(ToolKind::Arrow),
+        0x50 => Some(ToolKind::Pen),
+        0x54 => Some(ToolKind::Text),
+        0x42 => Some(ToolKind::Blur),
+        0x4d => Some(ToolKind::Redact),
+        _ => None,
+    }
+}
+
+pub fn is_editor_shortcut(vk: u32, modifiers: u32, editing: bool) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{MOD_ALT, MOD_WIN};
+    if modifiers & (MOD_ALT.0 | MOD_WIN.0) != 0 {
+        return false;
+    }
+    if modifiers & MOD_CONTROL.0 != 0 {
+        matches!(vk, 0x43 | 0x53 | 0x5a | 0x59 | 0xbc | 37..=40)
+            || editing && matches!(vk, 0x41 | 0x56)
+    } else {
+        matches!(vk, 8 | 13 | 27 | 35..=40 | 46) || !editing && tool_for_key(vk).is_some()
+    }
+}
 
 fn selection_work_viewport(capture: &CaptureBuffer, selection: Rect) -> Rect {
     let screen_selection = WIN_RECT {
@@ -125,6 +153,7 @@ enum InProgressDrawing {
     Blur {
         start: (i32, i32),
         current: (i32, i32),
+        redact: bool,
     },
 }
 
@@ -136,6 +165,7 @@ enum DragSelectionAction {
 
 #[derive(Debug, Clone, Copy)]
 struct DragSelectionState {
+    original_selection: Rect,
     action: DragSelectionAction,
     start_pos: (i32, i32),
     last_pos: (i32, i32),
@@ -149,96 +179,8 @@ pub enum EscapeAction {
     CloseOverlay,
 }
 
-#[derive(Debug, Clone)]
-pub struct TextEditState {
-    pub pos: (i32, i32),
-    pub text: String,
-    original_text: String,
-    pub caret: usize,
-    pub color: [u8; 4],
-    pub font_size: i32,
-    pub editing_id: Option<usize>,
-    pub caret_visible: bool,
-}
-
-impl TextEditState {
-    pub fn new(
-        pos: (i32, i32),
-        text: String,
-        color: [u8; 4],
-        font_size: i32,
-        editing_id: Option<usize>,
-    ) -> Self {
-        let caret = text.chars().count();
-        let original_text = text.clone();
-        Self {
-            pos,
-            text,
-            original_text,
-            caret,
-            color,
-            font_size,
-            editing_id,
-            caret_visible: true,
-        }
-    }
-
-    pub fn insert_char(&mut self, ch: char) {
-        let mut chars: Vec<char> = self.text.chars().collect();
-        let caret = self.caret.min(chars.len());
-        chars.insert(caret, ch);
-        self.text = chars.into_iter().collect();
-        self.caret = caret + 1;
-        self.caret_visible = true;
-    }
-
-    pub fn backspace(&mut self) -> bool {
-        let mut chars: Vec<char> = self.text.chars().collect();
-        let caret = self.caret.min(chars.len());
-        if caret > 0 {
-            chars.remove(caret - 1);
-            self.text = chars.into_iter().collect();
-            self.caret = caret - 1;
-            self.caret_visible = true;
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn delete(&mut self) -> bool {
-        let mut chars: Vec<char> = self.text.chars().collect();
-        let caret = self.caret.min(chars.len());
-        if caret < chars.len() {
-            chars.remove(caret);
-            self.text = chars.into_iter().collect();
-            self.caret_visible = true;
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn move_left(&mut self) -> bool {
-        if self.caret > 0 {
-            self.caret -= 1;
-            self.caret_visible = true;
-            true
-        } else {
-            false
-        }
-    }
-
-    pub fn move_right(&mut self) -> bool {
-        if self.caret < self.text.chars().count() {
-            self.caret += 1;
-            self.caret_visible = true;
-            true
-        } else {
-            false
-        }
-    }
-}
+mod text;
+pub use text::TextEditState;
 
 #[derive(Debug, Clone, Copy)]
 enum DragObjectAction {
@@ -315,11 +257,17 @@ pub struct OverlayState {
     bits_ptr: *mut u8,
 
     committed_result: bool,
+    scene_dirty: bool,
+    base_cache: Vec<u8>,
+    cache_requested: bool,
+    pointer: (i32, i32),
+    preferences_dirty: bool,
 }
 
 impl Drop for OverlayState {
     fn drop(&mut self) {
         unregister_overlay();
+        crate::drawing::clear_text_metrics();
         unsafe {
             if !self.mem_dc.0.is_null() {
                 SelectObject(self.mem_dc, self.old_bmp);
@@ -334,20 +282,7 @@ impl Drop for OverlayState {
 
 impl OverlayState {
     pub fn handle_escape_action(&mut self) -> EscapeAction {
-        if let Some(edit) = self.text_edit.take() {
-            if let Some(id) = edit.editing_id
-                && !self.objects.iter().any(|object| object.id == id)
-            {
-                self.objects.push(AnnotationObject::new(
-                    id,
-                    AnnotationKind::Text {
-                        pos: edit.pos,
-                        text: edit.original_text,
-                        color: edit.color,
-                        font_size: edit.font_size,
-                    },
-                ));
-            }
+        if self.text_edit.take().is_some() {
             EscapeAction::CancelledTextEdit
         } else if let Some(id) = self.selected_id.take() {
             EscapeAction::DeselectedObject(id)
@@ -356,6 +291,10 @@ impl OverlayState {
             self.committed_selection = None;
             self.toolbar = None;
             self.objects.clear();
+            self.history.clear();
+            self.drawing_shape = None;
+            self.dragging_object = None;
+            self.dragging_selection = None;
             EscapeAction::CancelledSelection
         } else {
             EscapeAction::CloseOverlay
@@ -389,6 +328,11 @@ impl OverlayState {
             old_bmp: HGDIOBJ::default(),
             bits_ptr: std::ptr::null_mut(),
             committed_result: false,
+            scene_dirty: false,
+            base_cache: Vec::new(),
+            cache_requested: false,
+            pointer: (0, 0),
+            preferences_dirty: false,
         }
     }
 
@@ -431,246 +375,23 @@ impl OverlayState {
         self.committed_selection = Some(rect);
     }
 
-    fn composite_scene(&mut self) {
-        self.composite_scene_with(CompositionPolicy::EDITOR);
-    }
-
-    fn composite_scene_with(&mut self, policy: CompositionPolicy) {
-        // Synchronize the DIB's GDI target before replacing its pixels on the CPU.
-        unsafe {
-            let _ = GdiFlush();
-        }
-        let width = self.capture.width;
-        let height = self.capture.height;
-        let len = (width as usize) * (height as usize) * 4;
-        let buffer = unsafe { std::slice::from_raw_parts_mut(self.bits_ptr, len) };
-
-        match self.mode {
-            OverlayMode::Hovering => {
-                buffer.copy_from_slice(&self.capture.dimmed);
-
-                if let Some(snap) = self.hover_snap_rect {
-                    self.capture.punch_out(buffer, &snap);
-                    CaptureBuffer::draw_border(
-                        buffer,
-                        width,
-                        height,
-                        &snap,
-                        [246, 130, 59, 255],
-                        2,
-                    );
-                }
-            }
-            OverlayMode::DraggingSelection => {
-                buffer.copy_from_slice(&self.capture.dimmed);
-
-                if let Some(sel) = self.committed_selection {
-                    self.capture.punch_out(buffer, &sel);
-                    CaptureBuffer::draw_border(buffer, width, height, &sel, [246, 130, 59, 255], 2);
-                }
-            }
-            OverlayMode::SelectionActive => {
-                let Some(sel) = self.committed_selection else {
-                    return;
-                };
-
-                // 1. Reset to dimmed
-                buffer.copy_from_slice(&self.capture.dimmed);
-
-                // 2. Punch out selection
-                self.capture.punch_out(buffer, &sel);
-
-                // 3. Render blur objects
-                for obj in &self.objects {
-                    obj.render_blur(buffer, width, height);
-                }
-
-                if policy.in_progress_preview
-                    && let Some(InProgressDrawing::Blur { start, current }) = self.drawing_shape
-                {
-                    let r = Rect::normalized(start, current).clamp(width, height);
-                    crate::annotation::apply_pixelate_blur(
-                        buffer,
-                        width,
-                        height,
-                        &r,
-                        DEFAULT_BLUR_BLOCK,
-                    );
-                }
-
-                // 4. Editor-only selection border. Export pixels remain unframed.
-                if policy.selection_frame {
-                    CaptureBuffer::draw_contrast_selection(
-                        buffer,
-                        width,
-                        height,
-                        &sel,
-                        [246, 130, 59, 255],
-                    );
-                }
-
-                // 5. Render vector annotations
-                for obj in &self.objects {
-                    obj.render_gdi(self.mem_dc);
-                }
-
-                // 6. Draw in-progress preview only in the editor frame.
-                if policy.in_progress_preview {
-                    match &self.drawing_shape {
-                        Some(InProgressDrawing::Rectangle { start, current }) => {
-                            let r = Rect::normalized(*start, *current).clamp(width, height);
-                            let preview = AnnotationObject::new(
-                                0,
-                                AnnotationKind::Rectangle {
-                                    rect: r,
-                                    color: self.active_color,
-                                    thickness: self.active_thickness,
-                                },
-                            );
-                            preview.render_gdi(self.mem_dc);
-                        }
-                        Some(InProgressDrawing::Arrow { start, current }) => {
-                            let preview = AnnotationObject::new(
-                                0,
-                                AnnotationKind::Arrow {
-                                    start: *start,
-                                    end: *current,
-                                    color: self.active_color,
-                                    thickness: self.active_thickness,
-                                },
-                            );
-                            preview.render_gdi(self.mem_dc);
-                        }
-                        Some(InProgressDrawing::Pen { points }) => render_pen_preview(
-                            self.mem_dc,
-                            points,
-                            self.active_color,
-                            self.active_thickness,
-                        ),
-                        _ => {}
-                    }
-                }
-
-                // 7. Draw selection handles for selected object
-                if policy.selected_handles
-                    && let Some(obj) = self
-                        .selected_id
-                        .and_then(|id| self.objects.iter().find(|o| o.id == id))
-                {
-                    obj.render_selection_indicator(self.mem_dc);
-                }
-
-                // 8. Draw active text edit preview with font match & blinking caret
-                if policy.caret
-                    && let Some(text_edit) = &self.text_edit
-                {
-                    let wide_face: Vec<u16> = "Segoe UI\0".encode_utf16().collect();
-                    let font = unsafe {
-                        CreateFontW(
-                            text_edit.font_size,
-                            0,
-                            0,
-                            0,
-                            FW_BOLD.0 as i32,
-                            0,
-                            0,
-                            0,
-                            DEFAULT_CHARSET.0 as u32,
-                            CLIP_DEFAULT_PRECIS.0 as u32,
-                            CLIP_DEFAULT_PRECIS.0 as u32,
-                            DEFAULT_QUALITY.0 as u32,
-                            (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
-                            PCWSTR(wide_face.as_ptr()),
-                        )
-                    };
-                    let old_font = unsafe { SelectObject(self.mem_dc, HGDIOBJ(font.0)) };
-
-                    unsafe {
-                        let _ = SetTextColor(self.mem_dc, bgra_to_colorref(text_edit.color));
-                        let _ = SetBkMode(self.mem_dc, TRANSPARENT);
-                        let chars: Vec<char> = text_edit.text.chars().collect();
-                        let caret_idx = text_edit.caret.min(chars.len());
-                        let before: String = chars[..caret_idx].iter().collect();
-                        let after: String = chars[caret_idx..].iter().collect();
-                        let display_text = if text_edit.caret_visible {
-                            format!("{before}|{after}")
-                        } else {
-                            format!("{before} {after}")
-                        };
-                        let wide: Vec<u16> = display_text.encode_utf16().collect();
-                        let _ = TextOutW(self.mem_dc, text_edit.pos.0, text_edit.pos.1, &wide);
-
-                        SelectObject(self.mem_dc, old_font);
-                        let _ = DeleteObject(HGDIOBJ(font.0));
-                    }
-                }
-
-                // 9. Render the contextual L-shaped editor toolbar.
-                if policy.toolbar_and_tooltip {
-                    let can_undo = self.history.can_undo();
-                    let can_redo = self.history.can_redo();
-                    let selected = if self.active_tool == ToolKind::Select {
-                        self.selected_id
-                            .and_then(|id| self.objects.iter().find(|object| object.id == id))
-                    } else {
-                        None
-                    };
-                    let (toolbar_color, toolbar_thickness, show_color, show_thickness) =
-                        if let Some(object) = selected {
-                            (
-                                object.get_color().unwrap_or(self.active_color),
-                                object.get_thickness().unwrap_or(self.active_thickness),
-                                object.get_color().is_some(),
-                                object.get_thickness().is_some(),
-                            )
-                        } else {
-                            match self.active_tool {
-                                ToolKind::Rectangle | ToolKind::Arrow | ToolKind::Pen => {
-                                    (self.active_color, self.active_thickness, true, true)
-                                }
-                                ToolKind::Text => {
-                                    (self.active_color, self.active_thickness, true, false)
-                                }
-                                ToolKind::Blur | ToolKind::Select => {
-                                    (self.active_color, self.active_thickness, false, false)
-                                }
-                            }
-                        };
-                    let viewport = selection_work_viewport(&self.capture, sel);
-                    let mut tb = Toolbar::layout(
-                        &sel,
-                        viewport,
-                        self.active_tool,
-                        toolbar_color,
-                        toolbar_thickness,
-                        show_color,
-                        show_thickness,
-                        can_undo,
-                        can_redo,
-                        self.dpi,
-                    );
-                    if let Some(existing) = &self.toolbar {
-                        tb.hovered_item = existing.hovered_item;
-                    }
-                    tb.render(self.mem_dc);
-                    self.toolbar = Some(tb);
-                }
-            }
-        }
-        // Make the fully rebuilt backbuffer visible to the subsequent WM_PAINT copy.
-        unsafe {
-            let _ = GdiFlush();
-        }
-    }
-
     fn commit_text(&mut self, hwnd: HWND) {
         if let Some(edit) = self.text_edit.take() {
             unsafe {
                 let _ = KillTimer(hwnd, 1);
             }
             set_overlay_text_editing(false);
-            let trimmed = edit.text.trim().to_string();
-            if !trimmed.is_empty() {
+            let text = edit.text.clone();
+            if text.trim().is_empty() {
+                if let Some(index) = edit
+                    .editing_id
+                    .and_then(|id| self.objects.iter().position(|o| o.id == id))
+                {
+                    let object = self.objects.remove(index);
+                    self.history.record(EditCommand::Delete { object, index });
+                }
+                self.selected_id = None;
+            } else {
                 let (obj_id, is_modify) = if let Some(existing_id) = edit.editing_id {
                     (existing_id, true)
                 } else {
@@ -681,7 +402,7 @@ impl OverlayState {
 
                 let new_kind = AnnotationKind::Text {
                     pos: edit.pos,
-                    text: trimmed,
+                    text,
                     color: edit.color,
                     font_size: edit.font_size,
                 };
@@ -725,6 +446,9 @@ impl OverlayState {
     }
 
     fn handle_key_down(&mut self, hwnd: HWND, vk: usize, mods: isize) -> LRESULT {
+        if !is_editor_shortcut(vk as u32, mods as u32, self.text_edit.is_some()) {
+            return LRESULT(0);
+        }
         let ctrl_down = (mods & MOD_CONTROL.0 as isize) != 0
             || ((unsafe { GetKeyState(VK_CONTROL.0 as i32) } as u16 & 0x8000) != 0);
 
@@ -748,56 +472,78 @@ impl OverlayState {
             return LRESULT(0);
         }
 
+        // Settings is also available while text is being edited. Dispatch after
+        // releasing this borrow, and keep the current text edit intact.
+        if ctrl_down && vk == VK_OEM_COMMA.0 as usize {
+            unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                    hwnd,
+                    WM_EDITOR_SETTINGS,
+                    WPARAM(0),
+                    LPARAM(0),
+                );
+            }
+            return LRESULT(0);
+        }
+
         // 2. Text editing owns keys, except copy: commit first so the flattened
         // screenshot contains the final text and never includes editor affordances.
         if self.text_edit.is_some() {
-            if self.mode == OverlayMode::SelectionActive && ctrl_down && vk == 'C' as usize {
+            if ctrl_down && matches!(vk as u8, b'C' | b'S') {
                 self.commit_text(hwnd);
+            } else if vk == VK_RETURN.0 as usize {
+                self.commit_text(hwnd);
+                return LRESULT(0);
             } else {
-                match vk {
-                    x if x == VK_RETURN.0 as usize => {
-                        self.commit_text(hwnd);
-                        return LRESULT(0);
-                    }
-                    x if x == VK_BACK.0 as usize => {
-                        if let Some(edit) = &mut self.text_edit
-                            && edit.backspace()
-                        {
-                            self.redraw(hwnd);
+                if ctrl_down && vk == 'V' as usize {
+                    match crate::clipboard::read_text(hwnd) {
+                        Ok(text) => {
+                            if let Some(edit) = &mut self.text_edit {
+                                edit.insert_text(&text);
+                            }
                         }
-                        return LRESULT(0);
-                    }
-                    x if x == VK_DELETE.0 as usize => {
-                        if let Some(edit) = &mut self.text_edit
-                            && edit.delete()
-                        {
-                            self.redraw(hwnd);
+                        Err(error) => {
+                            Self::show_action_error(hwnd, "Paste text", &error.to_string())
                         }
-                        return LRESULT(0);
                     }
-                    x if x == VK_LEFT.0 as usize => {
-                        if let Some(edit) = &mut self.text_edit
-                            && edit.move_left()
-                        {
-                            self.redraw(hwnd);
+                } else if let Some(edit) = &mut self.text_edit {
+                    let shift =
+                        mods as u32 & windows::Win32::UI::Input::KeyboardAndMouse::MOD_SHIFT.0 != 0;
+                    match vk {
+                        8 => {
+                            edit.backspace();
                         }
-                        return LRESULT(0);
-                    }
-                    x if x == VK_RIGHT.0 as usize => {
-                        if let Some(edit) = &mut self.text_edit
-                            && edit.move_right()
-                        {
-                            self.redraw(hwnd);
+                        46 => {
+                            edit.delete();
                         }
-                        return LRESULT(0);
+                        37 => edit.move_to(edit.caret.saturating_sub(1), shift),
+                        39 => edit.move_to(edit.caret + 1, shift),
+                        36 => edit.move_to(0, shift),
+                        35 => edit.move_to(edit.text.chars().count(), shift),
+                        0x41 if ctrl_down => edit.select_all(),
+                        0x5a if ctrl_down => edit.undo(),
+                        0x59 if ctrl_down => edit.redo(),
+                        _ => {}
                     }
-                    _ => return LRESULT(0),
                 }
+                self.redraw(hwnd);
+                return LRESULT(0);
             }
         }
 
         // 3. Save shortcut: Ctrl+S
         if self.mode == OverlayMode::SelectionActive && ctrl_down && vk == 'S' as usize {
+            if mods as u32 & windows::Win32::UI::Input::KeyboardAndMouse::MOD_SHIFT.0 != 0 {
+                unsafe {
+                    let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                        hwnd,
+                        WM_EDITOR_SAVE_AS,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
+                }
+                return LRESULT(0);
+            }
             match self.save_selection_to_file() {
                 Ok(path) => {
                     if self.settings.notify_after_save {
@@ -813,23 +559,6 @@ impl OverlayState {
                     }
                 }
                 Err(error) => Self::show_action_error(hwnd, "Save", &error),
-            }
-            return LRESULT(0);
-        }
-
-        // 4. Settings shortcut: Ctrl+,
-        if ctrl_down && vk == VK_OEM_COMMA.0 as usize {
-            match show_settings_dialog(&self.settings, Some(hwnd)) {
-                Ok(Some(new_cfg)) => {
-                    self.active_color = new_cfg.default_color;
-                    self.active_thickness = new_cfg.default_thickness;
-                    self.settings = new_cfg;
-                    self.redraw(hwnd);
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    eprintln!("[isolmaSS] Settings dialog failed: {e}");
-                }
             }
             return LRESULT(0);
         }
@@ -854,6 +583,9 @@ impl OverlayState {
         // 6. Undo: Ctrl+Z
         if ctrl_down && vk == 'Z' as usize {
             self.history.undo(&mut self.objects);
+            if let Some(selection) = self.history.take_selection_update() {
+                self.committed_selection = Some(selection);
+            }
             self.selected_id = None;
             self.redraw(hwnd);
             return LRESULT(0);
@@ -862,6 +594,9 @@ impl OverlayState {
         // 7. Redo: Ctrl+Y
         if ctrl_down && vk == 'Y' as usize {
             self.history.redo(&mut self.objects);
+            if let Some(selection) = self.history.take_selection_update() {
+                self.committed_selection = Some(selection);
+            }
             self.selected_id = None;
             self.redraw(hwnd);
             return LRESULT(0);
@@ -875,76 +610,114 @@ impl OverlayState {
                 .and_then(|id| self.objects.iter().position(|o| o.id == id))
         {
             let removed = self.objects.remove(pos);
-            self.history.record(EditCommand::Delete(removed));
+            self.history.record(EditCommand::Delete {
+                object: removed,
+                index: pos,
+            });
             self.redraw(hwnd);
             return LRESULT(0);
         }
 
-        // 9. Tool switching shortcuts (R, A, P, T, B)
-        if !ctrl_down {
-            match vk as u8 as char {
-                'V' | 'v' => {
-                    self.active_tool = ToolKind::Select;
-                    self.persist_editor_preferences();
-                    self.redraw(hwnd);
-                    return LRESULT(0);
-                }
-                'R' | 'r' => {
-                    self.active_tool = ToolKind::Rectangle;
-                    self.persist_editor_preferences();
-                    self.selected_id = None;
-                    self.redraw(hwnd);
-                    return LRESULT(0);
-                }
-                'A' | 'a' => {
-                    self.active_tool = ToolKind::Arrow;
-                    self.persist_editor_preferences();
-                    self.selected_id = None;
-                    self.redraw(hwnd);
-                    return LRESULT(0);
-                }
-                'P' | 'p' => {
-                    self.active_tool = ToolKind::Pen;
-                    self.persist_editor_preferences();
-                    self.selected_id = None;
-                    self.redraw(hwnd);
-                    return LRESULT(0);
-                }
-                'T' | 't' => {
-                    self.active_tool = ToolKind::Text;
-                    self.persist_editor_preferences();
-                    self.selected_id = None;
-                    self.redraw(hwnd);
-                    return LRESULT(0);
-                }
-                'B' | 'b' => {
-                    self.active_tool = ToolKind::Blur;
-                    self.persist_editor_preferences();
-                    self.selected_id = None;
-                    self.redraw(hwnd);
-                    return LRESULT(0);
-                }
-                _ => {}
-            }
+        if !ctrl_down && let Some(tool) = tool_for_key(vk as u32) {
+            self.active_tool = tool;
+            self.selected_id = None;
+            self.persist_editor_preferences();
+            self.redraw(hwnd);
         }
-
+        if (37..=40).contains(&vk) && self.mode == OverlayMode::SelectionActive {
+            let amount =
+                if mods as u32 & windows::Win32::UI::Input::KeyboardAndMouse::MOD_SHIFT.0 != 0 {
+                    10
+                } else {
+                    1
+                };
+            let (dx, dy) = match vk {
+                37 => (-amount, 0),
+                38 => (0, -amount),
+                39 => (amount, 0),
+                _ => (0, amount),
+            };
+            if let Some(object) = self
+                .selected_id
+                .and_then(|id| self.objects.iter_mut().find(|o| o.id == id))
+            {
+                let old_kind = object.kind.clone();
+                let bounds = object.geometry_bounds();
+                let limit = self.committed_selection.unwrap_or(Rect::new(
+                    0,
+                    0,
+                    self.capture.width,
+                    self.capture.height,
+                ));
+                let dx = if bounds.width() <= limit.width() {
+                    dx.clamp(limit.left - bounds.left, limit.right - bounds.right)
+                } else {
+                    0
+                };
+                let dy = if bounds.height() <= limit.height() {
+                    dy.clamp(limit.top - bounds.top, limit.bottom - bounds.bottom)
+                } else {
+                    0
+                };
+                object.translate(dx, dy);
+                self.history.record(EditCommand::Modify {
+                    id: object.id,
+                    old_kind,
+                    new_kind: object.kind.clone(),
+                });
+            } else if let Some(before) = self.committed_selection {
+                let mut after = before;
+                let shift = if ctrl_down {
+                    after.right = (after.right + dx)
+                        .clamp((after.left + 8).min(self.capture.width), self.capture.width);
+                    after.bottom = (after.bottom + dy).clamp(
+                        (after.top + 8).min(self.capture.height),
+                        self.capture.height,
+                    );
+                    (0, 0)
+                } else {
+                    let dx = dx.clamp(-before.left, self.capture.width - before.right);
+                    let dy = dy.clamp(-before.top, self.capture.height - before.bottom);
+                    after.left += dx;
+                    after.right += dx;
+                    after.top += dy;
+                    after.bottom += dy;
+                    for object in &mut self.objects {
+                        object.translate(dx, dy);
+                    }
+                    (dx, dy)
+                };
+                if after != before {
+                    self.history.record(EditCommand::Selection {
+                        before,
+                        after,
+                        shift,
+                    });
+                    self.committed_selection = Some(after);
+                }
+            }
+            self.redraw(hwnd);
+        }
         LRESULT(0)
     }
 
     fn handle_char(&mut self, hwnd: HWND, ch_code: u32) -> LRESULT {
-        if let Some(edit) = &mut self.text_edit
-            && let Some(ch) = char::from_u32(ch_code)
-            && (!ch.is_control() || ch == '\t')
-        {
-            edit.insert_char(ch);
+        if let Some(edit) = &mut self.text_edit {
+            edit.insert_utf16(ch_code);
             self.redraw(hwnd);
-            return LRESULT(0);
         }
         LRESULT(0)
     }
 
     fn redraw(&mut self, hwnd: HWND) {
-        self.composite_scene();
+        self.base_cache.clear();
+        self.redraw_chrome(hwnd);
+        self.cache_requested = false;
+    }
+
+    fn redraw_chrome(&mut self, hwnd: HWND) {
+        self.cache_requested = true;
+        self.scene_dirty = true;
         unsafe {
             let _ = InvalidateRect(hwnd, None, false);
         }
@@ -957,6 +730,13 @@ impl OverlayState {
     }
 
     fn commit_selection(&mut self, hwnd: HWND, rect: Rect) {
+        let rect = rect.clamp(self.capture.width, self.capture.height);
+        if rect.width() < 8 || rect.height() < 8 {
+            self.mode = OverlayMode::Hovering;
+            self.committed_selection = None;
+            self.redraw(hwnd);
+            return;
+        }
         self.mode = OverlayMode::SelectionActive;
         self.committed_selection = Some(rect);
         self.hover_snap_rect = None;
@@ -965,16 +745,15 @@ impl OverlayState {
     }
 
     fn show_action_error(hwnd: HWND, action: &str, error: &str) {
-        let title: Vec<u16> = format!("isolmaSS - {action} failed\0")
-            .encode_utf16()
-            .collect();
-        let message: Vec<u16> = format!("{error}\0").encode_utf16().collect();
+        ACTION_ERROR.with(|pending| {
+            *pending.borrow_mut() = Some((format!("{action} failed"), error.to_string()))
+        });
         unsafe {
-            let _ = MessageBoxW(
+            let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
                 hwnd,
-                PCWSTR(message.as_ptr()),
-                PCWSTR(title.as_ptr()),
-                MB_OK | MB_ICONERROR,
+                WM_EDITOR_ERROR,
+                WPARAM(0),
+                LPARAM(0),
             );
         }
     }
@@ -997,7 +776,9 @@ impl OverlayState {
                     .map_err(|error| format!("Windows rejected the clipboard image: {error}"))
             });
 
-        self.composite_scene();
+        if result.is_err() || !self.settings.close_after_action {
+            self.composite_scene();
+        }
         if result.is_ok() {
             self.committed_result = true;
         }
@@ -1025,7 +806,9 @@ impl OverlayState {
             self.settings.jpeg_quality,
         );
 
-        self.composite_scene();
+        if result.is_err() || !self.settings.close_after_action {
+            self.composite_scene();
+        }
         if result.is_ok() {
             self.committed_result = true;
         }
@@ -1092,9 +875,7 @@ impl OverlayState {
         self.settings.default_color = self.active_color;
         self.settings.default_thickness = self.active_thickness;
         self.settings.last_tool = self.active_tool;
-        if let Err(error) = self.settings.save() {
-            eprintln!("[isolmaSS] Could not persist editor preferences: {error}");
-        }
+        self.preferences_dirty = true;
     }
 }
 
@@ -1106,7 +887,119 @@ unsafe extern "system" fn overlay_wnd_proc(
 ) -> LRESULT {
     let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut OverlayState;
 
+    if crate::hotkey::overlay_input_suspended()
+        && matches!(
+            msg,
+            WM_OVERLAY_KEYDOWN
+                | WM_OVERLAY_CHAR
+                | WM_CHAR
+                | WM_KEYDOWN
+                | WM_LBUTTONDOWN
+                | WM_LBUTTONUP
+                | WM_MOUSEMOVE
+                | WM_LBUTTONDBLCLK
+                | WM_RBUTTONUP
+                | WM_TIMER
+                | WM_EDITOR_SETTINGS
+        )
+    {
+        return LRESULT(0);
+    }
     match msg {
+        WM_EDITOR_SAVE_AS => {
+            if state_ptr.is_null() {
+                return LRESULT(0);
+            }
+            let format = unsafe { (*state_ptr).settings.save_format };
+            let _suspension = crate::hotkey::OverlayInputSuspension::new();
+            let path = crate::save::choose_output_path(hwnd, format);
+            if !unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(hwnd).as_bool() } {
+                return LRESULT(0);
+            }
+            match path {
+                Ok(Some(path)) => {
+                    let state = unsafe { &mut *state_ptr };
+                    if let Some(selection) = state.committed_selection {
+                        state.composite_scene_with(CompositionPolicy::EXPORT);
+                        let capture = &state.capture;
+                        let pixels = unsafe {
+                            std::slice::from_raw_parts(
+                                state.bits_ptr,
+                                capture.width as usize * capture.height as usize * 4,
+                            )
+                        };
+                        let result = crate::save::save_buffer_to_image(
+                            pixels,
+                            capture.width,
+                            capture.height,
+                            &selection,
+                            &path,
+                            format,
+                            state.settings.jpeg_quality,
+                        );
+                        match result {
+                            Ok(path) => {
+                                crate::save::recent::saved(&path);
+                                state.committed_result = true;
+                                if state.settings.close_after_action {
+                                    unsafe {
+                                        let _ = DestroyWindow(hwnd);
+                                    }
+                                } else {
+                                    state.redraw(hwnd);
+                                }
+                            }
+                            Err(error) => {
+                                state.redraw(hwnd);
+                                OverlayState::show_action_error(hwnd, "Save", &error);
+                            }
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    crate::ui::error(hwnd, "Save could not be opened", &error.to_string())
+                }
+            }
+            LRESULT(0)
+        }
+        WM_EDITOR_SETTINGS => {
+            if state_ptr.is_null() {
+                return LRESULT(0);
+            }
+            let settings = unsafe { (*state_ptr).settings.clone() };
+            let result = show_settings_dialog(&settings, Some(hwnd));
+            if unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(hwnd).as_bool() } {
+                match result {
+                    Ok(Some(settings)) => {
+                        let state = unsafe { &mut *state_ptr };
+                        state.active_color = settings.default_color;
+                        state.active_thickness = settings.default_thickness;
+                        state.settings = settings;
+                        state.preferences_dirty = false;
+                        state.redraw(hwnd);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        crate::ui::error(hwnd, "Settings could not be opened", &error.to_string())
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        WM_EDITOR_ERROR => {
+            let error = ACTION_ERROR.with(|pending| pending.borrow_mut().take());
+            if let Some((title, message)) = error {
+                crate::ui::error(hwnd, &title, &message);
+            }
+            LRESULT(0)
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_NCDESTROY => {
+            unsafe {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
         WM_MOUSEACTIVATE => LRESULT(MA_ACTIVATE as isize),
 
         WM_SETCURSOR => {
@@ -1160,7 +1053,7 @@ unsafe extern "system" fn overlay_wnd_proc(
                 let state = unsafe { &mut *state_ptr };
                 if let Some(edit) = &mut state.text_edit {
                     edit.caret_visible = !edit.caret_visible;
-                    state.redraw(hwnd);
+                    state.redraw_chrome(hwnd);
                 }
             }
             LRESULT(0)
@@ -1189,7 +1082,7 @@ unsafe extern "system" fn overlay_wnd_proc(
                             false
                         }
                     }) {
-                        let obj = state.objects.remove(pos);
+                        let obj = state.objects[pos].clone();
                         if let AnnotationKind::Text {
                             pos: t_pos,
                             text,
@@ -1221,7 +1114,11 @@ unsafe extern "system" fn overlay_wnd_proc(
 
         WM_PAINT => {
             if !state_ptr.is_null() {
-                let state = unsafe { &*state_ptr };
+                let state = unsafe { &mut *state_ptr };
+                if state.scene_dirty {
+                    state.composite_scene();
+                    state.scene_dirty = false;
+                }
                 let mut ps = windows::Win32::Graphics::Gdi::PAINTSTRUCT::default();
                 let hdc = unsafe { BeginPaint(hwnd, &mut ps) };
 
@@ -1258,6 +1155,7 @@ unsafe extern "system" fn overlay_wnd_proc(
                 let client_x = (lparam.0 as i32) as i16 as i32;
                 let client_y = ((lparam.0 >> 16) as i32) as i16 as i32;
                 let pt = (client_x, client_y);
+                state.pointer = pt;
 
                 let shift_down = (unsafe { GetKeyState(VK_SHIFT.0 as i32) } as u16 & 0x8000) != 0;
 
@@ -1349,20 +1247,28 @@ unsafe extern "system" fn overlay_wnd_proc(
                                     DragSelectionAction::Resize(zone) => {
                                         match zone {
                                             SelectionHitZone::TopLeftCorner => {
-                                                sel.left = client_x.clamp(0, sel.right - 8);
-                                                sel.top = client_y.clamp(0, sel.bottom - 8);
+                                                sel.left =
+                                                    client_x.clamp(0, (sel.right - 8).max(0));
+                                                sel.top =
+                                                    client_y.clamp(0, (sel.bottom - 8).max(0));
                                             }
                                             SelectionHitZone::TopRightCorner => {
-                                                sel.right = client_x.clamp(sel.left + 8, max_w);
-                                                sel.top = client_y.clamp(0, sel.bottom - 8);
+                                                sel.right = client_x
+                                                    .clamp((sel.left + 8).min(max_w), max_w);
+                                                sel.top =
+                                                    client_y.clamp(0, (sel.bottom - 8).max(0));
                                             }
                                             SelectionHitZone::BottomLeftCorner => {
-                                                sel.left = client_x.clamp(0, sel.right - 8);
-                                                sel.bottom = client_y.clamp(sel.top + 8, max_h);
+                                                sel.left =
+                                                    client_x.clamp(0, (sel.right - 8).max(0));
+                                                sel.bottom =
+                                                    client_y.clamp((sel.top + 8).min(max_h), max_h);
                                             }
                                             SelectionHitZone::BottomRightCorner => {
-                                                sel.right = client_x.clamp(sel.left + 8, max_w);
-                                                sel.bottom = client_y.clamp(sel.top + 8, max_h);
+                                                sel.right = client_x
+                                                    .clamp((sel.left + 8).min(max_w), max_w);
+                                                sel.bottom =
+                                                    client_y.clamp((sel.top + 8).min(max_h), max_h);
                                             }
                                             _ => {}
                                         }
@@ -1372,6 +1278,7 @@ unsafe extern "system" fn overlay_wnd_proc(
                             }
 
                             state.dragging_selection = Some(DragSelectionState {
+                                original_selection: drag.original_selection,
                                 action: drag.action,
                                 start_pos: drag.start_pos,
                                 last_pos: pt,
@@ -1451,8 +1358,16 @@ unsafe extern "system" fn overlay_wnd_proc(
                                         pt
                                     };
                                 }
-                                InProgressDrawing::Pen { points } => points.push(pt),
-                                InProgressDrawing::Blur { start, current } => {
+                                InProgressDrawing::Pen { points } => {
+                                    if points.len() < 32_768
+                                        && points.last().is_none_or(|last| {
+                                            (last.0 - pt.0).abs() + (last.1 - pt.1).abs() >= 2
+                                        })
+                                    {
+                                        points.push(pt);
+                                    }
+                                }
+                                InProgressDrawing::Blur { start, current, .. } => {
                                     *current = if shift_down {
                                         snap_square(*start, pt)
                                     } else {
@@ -1460,13 +1375,13 @@ unsafe extern "system" fn overlay_wnd_proc(
                                     };
                                 }
                             }
-                            state.redraw(hwnd);
+                            state.redraw_chrome(hwnd);
                             return LRESULT(0);
                         }
 
                         // 4. Toolbar hover update
                         if state.toolbar.as_mut().is_some_and(|tb| tb.update_hover(pt)) {
-                            state.redraw(hwnd);
+                            state.redraw_chrome(hwnd);
                         }
                     }
                 }
@@ -1508,11 +1423,17 @@ unsafe extern "system" fn overlay_wnd_proc(
                                 }
                                 ToolbarItem::Action(ToolbarAction::Undo) => {
                                     state.history.undo(&mut state.objects);
+                                    if let Some(selection) = state.history.take_selection_update() {
+                                        state.committed_selection = Some(selection);
+                                    }
                                     state.selected_id = None;
                                     state.redraw(hwnd);
                                 }
                                 ToolbarItem::Action(ToolbarAction::Redo) => {
                                     state.history.redo(&mut state.objects);
+                                    if let Some(selection) = state.history.take_selection_update() {
+                                        state.committed_selection = Some(selection);
+                                    }
                                     state.selected_id = None;
                                     state.redraw(hwnd);
                                 }
@@ -1550,25 +1471,23 @@ unsafe extern "system" fn overlay_wnd_proc(
                                         }
                                     }
                                 }
-                                ToolbarItem::Action(ToolbarAction::Settings) => {
-                                    match show_settings_dialog(&state.settings, Some(hwnd)) {
-                                        Ok(Some(new_cfg)) => {
-                                            state.active_color = new_cfg.default_color;
-                                            state.active_thickness = new_cfg.default_thickness;
-                                            state.settings = new_cfg;
-                                            state.redraw(hwnd);
-                                        }
-                                        Ok(None) => {}
-                                        Err(e) => {
-                                            eprintln!("[isolmaSS] Settings dialog error: {e}");
-                                        }
-                                    }
-                                }
+                                ToolbarItem::Action(ToolbarAction::Settings) => unsafe {
+                                    let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                                        hwnd,
+                                        WM_EDITOR_SETTINGS,
+                                        WPARAM(0),
+                                        LPARAM(0),
+                                    );
+                                },
                                 ToolbarItem::Action(ToolbarAction::Cancel) => {
                                     state.mode = OverlayMode::Hovering;
                                     state.committed_selection = None;
                                     state.toolbar = None;
                                     state.objects.clear();
+                                    state.history.clear();
+                                    state.drawing_shape = None;
+                                    state.dragging_object = None;
+                                    state.dragging_selection = None;
                                     state.selected_id = None;
                                     state.redraw(hwnd);
                                 }
@@ -1646,6 +1565,7 @@ unsafe extern "system" fn overlay_wnd_proc(
                                 | SelectionHitZone::BottomLeftCorner
                                 | SelectionHitZone::BottomRightCorner => {
                                     state.dragging_selection = Some(DragSelectionState {
+                                        original_selection: sel,
                                         action: DragSelectionAction::Resize(zone),
                                         start_pos: pt,
                                         last_pos: pt,
@@ -1656,6 +1576,7 @@ unsafe extern "system" fn overlay_wnd_proc(
                                 }
                                 SelectionHitZone::BorderEdge => {
                                     state.dragging_selection = Some(DragSelectionState {
+                                        original_selection: sel,
                                         action: DragSelectionAction::Move,
                                         start_pos: pt,
                                         last_pos: pt,
@@ -1709,6 +1630,10 @@ unsafe extern "system" fn overlay_wnd_proc(
                                         state.committed_selection = None;
                                         state.toolbar = None;
                                         state.objects.clear();
+                                        state.history.clear();
+                                        state.drawing_shape = None;
+                                        state.dragging_object = None;
+                                        state.dragging_selection = None;
                                         state.redraw(hwnd);
                                     }
                                 }
@@ -1746,8 +1671,9 @@ unsafe extern "system" fn overlay_wnd_proc(
                                     set_overlay_text_editing(true);
                                     state.redraw(hwnd);
                                 }
-                                ToolKind::Blur => {
+                                ToolKind::Blur | ToolKind::Redact => {
                                     state.drawing_shape = Some(InProgressDrawing::Blur {
+                                        redact: state.active_tool == ToolKind::Redact,
                                         start: pt,
                                         current: pt,
                                     });
@@ -1813,7 +1739,7 @@ unsafe extern "system" fn overlay_wnd_proc(
                                 let drag_rect = Rect::normalized(start, final_pt)
                                     .clamp(state.capture.width, state.capture.height);
 
-                                if drag_rect.width() > 4 && drag_rect.height() > 4 {
+                                if drag_rect.width() >= 8 && drag_rect.height() >= 8 {
                                     state.commit_selection(hwnd, drag_rect);
                                 } else {
                                     state.mode = OverlayMode::Hovering;
@@ -1824,12 +1750,21 @@ unsafe extern "system" fn overlay_wnd_proc(
                     }
                     OverlayMode::SelectionActive => {
                         if let Some(drag) = state.dragging_selection.take() {
-                            if let DragSelectionAction::Move = drag.action {
-                                let total_dx = drag.last_pos.0 - drag.start_pos.0;
-                                let total_dy = drag.last_pos.1 - drag.start_pos.1;
-                                if total_dx != 0 || total_dy != 0 {
-                                    // Smoothly moved
-                                }
+                            if let Some(after) = state
+                                .committed_selection
+                                .filter(|after| *after != drag.original_selection)
+                            {
+                                let before = drag.original_selection;
+                                let shift = if drag.action == DragSelectionAction::Move {
+                                    (after.left - before.left, after.top - before.top)
+                                } else {
+                                    (0, 0)
+                                };
+                                state.history.record(EditCommand::Selection {
+                                    before,
+                                    after,
+                                    shift,
+                                });
                             }
                             state.redraw(hwnd);
                             return LRESULT(0);
@@ -1918,7 +1853,11 @@ unsafe extern "system" fn overlay_wnd_proc(
                                         None
                                     }
                                 }
-                                InProgressDrawing::Blur { start, current } => {
+                                InProgressDrawing::Blur {
+                                    start,
+                                    current,
+                                    redact,
+                                } => {
                                     let final_cur = if shift_down {
                                         snap_square(start, current)
                                     } else {
@@ -1929,9 +1868,13 @@ unsafe extern "system" fn overlay_wnd_proc(
                                     if r.width() >= 6 && r.height() >= 6 {
                                         Some(AnnotationObject::new(
                                             state.next_id,
-                                            AnnotationKind::Blur {
-                                                rect: r,
-                                                block_size: DEFAULT_BLUR_BLOCK,
+                                            if redact {
+                                                AnnotationKind::Redact { rect: r }
+                                            } else {
+                                                AnnotationKind::Blur {
+                                                    rect: r,
+                                                    block_size: DEFAULT_BLUR_BLOCK,
+                                                }
                                             },
                                         ))
                                     } else {
@@ -1968,7 +1911,12 @@ unsafe extern "system" fn overlay_wnd_proc(
         WM_OVERLAY_KEYDOWN | WM_KEYDOWN => {
             if !state_ptr.is_null() {
                 let state = unsafe { &mut *state_ptr };
-                return state.handle_key_down(hwnd, wparam.0, lparam.0);
+                let modifiers = if msg == WM_OVERLAY_KEYDOWN {
+                    lparam.0
+                } else {
+                    crate::hotkey::get_current_modifiers() as isize
+                };
+                return state.handle_key_down(hwnd, wparam.0, modifiers);
             }
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
@@ -2014,9 +1962,6 @@ unsafe extern "system" fn overlay_wnd_proc(
 
         WM_DESTROY => {
             unregister_overlay();
-            unsafe {
-                PostQuitMessage(0);
-            }
             LRESULT(0)
         }
 

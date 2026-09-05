@@ -1,15 +1,8 @@
 use crate::annotation::{ToolKind, bgra_to_colorref};
 use crate::capture::Rect;
 use crate::settings::{PRESET_COLORS, PRESET_THICKNESSES};
-use windows::Win32::Foundation::{COLORREF, POINT, RECT};
-use windows::Win32::Graphics::Gdi::{
-    CLIP_DEFAULT_PRECIS, CreateFontW, CreatePen, CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_PITCH,
-    DEFAULT_QUALITY, DT_CENTER, DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW, FF_DONTCARE,
-    FW_BOLD, HDC, HFONT, HGDIOBJ, PS_SOLID, Polyline, RoundRect, SelectObject, SetBkMode,
-    SetTextColor, TRANSPARENT,
-};
-use windows::core::PCWSTR;
-
+use windows::Win32::Foundation::{COLORREF, POINT};
+use windows::Win32::Graphics::Gdi::{HDC, PS_SOLID, Polyline};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolbarAction {
     Undo,
@@ -47,24 +40,9 @@ pub struct Toolbar {
     viewport: Rect,
 }
 
-struct FontGuard {
-    hdc: HDC,
-    old_font: HGDIOBJ,
-    font: HFONT,
-}
-
-impl Drop for FontGuard {
-    fn drop(&mut self) {
-        unsafe {
-            SelectObject(self.hdc, self.old_font);
-            let _ = DeleteObject(HGDIOBJ(self.font.0));
-        }
-    }
-}
-
 impl Toolbar {
-    pub const TOOL_BUTTON: i32 = 34;
-    pub const ACTION_HEIGHT: i32 = 42;
+    pub const TOOL_BUTTON: i32 = 40;
+    pub const ACTION_HEIGHT: i32 = 52;
 
     /// Builds a Lightshot-style tool rail beside the selection and a compact
     /// action strip below it. Each panel flips to the opposite edge as needed.
@@ -94,6 +72,7 @@ impl Toolbar {
             (ToolbarItem::Tool(ToolKind::Pen), true),
             (ToolbarItem::Tool(ToolKind::Text), true),
             (ToolbarItem::Tool(ToolKind::Blur), true),
+            (ToolbarItem::Tool(ToolKind::Redact), true),
             (ToolbarItem::Action(ToolbarAction::Undo), can_undo),
             (ToolbarItem::Action(ToolbarAction::Redo), can_redo),
         ];
@@ -102,12 +81,12 @@ impl Toolbar {
             + tool_items.len() as i32 * tool_button
             + (tool_items.len() as i32 - 1) * scale(3);
 
-        let color_size = scale(20);
-        let color_step = scale(23);
+        let color_size = scale(24);
+        let color_step = scale(28);
         let thickness_width = scale(28);
         let thickness_step = scale(31);
-        let action_button = scale(34);
-        let action_step = scale(37);
+        let action_button = scale(40);
+        let action_step = scale(44);
         let section_gap = scale(12);
         let colors_width = if show_color {
             PRESET_COLORS.len() as i32 * color_step - (color_step - color_size)
@@ -125,6 +104,7 @@ impl Toolbar {
             + thicknesses_width
             + style_sections * section_gap
             + 4 * action_step
+            + scale(64)
             - (action_step - action_button);
         let action_height = scale(Self::ACTION_HEIGHT);
         let safe = Rect::new(
@@ -294,12 +274,55 @@ impl Toolbar {
             ToolbarAction::Cancel,
         ] {
             let y = action_bounds.top + (action_height - action_button) / 2;
+            let button_width = action_button
+                + if matches!(action, ToolbarAction::Save | ToolbarAction::Copy) {
+                    scale(32)
+                } else {
+                    0
+                };
             buttons.push(ToolbarButton {
                 item: ToolbarItem::Action(action),
-                rect: Rect::new(x, y, x + action_button, y + action_button),
+                rect: Rect::new(x, y, x + button_width, y + action_button),
                 is_enabled: true,
             });
-            x += action_step;
+            x += button_width + scale(4);
+        }
+        if tool_height + action_height > safe.height() || action_width > safe.width() {
+            // A grid keeps every command reachable on short/high-DPI work areas.
+            let count = buttons.len() as i32;
+            let mut cell = scale(44).max(1);
+            loop {
+                let cols = (safe.width() / cell).max(1);
+                let rows = (count + cols - 1) / cols;
+                if rows * cell <= safe.height() || cell <= 8 {
+                    break;
+                }
+                cell -= 1;
+            }
+            let cols = (safe.width() / cell).max(1).min(count);
+            let rows = (count + cols - 1) / cols;
+            let bounds = Rect::new(
+                safe.left,
+                safe.bottom - rows * cell,
+                safe.left + cols * cell,
+                safe.bottom,
+            );
+            for (index, button) in buttons.iter_mut().enumerate() {
+                let x = bounds.left + index as i32 % cols * cell;
+                let y = bounds.top + index as i32 / cols * cell;
+                button.rect = Rect::new(x + 2, y + 2, x + cell - 2, y + cell - 2);
+            }
+            return Self {
+                tool_bounds: bounds,
+                action_bounds: bounds,
+                buttons,
+                hovered_item: None,
+                active_tool,
+                active_color,
+                active_thickness,
+                dpi: (cell * 96 / 44).max(24) as u32,
+                viewport,
+            };
         }
         Self {
             tool_bounds,
@@ -347,310 +370,167 @@ impl Toolbar {
         }
     }
 
-    /// Renders the bottom-up tool rail and contextual strip as one L onto the HDC.
+    /// Flat, high-contrast controls share the settings window's visual language.
     pub fn render(&self, hdc: HDC) {
-        let scale = |value: i32| value * self.dpi as i32 / 96;
-        let panel_bg = COLORREF(0x00282421);
-        let panel_border = COLORREF(0x00534B43);
-        let shadow = COLORREF(0x00151312);
-        let button_bg = COLORREF(0x00322D29);
-        let hover_bg = COLORREF(0x00483F38);
-        let accent = COLORREF(0x00D77800);
-        let text = COLORREF(0x00F2F0ED);
-        let disabled = COLORREF(0x00766E67);
-
-        let draw_rounded = |rect: &Rect, fill: COLORREF, border: COLORREF, radius: i32| {
-            let brush = unsafe { CreateSolidBrush(fill) };
-            let pen = unsafe { CreatePen(PS_SOLID, 1, border) };
-            let old_pen = unsafe { SelectObject(hdc, HGDIOBJ(pen.0)) };
-            let old_brush = unsafe { SelectObject(hdc, HGDIOBJ(brush.0)) };
-            unsafe {
-                let _ = RoundRect(
-                    hdc,
-                    rect.left,
-                    rect.top,
-                    rect.right,
-                    rect.bottom,
-                    radius,
-                    radius,
-                );
-                SelectObject(hdc, old_pen);
-                SelectObject(hdc, old_brush);
-                let _ = DeleteObject(HGDIOBJ(pen.0));
-                let _ = DeleteObject(HGDIOBJ(brush.0));
+        use crate::drawing::{label, rounded, with_pen};
+        let scale = |value: i32| (value * self.dpi as i32 / 96).max(1);
+        let white = COLORREF(0xffffff);
+        let border = COLORREF(0xeee8e3);
+        let text = COLORREF(0x2a211b);
+        let muted = COLORREF(0x99948f);
+        let accent = COLORREF(0xed625c);
+        let tint = COLORREF(0xfff1ed);
+        for (index, panel) in [self.tool_bounds, self.action_bounds]
+            .into_iter()
+            .enumerate()
+        {
+            if index == 1 && self.tool_bounds == self.action_bounds {
+                continue;
             }
-        };
-
-        for panel in [self.tool_bounds, self.action_bounds] {
-            draw_rounded(
-                &Rect::new(
-                    panel.left + scale(2),
-                    panel.top + scale(3),
-                    panel.right + scale(2),
-                    panel.bottom + scale(3),
-                ),
-                shadow,
-                shadow,
-                scale(8),
-            );
-            draw_rounded(&panel, panel_bg, panel_border, scale(8));
+            rounded(hdc, panel.inflate(1, 1), scale(14), border, border);
+            rounded(hdc, panel, scale(14), white, border);
         }
-
-        let face: Vec<u16> = "Segoe UI Symbol\0".encode_utf16().collect();
-        let font = unsafe {
-            CreateFontW(
-                -scale(16),
-                0,
-                0,
-                0,
-                FW_BOLD.0 as i32,
-                0,
-                0,
-                0,
-                DEFAULT_CHARSET.0 as u32,
-                CLIP_DEFAULT_PRECIS.0 as u32,
-                CLIP_DEFAULT_PRECIS.0 as u32,
-                DEFAULT_QUALITY.0 as u32,
-                (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
-                PCWSTR(face.as_ptr()),
-            )
-        };
-        let old_font = unsafe { SelectObject(hdc, HGDIOBJ(font.0)) };
-        let _font_guard = FontGuard {
-            hdc,
-            old_font,
-            font,
-        };
-        unsafe {
-            let _ = SetBkMode(hdc, TRANSPARENT);
-        }
-
         for button in &self.buttons {
-            let hovered = self.hovered_item == Some(button.item);
-            let active = matches!(button.item, ToolbarItem::Tool(tool) if tool == self.active_tool);
+            let hovered = self.hovered_item == Some(button.item) && button.is_enabled;
+            let selected = matches!(button.item, ToolbarItem::Tool(tool) if tool == self.active_tool)
+                || matches!(button.item, ToolbarItem::Thickness(value) if value == self.active_thickness);
+            let primary = button.item == ToolbarItem::Action(ToolbarAction::Copy);
+            let fill = if primary {
+                accent
+            } else if selected || hovered {
+                tint
+            } else {
+                white
+            };
+            let ink = if !button.is_enabled {
+                muted
+            } else if primary {
+                white
+            } else if selected {
+                accent
+            } else {
+                text
+            };
+            rounded(
+                hdc,
+                button.rect,
+                scale(10),
+                fill,
+                if selected { accent } else { fill },
+            );
             match button.item {
                 ToolbarItem::Color(color) => {
-                    let ring = if color == self.active_color {
-                        text
-                    } else if hovered {
-                        accent
-                    } else {
-                        panel_border
-                    };
-                    draw_rounded(&button.rect, bgra_to_colorref(color), ring, scale(6));
+                    let swatch = button.rect.inflate(-scale(3), -scale(3));
+                    rounded(
+                        hdc,
+                        swatch,
+                        scale(8),
+                        bgra_to_colorref(color),
+                        if color == self.active_color {
+                            accent
+                        } else {
+                            border
+                        },
+                    );
                     if color == self.active_color {
-                        let marker = Rect::new(
-                            button.rect.left + scale(6),
-                            button.rect.bottom - scale(4),
-                            button.rect.right - scale(6),
-                            button.rect.bottom - scale(2),
+                        label(
+                            hdc,
+                            swatch,
+                            "✓",
+                            scale(13),
+                            if color[0] as u32 + color[1] as u32 + color[2] as u32 > 450 {
+                                text
+                            } else {
+                                white
+                            },
+                            true,
                         );
-                        draw_rounded(&marker, text, text, scale(2));
                     }
                 }
-                ToolbarItem::Thickness(thickness) => {
-                    let fill = if thickness == self.active_thickness {
-                        accent
-                    } else if hovered {
-                        hover_bg
-                    } else {
-                        button_bg
-                    };
-                    draw_rounded(
-                        &button.rect,
-                        fill,
-                        if thickness == self.active_thickness {
-                            text
-                        } else {
-                            panel_border
-                        },
-                        scale(5),
-                    );
-                    let pen = unsafe {
-                        CreatePen(PS_SOLID, thickness.max(1) * self.dpi as i32 / 96, text)
-                    };
-                    let old_pen = unsafe { SelectObject(hdc, HGDIOBJ(pen.0)) };
+                ToolbarItem::Thickness(value) => {
                     let y = (button.rect.top + button.rect.bottom) / 2;
-                    let points = [
-                        POINT {
-                            x: button.rect.left + scale(6),
-                            y,
-                        },
-                        POINT {
-                            x: button.rect.right - scale(6),
-                            y,
-                        },
-                    ];
-                    unsafe {
-                        let _ = Polyline(hdc, &points);
-                        SelectObject(hdc, old_pen);
-                        let _ = DeleteObject(HGDIOBJ(pen.0));
-                    }
+                    with_pen(hdc, PS_SOLID, scale(value), ink, || unsafe {
+                        let _ = Polyline(
+                            hdc,
+                            &[
+                                POINT {
+                                    x: button.rect.left + scale(6),
+                                    y,
+                                },
+                                POINT {
+                                    x: button.rect.right - scale(6),
+                                    y,
+                                },
+                            ],
+                        );
+                    });
                 }
                 item => {
-                    let fill = if active {
-                        accent
-                    } else if hovered && button.is_enabled {
-                        hover_bg
-                    } else {
-                        button_bg
-                    };
-                    let border = if active {
-                        text
-                    } else if hovered {
-                        accent
-                    } else {
-                        panel_border
-                    };
-                    draw_rounded(&button.rect, fill, border, scale(5));
                     let glyph = match item {
                         ToolbarItem::Tool(ToolKind::Select) => "↖",
                         ToolbarItem::Tool(ToolKind::Rectangle) => "□",
-                        ToolbarItem::Tool(ToolKind::Arrow) => "➜",
+                        ToolbarItem::Tool(ToolKind::Arrow) => "↗",
                         ToolbarItem::Tool(ToolKind::Pen) => "✎",
                         ToolbarItem::Tool(ToolKind::Text) => "T",
                         ToolbarItem::Tool(ToolKind::Blur) => "▦",
+                        ToolbarItem::Tool(ToolKind::Redact) => "■",
                         ToolbarItem::Action(ToolbarAction::Undo) => "↶",
                         ToolbarItem::Action(ToolbarAction::Redo) => "↷",
-                        ToolbarItem::Action(ToolbarAction::Save) => "▾",
-                        ToolbarItem::Action(ToolbarAction::Copy) => "▣",
+                        ToolbarItem::Action(ToolbarAction::Save) => "Save",
+                        ToolbarItem::Action(ToolbarAction::Copy) => "Copy",
                         ToolbarItem::Action(ToolbarAction::Settings) => "⚙",
                         ToolbarItem::Action(ToolbarAction::Cancel) => "×",
                         _ => "",
                     };
-                    unsafe {
-                        let _ = SetTextColor(hdc, if button.is_enabled { text } else { disabled });
-                        let mut chars: Vec<u16> = glyph.encode_utf16().collect();
-                        let mut rect = RECT {
-                            left: button.rect.left,
-                            top: button.rect.top,
-                            right: button.rect.right,
-                            bottom: button.rect.bottom,
-                        };
-                        let _ = DrawTextW(
-                            hdc,
-                            &mut chars,
-                            &mut rect,
-                            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                        );
-                    }
+                    let size = if matches!(
+                        item,
+                        ToolbarItem::Action(ToolbarAction::Save | ToolbarAction::Copy)
+                    ) {
+                        13
+                    } else {
+                        21
+                    };
+                    label(hdc, button.rect, glyph, scale(size), ink, true);
                 }
             }
         }
-
-        let tooltip = self.hovered_item.map(|item| match item {
-            ToolbarItem::Tool(ToolKind::Select) => "Select [V]".to_string(),
-            ToolbarItem::Tool(ToolKind::Rectangle) => "Rectangle [R]".to_string(),
-            ToolbarItem::Tool(ToolKind::Arrow) => "Arrow [A]".to_string(),
-            ToolbarItem::Tool(ToolKind::Pen) => "Pen [P]".to_string(),
-            ToolbarItem::Tool(ToolKind::Text) => "Text [T]".to_string(),
-            ToolbarItem::Tool(ToolKind::Blur) => "Blur [B]".to_string(),
-            ToolbarItem::Action(ToolbarAction::Undo) => "Undo [Ctrl+Z]".to_string(),
-            ToolbarItem::Action(ToolbarAction::Redo) => "Redo [Ctrl+Y]".to_string(),
-            ToolbarItem::Action(ToolbarAction::Save) => "Save [Ctrl+S]".to_string(),
-            ToolbarItem::Action(ToolbarAction::Copy) => "Copy [Ctrl+C]".to_string(),
-            ToolbarItem::Action(ToolbarAction::Settings) => "Settings [Ctrl+,]".to_string(),
-            ToolbarItem::Action(ToolbarAction::Cancel) => "Close [Esc]".to_string(),
-            ToolbarItem::Color(color) => match color {
-                [49, 49, 224, 255] => "Red color".to_string(),
-                [7, 103, 247, 255] => "Orange color".to_string(),
-                [25, 196, 252, 255] => "Yellow color".to_string(),
-                [68, 158, 47, 255] => "Green color".to_string(),
-                [194, 113, 25, 255] => "Blue color".to_string(),
-                [181, 54, 156, 255] => "Purple color".to_string(),
-                [255, 255, 255, 255] => "White color".to_string(),
-                [41, 37, 33, 255] => "Black color".to_string(),
-                _ => "Custom color".to_string(),
-            },
-            ToolbarItem::Thickness(2) => "Thin (2 px)".to_string(),
-            ToolbarItem::Thickness(4) => "Medium (4 px)".to_string(),
-            ToolbarItem::Thickness(8) => "Thick (8 px)".to_string(),
-            ToolbarItem::Thickness(value) => format!("{value} px thickness"),
-        });
-        if let Some(label) = tooltip {
-            let button = self
-                .buttons
-                .iter()
-                .find(|button| Some(button.item) == self.hovered_item)
-                .expect("hovered toolbar item must have a button");
+        if let Some(item) = self.hovered_item
+            && let Some(button) = self.buttons.iter().find(|button| button.item == item)
+        {
+            let tip = match item {
+                ToolbarItem::Tool(ToolKind::Select) => "Select · V".to_owned(),
+                ToolbarItem::Tool(ToolKind::Rectangle) => "Rectangle · R".to_owned(),
+                ToolbarItem::Tool(ToolKind::Arrow) => "Arrow · A".to_owned(),
+                ToolbarItem::Tool(ToolKind::Pen) => "Pen · P".to_owned(),
+                ToolbarItem::Tool(ToolKind::Text) => "Text · T".to_owned(),
+                ToolbarItem::Tool(ToolKind::Blur) => "Blur · B".to_owned(),
+                ToolbarItem::Tool(ToolKind::Redact) => "Redact · M".to_owned(),
+                ToolbarItem::Action(ToolbarAction::Undo) => "Undo · Ctrl+Z".to_owned(),
+                ToolbarItem::Action(ToolbarAction::Redo) => "Redo · Ctrl+Y".to_owned(),
+                ToolbarItem::Action(ToolbarAction::Save) => {
+                    "Save · Ctrl+S | Save as · Ctrl+Shift+S".to_owned()
+                }
+                ToolbarItem::Action(ToolbarAction::Copy) => "Copy · Ctrl+C".to_owned(),
+                ToolbarItem::Action(ToolbarAction::Settings) => "Settings · Ctrl+,".to_owned(),
+                ToolbarItem::Action(ToolbarAction::Cancel) => "Cancel · Esc".to_owned(),
+                ToolbarItem::Color(_) => "Annotation color".to_owned(),
+                ToolbarItem::Thickness(value) => format!("{value} px stroke"),
+            };
             let margin = scale(6);
-            let tooltip_width = scale(label.len() as i32 * 7 + 16)
-                .min((self.viewport.width() - margin * 2).max(scale(80)));
-            let tooltip_height = scale(28);
-            let tooltip_gap = scale(6);
-            let is_tool_button = self.tool_bounds.contains(button.rect.left, button.rect.top);
-            let (preferred_left, preferred_top) = if is_tool_button {
-                let right = self.tool_bounds.right + tooltip_gap;
-                let left = self.tool_bounds.left - tooltip_gap - tooltip_width;
-                let x = if right + tooltip_width <= self.viewport.right - margin {
-                    right
-                } else {
-                    left
-                };
-                (
-                    x,
-                    (button.rect.top + button.rect.bottom - tooltip_height) / 2,
-                )
-            } else {
-                let above = self.action_bounds.top - tooltip_gap - tooltip_height;
-                let below = self.action_bounds.bottom + tooltip_gap;
-                (
-                    (button.rect.left + button.rect.right - tooltip_width) / 2,
-                    if above >= margin { above } else { below },
-                )
-            };
-            let left = preferred_left.clamp(
+            let width = (crate::drawing::measure_text(&tip, scale(13)).0 + scale(24))
+                .min((self.viewport.width() - margin * 2).max(1));
+            let height = scale(32);
+            let x = button.rect.left.clamp(
                 self.viewport.left + margin,
-                (self.viewport.right - tooltip_width - margin).max(self.viewport.left + margin),
+                (self.viewport.right - width - margin).max(self.viewport.left + margin),
             );
-            let top = preferred_top.clamp(
+            let y = (button.rect.top - height - margin).clamp(
                 self.viewport.top + margin,
-                (self.viewport.bottom - tooltip_height - margin).max(self.viewport.top + margin),
+                (self.viewport.bottom - height - margin).max(self.viewport.top + margin),
             );
-            let tooltip_rect = Rect::new(left, top, left + tooltip_width, top + tooltip_height);
-            draw_rounded(&tooltip_rect, panel_bg, accent, scale(5));
-
-            let tooltip_face: Vec<u16> = "Segoe UI\0".encode_utf16().collect();
-            let tooltip_font = unsafe {
-                CreateFontW(
-                    -scale(11),
-                    0,
-                    0,
-                    0,
-                    FW_BOLD.0 as i32,
-                    0,
-                    0,
-                    0,
-                    DEFAULT_CHARSET.0 as u32,
-                    CLIP_DEFAULT_PRECIS.0 as u32,
-                    CLIP_DEFAULT_PRECIS.0 as u32,
-                    DEFAULT_QUALITY.0 as u32,
-                    (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
-                    PCWSTR(tooltip_face.as_ptr()),
-                )
-            };
-            let old_tooltip_font = unsafe { SelectObject(hdc, HGDIOBJ(tooltip_font.0)) };
-            let _tooltip_font_guard = FontGuard {
-                hdc,
-                old_font: old_tooltip_font,
-                font: tooltip_font,
-            };
-            unsafe {
-                let _ = SetTextColor(hdc, text);
-                let mut chars: Vec<u16> = label.encode_utf16().collect();
-                let mut rect = RECT {
-                    left: tooltip_rect.left + scale(6),
-                    top: tooltip_rect.top,
-                    right: tooltip_rect.right - scale(6),
-                    bottom: tooltip_rect.bottom,
-                };
-                let _ = DrawTextW(
-                    hdc,
-                    &mut chars,
-                    &mut rect,
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE,
-                );
-            }
+            let bounds = Rect::new(x, y, x + width, y + height);
+            rounded(hdc, bounds, scale(8), text, text);
+            label(hdc, bounds, &tip, scale(12), white, true);
         }
     }
 }
@@ -755,5 +635,63 @@ mod tests {
             button.rect.left >= toolbar.tool_bounds.left.min(toolbar.action_bounds.left)
                 && button.rect.right <= toolbar.tool_bounds.right.max(toolbar.action_bounds.right)
         }));
+    }
+    #[test]
+    fn high_dpi_short_monitor_keeps_every_command_clickable() {
+        for (width, height, dpi) in [
+            (1366, 728, 144),
+            (1920, 1040, 192),
+            (640, 440, 192),
+            (320, 240, 96),
+        ] {
+            let viewport = Rect::new(-width, 0, 0, height);
+            let toolbar = Toolbar::layout(
+                &Rect::new(-40, 10, -32, 18),
+                viewport,
+                ToolKind::Text,
+                PRESET_COLORS[0],
+                2,
+                true,
+                true,
+                true,
+                true,
+                dpi,
+            );
+            assert_in_viewport(toolbar.tool_bounds, viewport);
+            assert_in_viewport(toolbar.action_bounds, viewport);
+            for button in &toolbar.buttons {
+                assert_in_viewport(button.rect, viewport);
+                assert_eq!(
+                    toolbar.hit_test((
+                        (button.rect.left + button.rect.right) / 2,
+                        (button.rect.top + button.rect.bottom) / 2
+                    )),
+                    Some(button.item)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn missing_hover_target_does_not_crash_rendering() {
+        let mut toolbar = Toolbar::layout(
+            &Rect::new(10, 10, 20, 20),
+            Rect::new(0, 0, 800, 600),
+            ToolKind::Blur,
+            PRESET_COLORS[0],
+            2,
+            false,
+            false,
+            false,
+            false,
+            96,
+        );
+        toolbar.hovered_item = Some(ToolbarItem::Color(PRESET_COLORS[0]));
+        let dc = unsafe { windows::Win32::Graphics::Gdi::CreateCompatibleDC(None) };
+        assert!(!dc.is_invalid());
+        toolbar.render(dc);
+        unsafe {
+            let _ = windows::Win32::Graphics::Gdi::DeleteDC(dc);
+        }
     }
 }

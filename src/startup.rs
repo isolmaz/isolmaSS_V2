@@ -8,6 +8,70 @@ use windows::core::{PCWSTR, w};
 const VALUE_NAME: PCWSTR = w!("isolmaSS");
 const RUN_KEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 
+pub struct StartupRegistration(Option<(windows::Win32::System::Registry::REG_VALUE_TYPE, Vec<u8>)>);
+
+impl StartupRegistration {
+    pub fn read() -> Result<Self, String> {
+        use windows::Win32::System::Registry::{
+            REG_VALUE_TYPE, RRF_NOEXPAND, RRF_RT_ANY, RegGetValueW,
+        };
+        let mut size = 0;
+        let mut kind = REG_VALUE_TYPE::default();
+        let status = unsafe {
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                RUN_KEY,
+                VALUE_NAME,
+                RRF_RT_ANY | RRF_NOEXPAND,
+                Some(&mut kind),
+                None,
+                Some(&mut size),
+            )
+        };
+        if status == ERROR_FILE_NOT_FOUND {
+            return Ok(Self(None));
+        }
+        if status.is_err() || size > 65_536 {
+            return Err("Could not read the existing startup registration.".to_string());
+        }
+        let mut data = vec![0u8; size as usize];
+        let status = unsafe {
+            RegGetValueW(
+                HKEY_CURRENT_USER,
+                RUN_KEY,
+                VALUE_NAME,
+                RRF_RT_ANY | RRF_NOEXPAND,
+                Some(&mut kind),
+                Some(data.as_mut_ptr().cast()),
+                Some(&mut size),
+            )
+        };
+        if status.is_err() {
+            return Err("The startup registration changed while it was being read.".to_string());
+        }
+        data.truncate(size as usize);
+        Ok(Self(Some((kind, data))))
+    }
+
+    pub fn restore(self) -> Result<(), String> {
+        let key = open_run_key()?;
+        let status = match self.0 {
+            Some((kind, data)) => unsafe {
+                RegSetValueExW(key.0, VALUE_NAME, 0, kind, Some(&data))
+            },
+            None => unsafe { RegDeleteValueW(key.0, VALUE_NAME) },
+        };
+        if status.is_ok() || status == ERROR_FILE_NOT_FOUND {
+            Ok(())
+        } else {
+            Err(format!(
+                "Could not restore startup registration (error {}).",
+                status.0
+            ))
+        }
+    }
+}
+
 struct RegistryKey(HKEY);
 
 impl Drop for RegistryKey {

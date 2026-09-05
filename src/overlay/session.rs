@@ -34,7 +34,26 @@ fn register_overlay_class() -> Result<()> {
     Ok(())
 }
 
-pub fn show_overlay_session(capture: Rc<CaptureBuffer>) -> Result<Option<Rect>> {
+pub fn show_overlay_session(
+    capture: Rc<CaptureBuffer>,
+    triggered: Instant,
+) -> Result<Option<Rect>> {
+    run_session(capture, triggered, false).map(|(selection, _)| selection)
+}
+
+/// Diagnostic calibration uses the same capture/window/presentation path, then closes its own window.
+pub fn measure_overlay(
+    capture: Rc<CaptureBuffer>,
+    triggered: Instant,
+) -> Result<std::time::Duration> {
+    run_session(capture, triggered, true).map(|(_, duration)| duration)
+}
+
+fn run_session(
+    capture: Rc<CaptureBuffer>,
+    triggered: Instant,
+    measure: bool,
+) -> Result<(Option<Rect>, std::time::Duration)> {
     let overlay_start = Instant::now();
     register_overlay_class()?;
 
@@ -120,13 +139,18 @@ pub fn show_overlay_session(capture: Rc<CaptureBuffer>) -> Result<Option<Rect>> 
         bits_ptr: bits_ptr as *mut u8,
 
         committed_result: false,
+        scene_dirty: false,
+        base_cache: Vec::new(),
+        cache_requested: false,
+        pointer: (0, 0),
+        preferences_dirty: false,
     });
     std::mem::forget(mem_guard);
     std::mem::forget(bitmap_guard);
 
     let hwnd = unsafe {
         CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+            WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
             OVERLAY_CLASS_NAME,
             w!("isolmaSS Overlay"),
             WS_POPUP,
@@ -144,6 +168,7 @@ pub fn show_overlay_session(capture: Rc<CaptureBuffer>) -> Result<Option<Rect>> 
     if hwnd.is_invalid() {
         return Err(windows::core::Error::from_win32());
     }
+    let _window = crate::ui::OwnedWindow(hwnd);
     state.dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd) }.max(96);
 
     unsafe {
@@ -154,34 +179,57 @@ pub fn show_overlay_session(capture: Rc<CaptureBuffer>) -> Result<Option<Rect>> 
             state.as_mut() as *mut OverlayState as isize,
         );
         let _ = ShowWindow(hwnd, SW_SHOW);
+        let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
         let _ = SetFocus(hwnd);
         let _ = UpdateWindow(hwnd);
         let _ = DwmFlush();
     }
+    if !unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd).as_bool() } {
+        return Err(windows::core::Error::new(
+            windows::core::HRESULT::from_win32(1400),
+            "The capture overlay could not be made visible.",
+        ));
+    }
     let overlay_time = overlay_start.elapsed();
+    let visible = triggered.elapsed();
+    if measure {
+        return Ok((None, visible));
+    }
+    crate::diagnostics::record(
+        "capture",
+        &format!(
+            "event_to_visible_us={} capture_us={} setup_us={} bitblt_us={} dim_us={} overlay_us={}",
+            triggered.elapsed().as_micros(),
+            state.capture.timings.total.as_micros(),
+            state.capture.timings.setup.as_micros(),
+            state.capture.timings.bit_blt.as_micros(),
+            state.capture.timings.dim.as_micros(),
+            overlay_time.as_micros()
+        ),
+    );
     println!(
         "[isolmaSS] Overlay visible={}us; capture-to-visible={}us.",
         overlay_time.as_micros(),
         (state.capture.timings.total + overlay_time).as_micros()
     );
-    register_overlay(hwnd);
+    register_overlay(hwnd)?;
     state.visible_windows = get_visible_windows(Some(hwnd));
 
-    let mut msg = MSG::default();
-    while unsafe { GetMessageW(&mut msg, HWND::default(), 0, 0) }.0 > 0 {
-        unsafe {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
+    let loop_result = crate::ui::window_loop(hwnd, crate::ui::WindowKind::Overlay);
     unregister_overlay();
+    if state.preferences_dirty
+        && let Err(error) = state.settings.save_editor_preferences()
+    {
+        crate::tray::show_notification("Preferences could not be saved", &error.to_string());
+    }
 
+    loop_result?;
     let committed = if state.committed_result || state.committed_selection.is_some() {
         state.committed_selection
     } else {
         None
     };
 
-    Ok(committed)
+    Ok((committed, visible))
 }

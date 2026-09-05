@@ -138,11 +138,16 @@ impl Settings {
 
     /// Loads settings from disk or returns default configuration.
     pub fn load_or_default() -> Self {
-        Self::load_with_warning().0
+        let (settings, warning) = Self::load_with_warning();
+        if let Some(warning) = warning {
+            crate::diagnostics::record("settings recovery", &warning);
+        }
+        settings
     }
 
     /// Saves settings through a same-directory temporary file and an atomic replacement.
     pub fn save_to_path(&self, path: &Path) -> std::io::Result<()> {
+        self.validate()?;
         let parent = path
             .parent()
             .filter(|p| !p.as_os_str().is_empty())
@@ -192,9 +197,60 @@ impl Settings {
     /// Loads settings from an arbitrary path on disk.
     pub fn load_from_path(path: &Path) -> std::io::Result<Self> {
         let mut content = String::new();
-        std::fs::File::open(path)?.read_to_string(&mut content)?;
-        serde_json::from_str::<Settings>(&content)
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        std::fs::File::open(path)?
+            .take(65_537)
+            .read_to_string(&mut content)?;
+        if content.len() > 65_536 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "settings.json exceeds 64 KiB",
+            ));
+        }
+        let settings = serde_json::from_str::<Settings>(&content)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        settings.validate()?;
+        Ok(settings)
+    }
+
+    pub fn validate(&self) -> std::io::Result<()> {
+        let problem = if !(1..=64).contains(&self.default_thickness) {
+            Some("default_thickness must be between 1 and 64 pixels")
+        } else if self.capture_delay_ms > 5_000 {
+            Some("capture_delay_ms must be between 0 and 5000")
+        } else if !(1..=100).contains(&self.jpeg_quality) {
+            Some("jpeg_quality must be between 1 and 100")
+        } else if self.save_directory.as_os_str().is_empty()
+            || self.save_directory.to_string_lossy().contains('\0')
+        {
+            Some("save_directory must be a nonempty Windows path without NUL characters")
+        } else if !self.hotkey.is_valid() {
+            Some("hotkey description, key and modifiers must describe the same supported shortcut")
+        } else {
+            None
+        };
+        match problem {
+            Some(message) => Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                message,
+            )),
+            None => Ok(()),
+        }
+    }
+
+    /// Merge only editor preferences into the latest configuration, once per session.
+    pub fn save_editor_preferences(&self) -> std::io::Result<()> {
+        let _lock = crate::instance::SettingsLock::acquire()?;
+        let path =
+            Self::config_path().ok_or_else(|| std::io::Error::other("APPDATA is unavailable"))?;
+        let mut latest = match Self::load_from_path(&path) {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(error) => return Err(error),
+        };
+        latest.default_color = self.default_color;
+        latest.default_thickness = self.default_thickness;
+        latest.last_tool = self.last_tool;
+        latest.save_to_path(&path)
     }
 
     fn save_to_config_path(&self, path: Option<&std::path::Path>) -> std::io::Result<()> {
@@ -209,6 +265,7 @@ impl Settings {
 
     /// Saves settings to disk as formatted JSON.
     pub fn save(&self) -> std::io::Result<()> {
+        let _lock = crate::instance::SettingsLock::acquire()?;
         let path = Self::config_path();
         self.save_to_config_path(path.as_deref())
     }
@@ -303,6 +360,20 @@ mod tests {
             "cannot save settings: %APPDATA% is unavailable"
         );
 
+        for (key, value) in [
+            ("default_thickness", serde_json::json!(-1)),
+            ("capture_delay_ms", serde_json::json!(6000)),
+            ("jpeg_quality", serde_json::json!(0)),
+            ("save_directory", serde_json::json!("")),
+        ] {
+            let mut invalid = serde_json::to_value(&defaults).unwrap();
+            invalid[key] = value;
+            std::fs::write(&temp_file, serde_json::to_vec(&invalid).unwrap()).unwrap();
+            assert!(Settings::load_from_path(&temp_file).is_err(), "{key}");
+        }
+        std::fs::write(&temp_file, " ".repeat(65_537)).unwrap();
+        assert!(Settings::load_from_path(&temp_file).is_err());
+        assert!(crate::hotkey::HotkeyConfig::from_str("Ctrl+A+B").is_none());
         std::fs::remove_dir_all(&temp_root).expect("remove settings test directory");
     }
 }

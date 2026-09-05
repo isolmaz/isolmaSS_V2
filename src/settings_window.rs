@@ -7,20 +7,18 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, COLOR_WINDOW, CreatePen, CreateSolidBrush, DeleteObject, EndPaint, FillRect,
-    GetMonitorInfoW, HBRUSH, HDC, HGDIOBJ, InvalidateRect, MONITOR_DEFAULTTONEAREST,
-    MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromPoint, MonitorFromWindow, PAINTSTRUCT,
-    PS_SOLID, RoundRect, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    GetMonitorInfoW, HBRUSH, HDC, HGDIOBJ, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    MonitorFromWindow, PAINTSTRUCT, PS_SOLID, RoundRect, SelectObject, SetBkMode, SetTextColor,
+    TRANSPARENT,
 };
-use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+use windows::Win32::UI::Controls::{SetScrollInfo, SetScrollPos};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     EnableWindow, IsWindowEnabled, SetActiveWindow, SetFocus, VK_ESCAPE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW,
-    GWLP_USERDATA, GetClientRect, GetDlgCtrlID, GetForegroundWindow, GetMessageW,
-    GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IDC_ARROW, IsWindow, MSG,
-    PM_REMOVE, PeekMessageW, PostQuitMessage, RegisterClassExW, SW_HIDE, SW_SHOW,
-    SetForegroundWindow, SetWindowLongPtrW, ShowWindow, TranslateMessage, WM_CLOSE, WM_CTLCOLORBTN,
+    BringWindowToTop, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect,
+    GetDlgCtrlID, GetWindowLongPtrW, GetWindowRect, IDC_ARROW, IsWindow, RegisterClassExW, SW_HIDE,
+    SW_SHOW, SetForegroundWindow, SetWindowLongPtrW, ShowWindow, WM_CLOSE, WM_CTLCOLORBTN,
     WM_CTLCOLORSTATIC, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_PAINT, WNDCLASSEXW,
 };
 use windows::core::{PCWSTR, Result, w};
@@ -36,7 +34,6 @@ enum SettingsView {
 pub struct SettingsWindowState {
     settings: Settings,
     saved: bool,
-    original_start_with_windows: bool,
     active_view: SettingsView,
     dpi: u32,
     font: windows::Win32::Graphics::Gdi::HFONT,
@@ -87,14 +84,17 @@ const ID_DELAY_FIRST: i32 = 500;
 const ID_FORMAT_PNG: i32 = 600;
 const ID_FORMAT_JPEG: i32 = 601;
 const ID_QUALITY_FIRST: i32 = 610;
-const SETTINGS_WIDTH: i32 = 700;
-const SETTINGS_HEIGHT: i32 = 620;
-const COLOR_BACKGROUND: COLORREF = COLORREF(0x00f7f5f2);
+const SETTINGS_WIDTH: i32 = 960;
+const SETTINGS_HEIGHT: i32 = 820;
+const CONTENT_HEIGHT: i32 = 754;
+const COLOR_BACKGROUND: COLORREF = COLORREF(0x00fbf8f6);
 const COLOR_CARD: COLORREF = COLORREF(0x00ffffff);
-const COLOR_BORDER: COLORREF = COLORREF(0x00e1ddd7);
-const COLOR_TEXT: COLORREF = COLORREF(0x002b2927);
-const COLOR_PROPERTY: COLORREF = COLORREF(0x005b514a);
-const COLOR_MUTED: COLORREF = COLORREF(0x007b6d64);
+const COLOR_BORDER: COLORREF = COLORREF(0x00eee8e3);
+const COLOR_TEXT: COLORREF = COLORREF(0x002a211b);
+const COLOR_PROPERTY: COLORREF = COLORREF(0x006d625a);
+const COLOR_MUTED: COLORREF = COLORREF(0x008a7c72);
+const COLOR_ACCENT: COLORREF = COLORREF(0x00ed625c);
+const COLOR_TINT: COLORREF = COLORREF(0x00fff1ed);
 const COLOR_DISABLED: COLORREF = COLORREF(0x0099948f);
 
 fn scale(value: i32, dpi: u32) -> i32 {
@@ -148,8 +148,16 @@ fn move_control(hwnd: HWND, id: i32, x: i32, y: i32, width: i32, height: i32, dp
         unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::MoveWindow(
                 child,
-                scale(x, dpi),
-                scale(y, dpi),
+                scale(x, dpi)
+                    - windows::Win32::UI::WindowsAndMessaging::GetScrollPos(
+                        hwnd,
+                        windows::Win32::UI::WindowsAndMessaging::SB_HORZ,
+                    ),
+                scale(y, dpi)
+                    - windows::Win32::UI::WindowsAndMessaging::GetScrollPos(
+                        hwnd,
+                        windows::Win32::UI::WindowsAndMessaging::SB_VERT,
+                    ),
                 scale(width, dpi),
                 scale(height, dpi),
                 true,
@@ -182,11 +190,11 @@ fn create_ui_font(dpi: u32, points: i32, weight: i32) -> windows::Win32::Graphic
 }
 
 fn create_settings_font(dpi: u32) -> windows::Win32::Graphics::Gdi::HFONT {
-    create_ui_font(dpi, 10, windows::Win32::Graphics::Gdi::FW_NORMAL.0 as i32)
+    create_ui_font(dpi, 11, windows::Win32::Graphics::Gdi::FW_NORMAL.0 as i32)
 }
 
 fn create_title_font(dpi: u32) -> windows::Win32::Graphics::Gdi::HFONT {
-    create_ui_font(dpi, 16, 600)
+    create_ui_font(dpi, 20, 650)
 }
 
 fn create_heading_font(dpi: u32) -> windows::Win32::Graphics::Gdi::HFONT {
@@ -225,14 +233,14 @@ fn set_control_font(hwnd: HWND, id: i32, font: windows::Win32::Graphics::Gdi::HF
 fn card_rects(view: SettingsView) -> &'static [(i32, i32, i32, i32)] {
     match view {
         SettingsView::Simple => &[
-            (24, 114, 676, 224),
-            (24, 230, 676, 350),
-            (24, 356, 676, 462),
+            (220, 100, 900, 244),
+            (220, 260, 900, 422),
+            (220, 438, 900, 584),
         ],
         SettingsView::Advanced => &[
-            (24, 114, 676, 262),
-            (24, 268, 676, 368),
-            (24, 378, 676, 518),
+            (220, 100, 900, 298),
+            (220, 314, 900, 452),
+            (220, 468, 900, 666),
         ],
     }
 }
@@ -244,6 +252,20 @@ fn paint_settings_surface(hwnd: HWND, state: &SettingsWindowState, hdc: HDC) {
         let _ = FillRect(hdc, &client, state.background_brush);
     }
 
+    unsafe {
+        let _ = windows::Win32::Graphics::Gdi::SetViewportOrgEx(
+            hdc,
+            -windows::Win32::UI::WindowsAndMessaging::GetScrollPos(
+                hwnd,
+                windows::Win32::UI::WindowsAndMessaging::SB_HORZ,
+            ),
+            -windows::Win32::UI::WindowsAndMessaging::GetScrollPos(
+                hwnd,
+                windows::Win32::UI::WindowsAndMessaging::SB_VERT,
+            ),
+            None,
+        );
+    }
     let pen = unsafe { CreatePen(PS_SOLID, scale(1, state.dpi), COLOR_BORDER) };
     let old_pen = unsafe { SelectObject(hdc, HGDIOBJ(pen.0)) };
     let old_brush = unsafe { SelectObject(hdc, HGDIOBJ(state.card_brush.0)) };
@@ -255,8 +277,8 @@ fn paint_settings_surface(hwnd: HWND, state: &SettingsWindowState, hdc: HDC) {
                 scale(top, state.dpi),
                 scale(right, state.dpi),
                 scale(bottom, state.dpi),
-                scale(8, state.dpi),
-                scale(8, state.dpi),
+                scale(16, state.dpi),
+                scale(16, state.dpi),
             );
         }
     }
@@ -267,100 +289,340 @@ fn paint_settings_surface(hwnd: HWND, state: &SettingsWindowState, hdc: HDC) {
     }
 }
 
+fn draw_settings_button(
+    draw: &windows::Win32::UI::Controls::NMCUSTOMDRAW,
+    state: &SettingsWindowState,
+) {
+    use windows::Win32::Graphics::Gdi::*;
+    use windows::Win32::UI::Controls::*;
+    use windows::Win32::UI::WindowsAndMessaging::{BM_GETCHECK, GetWindowTextW, SendMessageW};
+    let hdc = draw.hdc;
+    let id = draw.hdr.idFrom as i32;
+    let dpi = state.dpi;
+    let checked = unsafe { SendMessageW(draw.hdr.hwndFrom, BM_GETCHECK, WPARAM(0), LPARAM(0)).0 }
+        == BST_CHECKED.0 as isize;
+    let primary = id == ID_SAVE;
+    let toggle = (ID_WINDOW_SNAP..=ID_AUTO_INSTALL).contains(&id);
+    let disabled = draw.uItemState.contains(CDIS_DISABLED);
+    let hot = draw.uItemState.contains(CDIS_HOT) || draw.uItemState.contains(CDIS_SELECTED);
+    let fill = if primary {
+        COLOR_ACCENT
+    } else if checked && !toggle {
+        COLOR_TINT
+    } else if hot {
+        COLORREF(0x00faf1ed)
+    } else if toggle {
+        COLOR_CARD
+    } else {
+        COLORREF(0x00fdfaf8)
+    };
+    let border = if checked && !toggle || draw.uItemState.contains(CDIS_FOCUS) {
+        COLOR_ACCENT
+    } else if toggle {
+        COLOR_CARD
+    } else {
+        COLOR_BORDER
+    };
+    let mut rect = RECT::default();
+    unsafe {
+        let _ = GetClientRect(draw.hdr.hwndFrom, &mut rect);
+        let _ = FillRect(
+            hdc,
+            &rect,
+            if control_uses_card(id) {
+                state.card_brush
+            } else {
+                state.background_brush
+            },
+        );
+    }
+    crate::drawing::with_brush(hdc, fill, || {
+        crate::drawing::with_pen(hdc, PS_SOLID, scale(1, dpi).max(1), border, || unsafe {
+            let _ = RoundRect(
+                hdc,
+                rect.left + 1,
+                rect.top + 1,
+                rect.right - 1,
+                rect.bottom - 1,
+                scale(14, dpi),
+                scale(14, dpi),
+            );
+        })
+    });
+    let mut label = [0u16; 256];
+    let length = unsafe { GetWindowTextW(draw.hdr.hwndFrom, &mut label) };
+    let mut text_rect = rect;
+    text_rect.left += scale(12, dpi);
+    text_rect.right -= scale(12, dpi);
+    if (ID_COLOR_FIRST..ID_COLOR_FIRST + 8).contains(&id) {
+        let color =
+            crate::annotation::bgra_to_colorref(PRESET_COLORS[(id - ID_COLOR_FIRST) as usize]);
+        let x = rect.left + scale(12, dpi);
+        let y = (rect.top + rect.bottom - scale(16, dpi)) / 2;
+        crate::drawing::with_brush(hdc, color, || {
+            crate::drawing::with_pen(hdc, PS_SOLID, 1, COLOR_BORDER, || unsafe {
+                let _ = Ellipse(hdc, x, y, x + scale(16, dpi), y + scale(16, dpi));
+            })
+        });
+        text_rect.left += scale(22, dpi);
+    }
+    if toggle {
+        let x = rect.right - scale(48, dpi);
+        let y = (rect.top + rect.bottom - scale(22, dpi)) / 2;
+        let color = if checked {
+            COLOR_ACCENT
+        } else {
+            COLORREF(0x00d7cdc5)
+        };
+        crate::drawing::with_brush(hdc, color, || {
+            crate::drawing::with_pen(hdc, PS_SOLID, 1, color, || unsafe {
+                let _ = RoundRect(
+                    hdc,
+                    x,
+                    y,
+                    x + scale(40, dpi),
+                    y + scale(22, dpi),
+                    scale(22, dpi),
+                    scale(22, dpi),
+                );
+            })
+        });
+        let knob = x + scale(if checked { 21 } else { 3 }, dpi);
+        crate::drawing::with_brush(hdc, COLOR_CARD, || {
+            crate::drawing::with_pen(hdc, PS_SOLID, 1, COLOR_CARD, || unsafe {
+                let _ = Ellipse(
+                    hdc,
+                    knob,
+                    y + scale(3, dpi),
+                    knob + scale(16, dpi),
+                    y + scale(19, dpi),
+                );
+            })
+        });
+        text_rect.right = x - scale(12, dpi);
+    }
+    crate::drawing::with_font(
+        hdc,
+        -scale(14, dpi),
+        if primary || checked && !toggle {
+            600
+        } else {
+            400
+        },
+        || unsafe {
+            let _ = SetBkMode(hdc, TRANSPARENT);
+            let _ = SetTextColor(
+                hdc,
+                if disabled {
+                    COLOR_DISABLED
+                } else if primary {
+                    COLOR_CARD
+                } else {
+                    COLOR_TEXT
+                },
+            );
+            let flags = DT_VCENTER
+                | DT_SINGLELINE
+                | if toggle || (300..308).contains(&id) {
+                    DT_LEFT
+                } else {
+                    DT_CENTER
+                };
+            let _ = DrawTextW(
+                hdc,
+                &mut label[..length.max(0) as usize],
+                &mut text_rect,
+                flags,
+            );
+        },
+    );
+}
+
 fn control_uses_card(id: i32) -> bool {
     !matches!(
         id,
-        700 | 709 | ID_VIEW_SIMPLE | ID_VIEW_ADVANCED | ID_SAVE | ID_CANCEL
+        700 | 709 | 716 | 717 | 718 | ID_VIEW_SIMPLE | ID_VIEW_ADVANCED | ID_SAVE | ID_CANCEL
     )
 }
 
 fn layout_controls(hwnd: HWND, dpi: u32) {
-    const ROW: i32 = 26;
-    move_control(hwnd, 700, 24, 14, 652, 30, dpi);
-    move_control(hwnd, 709, 24, 44, 652, 22, dpi);
-    move_control(hwnd, ID_VIEW_SIMPLE, 24, 74, 102, 30, dpi);
-    move_control(hwnd, ID_VIEW_ADVANCED, 130, 74, 112, 30, dpi);
-
-    move_control(hwnd, 710, 42, 126, 616, 22, dpi);
-    move_control(hwnd, 701, 42, 158, 110, ROW, dpi);
-    move_control(hwnd, ID_HOTKEY_PRINT, 160, 157, 104, ROW, dpi);
-    move_control(hwnd, ID_HOTKEY_CTRL_SHIFT_S, 270, 157, 120, ROW, dpi);
-    move_control(hwnd, ID_HOTKEY_ALT_PRINT, 396, 157, 136, ROW, dpi);
-    move_control(hwnd, 705, 42, 190, 110, ROW, dpi);
-    for index in 0..4 {
+    const ROW: i32 = 36;
+    move_control(hwnd, 700, 24, 26, 180, 40, dpi);
+    move_control(hwnd, 709, 26, 72, 174, 42, dpi);
+    move_control(hwnd, ID_VIEW_SIMPLE, 20, 138, 180, 44, dpi);
+    move_control(hwnd, ID_VIEW_ADVANCED, 20, 190, 180, 44, dpi);
+    move_control(hwnd, 718, 26, 656, 174, 76, dpi);
+    move_control(hwnd, 716, 220, 26, 680, 40, dpi);
+    move_control(hwnd, 717, 222, 68, 670, 24, dpi);
+    move_control(hwnd, 710, 240, 118, 640, 26, dpi);
+    move_control(hwnd, 701, 240, 161, 126, ROW, dpi);
+    move_control(hwnd, ID_HOTKEY_PRINT, 370, 156, 132, ROW, dpi);
+    move_control(hwnd, ID_HOTKEY_CTRL_SHIFT_S, 510, 156, 154, ROW, dpi);
+    move_control(hwnd, ID_HOTKEY_ALT_PRINT, 672, 156, 208, ROW, dpi);
+    move_control(hwnd, 705, 240, 206, 126, ROW, dpi);
+    for i in 0..4 {
+        move_control(hwnd, ID_DELAY_FIRST + i, 370 + i * 128, 200, 120, ROW, dpi);
+    }
+    move_control(hwnd, 711, 240, 278, 640, 26, dpi);
+    move_control(hwnd, 702, 240, 320, 112, ROW, dpi);
+    move_control(hwnd, ID_FOLDER_LABEL, 360, 320, 394, ROW, dpi);
+    move_control(hwnd, ID_BROWSE, 764, 314, 116, 40, dpi);
+    move_control(hwnd, 706, 240, 373, 116, ROW, dpi);
+    move_control(hwnd, ID_FORMAT_PNG, 360, 367, 74, ROW, dpi);
+    move_control(hwnd, ID_FORMAT_JPEG, 442, 367, 78, ROW, dpi);
+    move_control(hwnd, 707, 538, 373, 128, ROW, dpi);
+    for i in 0..3 {
+        move_control(hwnd, ID_QUALITY_FIRST + i, 670 + i * 70, 367, 62, ROW, dpi);
+    }
+    move_control(hwnd, 712, 240, 456, 640, 26, dpi);
+    move_control(hwnd, ID_WINDOW_SNAP, 240, 490, 640, ROW, dpi);
+    move_control(hwnd, ID_CLOSE_AFTER_ACTION, 240, 536, 640, ROW, dpi);
+    move_control(hwnd, 713, 240, 118, 640, 26, dpi);
+    move_control(hwnd, 703, 240, 164, 116, ROW, dpi);
+    for i in 0..8 {
         move_control(
             hwnd,
-            ID_DELAY_FIRST + index,
-            160 + index * 94,
-            189,
-            88,
+            ID_COLOR_FIRST + i,
+            370 + i % 4 * 128,
+            156 + i / 4 * 44,
+            120,
             ROW,
             dpi,
         );
     }
-
-    move_control(hwnd, 711, 42, 242, 616, 22, dpi);
-    move_control(hwnd, 702, 42, 274, 110, ROW, dpi);
-    move_control(hwnd, ID_FOLDER_LABEL, 160, 275, 398, 24, dpi);
-    move_control(hwnd, ID_BROWSE, 568, 271, 90, 30, dpi);
-    move_control(hwnd, 706, 42, 308, 110, ROW, dpi);
-    move_control(hwnd, ID_FORMAT_PNG, 160, 307, 68, ROW, dpi);
-    move_control(hwnd, ID_FORMAT_JPEG, 234, 307, 74, ROW, dpi);
-    move_control(hwnd, 707, 338, 308, 96, ROW, dpi);
-    for index in 0..3 {
+    move_control(hwnd, 704, 240, 249, 126, ROW, dpi);
+    for i in 0..3 {
         move_control(
             hwnd,
-            ID_QUALITY_FIRST + index,
-            438 + index * 64,
-            307,
-            58,
+            ID_THICKNESS_FIRST + i,
+            370 + i * 170,
+            244,
+            162,
             ROW,
             dpi,
         );
     }
+    move_control(hwnd, 714, 240, 332, 640, 26, dpi);
+    move_control(hwnd, ID_START_WITH_WINDOWS, 240, 368, 640, ROW, dpi);
+    move_control(hwnd, ID_NOTIFY_AFTER_SAVE, 240, 410, 640, ROW, dpi);
+    move_control(hwnd, 715, 240, 486, 640, 26, dpi);
+    move_control(hwnd, ID_CHECK_UPDATES, 240, 522, 640, ROW, dpi);
+    move_control(hwnd, ID_AUTO_INSTALL, 240, 564, 640, ROW, dpi);
+    move_control(hwnd, ID_CHECK_UPDATE, 240, 614, 180, 36, dpi);
+    move_control(hwnd, 708, 436, 609, 444, 48, dpi);
+    move_control(hwnd, ID_CANCEL, 588, 698, 128, 42, dpi);
+    move_control(hwnd, ID_SAVE, 728, 698, 172, 42, dpi);
+}
 
-    move_control(hwnd, 712, 42, 368, 616, 22, dpi);
-    move_control(hwnd, ID_WINDOW_SNAP, 42, 398, 280, ROW, dpi);
-    move_control(hwnd, ID_CLOSE_AFTER_ACTION, 42, 427, 280, ROW, dpi);
-
-    move_control(hwnd, 713, 42, 126, 616, 22, dpi);
-    move_control(hwnd, 703, 42, 158, 110, ROW, dpi);
-    for index in 0..PRESET_COLORS.len() {
-        move_control(
-            hwnd,
-            ID_COLOR_FIRST + index as i32,
-            160 + (index as i32 % 4) * 112,
-            157 + (index as i32 / 4) * 29,
-            106,
-            ROW,
-            dpi,
-        );
+fn update_scrollbars(hwnd: HWND, dpi: u32) {
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    thread_local! { static UPDATING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+    if UPDATING.with(|flag| flag.replace(true)) {
+        return;
     }
-    move_control(hwnd, 704, 42, 219, 110, ROW, dpi);
-    for index in 0..PRESET_THICKNESSES.len() {
-        move_control(
-            hwnd,
-            ID_THICKNESS_FIRST + index as i32,
-            160 + index as i32 * 90,
-            218,
-            82,
-            ROW,
-            dpi,
-        );
+    let mut client = RECT::default();
+    unsafe {
+        let _ = GetClientRect(hwnd, &mut client);
     }
+    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
+    let bar_width = unsafe { GetSystemMetrics(SM_CXVSCROLL) };
+    let bar_height = unsafe { GetSystemMetrics(SM_CYHSCROLL) };
+    let full_width = client.right
+        + if style & WS_VSCROLL.0 != 0 {
+            bar_width
+        } else {
+            0
+        };
+    let full_height = client.bottom
+        + if style & WS_HSCROLL.0 != 0 {
+            bar_height
+        } else {
+            0
+        };
+    let width = scale(924, dpi);
+    let height = scale(CONTENT_HEIGHT, dpi);
+    let mut horizontal = width > full_width;
+    let mut vertical = height > full_height;
+    for _ in 0..2 {
+        horizontal = width > full_width - if vertical { bar_width } else { 0 };
+        vertical = height > full_height - if horizontal { bar_height } else { 0 };
+    }
+    let page_width = full_width - if vertical { bar_width } else { 0 };
+    let page_height = full_height - if horizontal { bar_height } else { 0 };
+    for (bar, length, page) in [(SB_HORZ, width, page_width), (SB_VERT, height, page_height)] {
+        let info = SCROLLINFO {
+            cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
+            fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
+            nMin: 0,
+            nMax: length - 1,
+            nPage: page.max(1) as u32,
+            nPos: unsafe { GetScrollPos(hwnd, bar) }.clamp(0, (length - page).max(0)),
+            nTrackPos: 0,
+        };
+        unsafe {
+            SetScrollInfo(hwnd, bar, &info, true);
+        }
+    }
+    layout_controls(hwnd, dpi);
+    unsafe {
+        let _ = InvalidateRect(hwnd, None, true);
+    }
+    UPDATING.with(|flag| flag.set(false));
+}
 
-    move_control(hwnd, 714, 42, 278, 616, 22, dpi);
-    move_control(hwnd, ID_START_WITH_WINDOWS, 42, 308, 350, ROW, dpi);
-    move_control(hwnd, ID_NOTIFY_AFTER_SAVE, 42, 337, 310, ROW, dpi);
+fn scroll_by(hwnd: HWND, horizontal: bool, delta: i32) {
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    let bar = if horizontal { SB_HORZ } else { SB_VERT };
+    let mut info = SCROLLINFO {
+        cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
+        fMask: SIF_ALL,
+        ..Default::default()
+    };
+    unsafe {
+        let _ = GetScrollInfo(hwnd, bar, &mut info);
+    }
+    let position = (info.nPos + delta).clamp(0, (info.nMax - info.nPage as i32 + 1).max(0));
+    unsafe {
+        SetScrollPos(hwnd, bar, position, true);
+    }
+    let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd) }.max(96);
+    layout_controls(hwnd, dpi);
+    unsafe {
+        let _ = InvalidateRect(hwnd, None, true);
+    }
+}
 
-    move_control(hwnd, 715, 42, 388, 616, 22, dpi);
-    move_control(hwnd, ID_CHECK_UPDATES, 42, 418, 310, ROW, dpi);
-    move_control(hwnd, ID_AUTO_INSTALL, 42, 447, 380, ROW, dpi);
-    move_control(hwnd, ID_CHECK_UPDATE, 42, 478, 146, 30, dpi);
-    move_control(hwnd, 708, 202, 475, 456, 38, dpi);
-
-    move_control(hwnd, ID_SAVE, 462, 529, 108, 34, dpi);
-    move_control(hwnd, ID_CANCEL, 580, 529, 96, 34, dpi);
+pub fn ensure_focus_visible(hwnd: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::IsChild;
+    let focus = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() };
+    if !unsafe { IsChild(hwnd, focus).as_bool() } {
+        return;
+    }
+    let mut rect = RECT::default();
+    let mut client = RECT::default();
+    unsafe {
+        let _ = GetWindowRect(focus, &mut rect);
+        let _ = GetClientRect(hwnd, &mut client);
+    }
+    let mut point = POINT {
+        x: rect.left,
+        y: rect.top,
+    };
+    unsafe {
+        let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut point);
+    }
+    let bottom = point.y + rect.bottom - rect.top;
+    let right = point.x + rect.right - rect.left;
+    if point.y < 0 {
+        scroll_by(hwnd, false, point.y - 8);
+    } else if bottom > client.bottom {
+        scroll_by(hwnd, false, bottom - client.bottom + 8);
+    }
+    if point.x < 0 {
+        scroll_by(hwnd, true, point.x - 8);
+    } else if right > client.right {
+        scroll_by(hwnd, true, right - client.right + 8);
+    }
 }
 
 fn show_controls(hwnd: HWND, ids: &[i32], show: bool) {
@@ -559,34 +821,29 @@ fn update_folder_label(hwnd: HWND, path: &Path) {
     }
 }
 
-fn choose_folder(owner: HWND) -> Option<PathBuf> {
-    let mut display_name = [0u16; 260];
-    let title = wide_string("Choose where isolmaSS saves screenshots");
-    let browse = windows::Win32::UI::Shell::BROWSEINFOW {
-        hwndOwner: owner,
-        pszDisplayName: windows::core::PWSTR(display_name.as_mut_ptr()),
-        lpszTitle: PCWSTR(title.as_ptr()),
-        ulFlags: windows::Win32::UI::Shell::BIF_RETURNONLYFSDIRS
-            | windows::Win32::UI::Shell::BIF_NEWDIALOGSTYLE,
-        ..Default::default()
+fn choose_folder(owner: HWND) -> Result<Option<PathBuf>> {
+    use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, CoTaskMemFree};
+    use windows::Win32::UI::Shell::{
+        FOS_FORCEFILESYSTEM, FOS_PICKFOLDERS, FileOpenDialog, IFileOpenDialog, SIGDN_FILESYSPATH,
     };
-    let item = unsafe { windows::Win32::UI::Shell::SHBrowseForFolderW(&browse) };
-    if item.is_null() {
-        return None;
-    }
-    let mut path = [0u16; 260];
-    let valid = unsafe { windows::Win32::UI::Shell::SHGetPathFromIDListW(item, &mut path) };
+    let dialog: IFileOpenDialog =
+        unsafe { CoCreateInstance(&FileOpenDialog, None, CLSCTX_INPROC_SERVER)? };
     unsafe {
-        windows::Win32::System::Com::CoTaskMemFree(Some(item.cast()));
+        dialog.SetOptions(dialog.GetOptions()? | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM)?;
+        dialog.SetTitle(w!("Choose your screenshot folder"))?;
     }
-    if !valid.as_bool() {
-        return None;
+    if let Err(error) = unsafe { dialog.Show(owner) } {
+        if error.code() == windows::core::HRESULT::from_win32(1223) {
+            return Ok(None);
+        }
+        return Err(error);
     }
-    let length = path
-        .iter()
-        .position(|value| *value == 0)
-        .unwrap_or(path.len());
-    Some(PathBuf::from(String::from_utf16_lossy(&path[..length])))
+    let raw = unsafe { dialog.GetResult()?.GetDisplayName(SIGDN_FILESYSPATH)? };
+    let path = unsafe { raw.to_string() };
+    unsafe {
+        CoTaskMemFree(Some(raw.0.cast()));
+    }
+    Ok(Some(PathBuf::from(path?)))
 }
 
 fn create_settings_controls(hwnd: HWND) -> Result<()> {
@@ -596,21 +853,28 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
     };
     let label = |id, text| create_control(hwnd, w!("STATIC"), text, Default::default(), id);
 
-    label(700, "isolmaSS Settings")?;
+    label(700, "isolmaSS")?;
+    label(716, "Capture settings")?;
+    label(717, "Choose how you capture, edit, and save.")?;
     label(
-        709,
-        "Capture quickly with everyday options, or fine-tune behavior in Advanced.",
+        718,
+        concat!(
+            "Version ",
+            env!("CARGO_PKG_VERSION"),
+            "\nPrivate by design. MIT licensed."
+        ),
     )?;
+    label(709, "Your capture studio.\nMade for Windows.")?;
     create_button(
         hwnd,
         ID_VIEW_SIMPLE,
-        "&Simple",
+        "General",
         BS_AUTORADIOBUTTON | BS_PUSHLIKE | WS_GROUP.0 as i32 | WS_TABSTOP.0 as i32,
     )?;
     create_button(
         hwnd,
         ID_VIEW_ADVANCED,
-        "&Advanced",
+        "Editor and system",
         BS_AUTORADIOBUTTON | BS_PUSHLIKE | WS_TABSTOP.0 as i32,
     )?;
 
@@ -665,7 +929,7 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
     create_button(
         hwnd,
         ID_BROWSE,
-        "Browse...",
+        "Choose folder",
         BS_PUSHBUTTON | WS_TABSTOP.0 as i32,
     )?;
     label(706, "Image format")?;
@@ -702,13 +966,13 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
     create_button(
         hwnd,
         ID_WINDOW_SNAP,
-        "Enable single-click window snap",
+        "Snap to a window with one click",
         BS_AUTOCHECKBOX | WS_GROUP.0 as i32 | WS_TABSTOP.0 as i32,
     )?;
     create_button(
         hwnd,
         ID_CLOSE_AFTER_ACTION,
-        "Close overlay after Copy or Save",
+        "Close the editor after saving or copying",
         BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32,
     )?;
 
@@ -791,7 +1055,7 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
     create_button(
         hwnd,
         ID_SAVE,
-        "Save && Apply",
+        "Save changes",
         BS_DEFPUSHBUTTON | WS_GROUP.0 as i32 | WS_TABSTOP.0 as i32,
     )?;
     create_button(
@@ -863,64 +1127,7 @@ fn apply_button_action(hwnd: HWND, state: &mut SettingsWindowState, id: i32) {
         ID_QUALITY_FIRST..=612 => {
             state.settings.jpeg_quality = [80, 90, 100][(id - ID_QUALITY_FIRST) as usize];
         }
-        ID_BROWSE => {
-            if let Some(path) = choose_folder(hwnd) {
-                state.settings.save_directory = path;
-                update_folder_label(hwnd, &state.settings.save_directory);
-            }
-        }
         ID_CHECK_UPDATE => crate::updater::run_manual_update_check(),
-        ID_SAVE => {
-            let requested_startup = state.settings.start_with_windows;
-            if let Err(error) = crate::startup::set_start_with_windows(requested_startup) {
-                let message = wide_string(&format!(
-                    "Settings were not saved because the Windows startup setting could not be applied:\n\n{error}"
-                ));
-                unsafe {
-                    let _ = windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
-                        hwnd,
-                        PCWSTR(message.as_ptr()),
-                        w!("isolmaSS settings error"),
-                        windows::Win32::UI::WindowsAndMessaging::MB_OK
-                            | windows::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
-                    );
-                }
-                return;
-            }
-
-            match state.settings.save() {
-                Ok(()) => {
-                    state.saved = true;
-                    unsafe {
-                        let _ = DestroyWindow(hwnd);
-                    }
-                }
-                Err(error) => {
-                    let rollback =
-                        crate::startup::set_start_with_windows(state.original_start_with_windows);
-                    let rollback_note = rollback
-                        .err()
-                        .map(|rollback_error| {
-                            format!(
-                                "\n\nThe previous Windows startup setting could not be restored: {rollback_error}"
-                            )
-                        })
-                        .unwrap_or_default();
-                    let message = wide_string(&format!(
-                        "Settings could not be saved:\n\n{error}{rollback_note}"
-                    ));
-                    unsafe {
-                        let _ = windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
-                            hwnd,
-                            PCWSTR(message.as_ptr()),
-                            w!("isolmaSS settings error"),
-                            windows::Win32::UI::WindowsAndMessaging::MB_OK
-                                | windows::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
-                        );
-                    }
-                }
-            }
-        }
         ID_CANCEL => unsafe {
             let _ = DestroyWindow(hwnd);
         },
@@ -936,6 +1143,60 @@ unsafe extern "system" fn settings_wnd_proc(
 ) -> LRESULT {
     let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut SettingsWindowState;
     match msg {
+        windows::Win32::UI::WindowsAndMessaging::WM_NCDESTROY => {
+            unsafe {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_SIZE => {
+            if !state_ptr.is_null() {
+                update_scrollbars(hwnd, unsafe { (*state_ptr).dpi });
+            }
+            LRESULT(0)
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_MOUSEWHEEL => {
+            scroll_by(hwnd, false, -((wparam.0 >> 16) as u16 as i16 as i32) / 2);
+            LRESULT(0)
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_VSCROLL
+        | windows::Win32::UI::WindowsAndMessaging::WM_HSCROLL => {
+            use windows::Win32::UI::WindowsAndMessaging::*;
+            let horizontal = msg == WM_HSCROLL;
+            let bar = if horizontal { SB_HORZ } else { SB_VERT };
+            let mut info = SCROLLINFO {
+                cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
+                fMask: SIF_ALL,
+                ..Default::default()
+            };
+            unsafe {
+                let _ = GetScrollInfo(hwnd, bar, &mut info);
+            }
+            let delta = match wparam.0 as u16 as i32 {
+                0 => -40,
+                1 => 40,
+                2 => -(info.nPage as i32),
+                3 => info.nPage as i32,
+                4 | 5 => info.nTrackPos - info.nPos,
+                _ => 0,
+            };
+            scroll_by(hwnd, horizontal, delta);
+            LRESULT(0)
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_NOTIFY => {
+            use windows::Win32::UI::Controls::*;
+            if !state_ptr.is_null() && lparam.0 != 0 {
+                let header = unsafe { &*(lparam.0 as *const NMHDR) };
+                if header.code == NM_CUSTOMDRAW {
+                    let draw = unsafe { &*(lparam.0 as *const NMCUSTOMDRAW) };
+                    if draw.dwDrawStage == CDDS_PREPAINT {
+                        draw_settings_button(draw, unsafe { &*state_ptr });
+                        return LRESULT(CDRF_SKIPDEFAULT as isize);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
         WM_PAINT => {
             if state_ptr.is_null() {
                 return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
@@ -989,8 +1250,45 @@ unsafe extern "system" fn settings_wnd_proc(
             LRESULT(brush.0 as isize)
         }
         windows::Win32::UI::WindowsAndMessaging::WM_COMMAND => {
-            if !state_ptr.is_null() {
-                apply_button_action(hwnd, unsafe { &mut *state_ptr }, (wparam.0 & 0xffff) as i32);
+            if state_ptr.is_null() || wparam.0 >> 16 != 0 {
+                return LRESULT(0);
+            }
+            let id = (wparam.0 & 0xffff) as i32;
+            if id == ID_BROWSE {
+                match choose_folder(hwnd) {
+                    Ok(Some(path)) => unsafe {
+                        (*state_ptr).settings.save_directory = path;
+                        update_folder_label(hwnd, &(*state_ptr).settings.save_directory);
+                    },
+                    Ok(None) => {}
+                    Err(error) => {
+                        crate::ui::error(hwnd, "Folder could not be opened", &error.to_string())
+                    }
+                }
+            } else if id == ID_SAVE {
+                let settings = unsafe { (*state_ptr).settings.clone() };
+                let result = save_settings(&settings);
+                match result {
+                    Ok(()) => unsafe {
+                        (*state_ptr).saved = true;
+                        let _ = DestroyWindow(hwnd);
+                    },
+                    Err(error) => crate::ui::error(hwnd, "Settings could not be saved", &error),
+                }
+            } else {
+                apply_button_action(hwnd, unsafe { &mut *state_ptr }, id);
+                if unsafe { IsWindow(hwnd).as_bool() } {
+                    initialize_control_values(hwnd, unsafe { &(*state_ptr).settings });
+                    unsafe {
+                        let _ = windows::Win32::Graphics::Gdi::RedrawWindow(
+                            hwnd,
+                            None,
+                            None,
+                            windows::Win32::Graphics::Gdi::RDW_INVALIDATE
+                                | windows::Win32::Graphics::Gdi::RDW_ALLCHILDREN,
+                        );
+                    }
+                }
             }
             LRESULT(0)
         }
@@ -1022,7 +1320,8 @@ unsafe extern "system" fn settings_wnd_proc(
                 for id in 710..=715 {
                     set_control_font(hwnd, id, new_heading_font);
                 }
-                layout_controls(hwnd, state.dpi);
+                center_dialog(hwnd, None);
+                update_scrollbars(hwnd, state.dpi);
                 for font in [old_font, old_title_font, old_heading_font] {
                     if !font.is_invalid() {
                         unsafe {
@@ -1048,10 +1347,7 @@ unsafe extern "system" fn settings_wnd_proc(
             }
             LRESULT(0)
         }
-        WM_DESTROY => {
-            unsafe { PostQuitMessage(0) };
-            LRESULT(0)
-        }
+        WM_DESTROY => LRESULT(0),
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
@@ -1139,8 +1435,7 @@ fn center_dialog(hwnd: HWND, owner: Option<HWND>) {
         }
         unsafe { MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST) }
     } else {
-        let point = POINT { x: 0, y: 0 };
-        unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTOPRIMARY) }
+        unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) }
     };
     let mut info = MONITORINFO {
         cbSize: std::mem::size_of::<MONITORINFO>() as u32,
@@ -1152,6 +1447,8 @@ fn center_dialog(hwnd: HWND, owner: Option<HWND>) {
     if owner.is_none() {
         anchor = info.rcWork;
     }
+    let width = width.min((info.rcWork.right - info.rcWork.left - 16).max(1));
+    let height = height.min((info.rcWork.bottom - info.rcWork.top - 16).max(1));
     let x = (anchor.left + (anchor.right - anchor.left - width) / 2)
         .clamp(info.rcWork.left, info.rcWork.right - width);
     let y = (anchor.top + (anchor.bottom - anchor.top - height) / 2)
@@ -1162,26 +1459,17 @@ fn center_dialog(hwnd: HWND, owner: Option<HWND>) {
             None,
             x,
             y,
-            0,
-            0,
-            windows::Win32::UI::WindowsAndMessaging::SWP_NOSIZE
-                | windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE
+            width,
+            height,
+            windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE
                 | windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER,
         );
     }
 }
 
 fn activate_dialog(hwnd: HWND) {
-    let foreground = unsafe { GetForegroundWindow() };
-    let current_thread = unsafe { GetCurrentThreadId() };
-    let foreground_thread = if foreground.is_invalid() {
-        0
-    } else {
-        unsafe { GetWindowThreadProcessId(foreground, None) }
-    };
-    let attached = foreground_thread != 0
-        && foreground_thread != current_thread
-        && unsafe { AttachThreadInput(current_thread, foreground_thread, true).as_bool() };
+    // Do not attach to another application's input queue: an unresponsive foreground
+    // process must never block opening our settings window.
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = BringWindowToTop(hwnd);
@@ -1192,19 +1480,22 @@ fn activate_dialog(hwnd: HWND) {
             let _ = SetFocus(first);
         }
     }
-    if attached {
-        unsafe {
-            let _ = AttachThreadInput(current_thread, foreground_thread, false);
-        }
-    }
 }
 
 pub fn show_settings_dialog(current: &Settings, owner: Option<HWND>) -> Result<Option<Settings>> {
+    unsafe {
+        use windows::Win32::UI::Controls::*;
+        let init = INITCOMMONCONTROLSEX {
+            dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
+            dwICC: ICC_STANDARD_CLASSES,
+        };
+        let _ = InitCommonControlsEx(&init);
+    }
+    crate::diagnostics::record("settings", "Opening settings window");
     register_settings_class()?;
     let mut state = Box::new(SettingsWindowState {
         settings: current.clone(),
         saved: false,
-        original_start_with_windows: current.start_with_windows,
         active_view: SettingsView::Simple,
         dpi: 96,
         font: Default::default(),
@@ -1220,7 +1511,12 @@ pub fn show_settings_dialog(current: &Settings, owner: Option<HWND>) -> Result<O
             w!("isolmaSS Settings"),
             windows::Win32::UI::WindowsAndMessaging::WS_OVERLAPPED
                 | windows::Win32::UI::WindowsAndMessaging::WS_CAPTION
-                | windows::Win32::UI::WindowsAndMessaging::WS_SYSMENU,
+                | windows::Win32::UI::WindowsAndMessaging::WS_SYSMENU
+                | windows::Win32::UI::WindowsAndMessaging::WS_THICKFRAME
+                | windows::Win32::UI::WindowsAndMessaging::WS_MAXIMIZEBOX
+                | windows::Win32::UI::WindowsAndMessaging::WS_VSCROLL
+                | windows::Win32::UI::WindowsAndMessaging::WS_HSCROLL
+                | windows::Win32::UI::WindowsAndMessaging::WS_CLIPCHILDREN,
             windows::Win32::UI::WindowsAndMessaging::CW_USEDEFAULT,
             windows::Win32::UI::WindowsAndMessaging::CW_USEDEFAULT,
             SETTINGS_WIDTH,
@@ -1231,6 +1527,9 @@ pub fn show_settings_dialog(current: &Settings, owner: Option<HWND>) -> Result<O
             None,
         )?
     };
+    crate::diagnostics::record("settings", "Window created");
+    let _window = crate::ui::OwnedWindow(hwnd);
+    let _suspend = crate::hotkey::OverlayInputSuspension::new();
     let _modal_owner = ModalOwner::disable(owner);
     unsafe {
         SetWindowLongPtrW(
@@ -1256,22 +1555,11 @@ pub fn show_settings_dialog(current: &Settings, owner: Option<HWND>) -> Result<O
     state.font = create_settings_font(state.dpi);
     state.title_font = create_title_font(state.dpi);
     state.heading_font = create_heading_font(state.dpi);
-    if let Err(error) = create_settings_controls(hwnd) {
-        unsafe {
-            let _ = DestroyWindow(hwnd);
-            let mut quit = MSG::default();
-            let _ = PeekMessageW(
-                &mut quit,
-                None,
-                windows::Win32::UI::WindowsAndMessaging::WM_QUIT,
-                windows::Win32::UI::WindowsAndMessaging::WM_QUIT,
-                PM_REMOVE,
-            );
-        }
-        return Err(error);
-    }
+    create_settings_controls(hwnd)?;
+    crate::diagnostics::record("settings", "Controls created");
     set_controls_font(hwnd, state.font);
     set_control_font(hwnd, 700, state.title_font);
+    set_control_font(hwnd, 716, state.title_font);
     for id in 710..=715 {
         set_control_font(hwnd, id, state.heading_font);
     }
@@ -1279,47 +1567,32 @@ pub fn show_settings_dialog(current: &Settings, owner: Option<HWND>) -> Result<O
     initialize_control_values(hwnd, &state.settings);
     set_active_view(hwnd, state.active_view);
     center_dialog(hwnd, owner);
-    activate_dialog(hwnd);
-
-    let mut msg = MSG::default();
-    loop {
-        let status = unsafe { GetMessageW(&mut msg, HWND::default(), 0, 0) };
-        if status.0 == -1 {
-            if unsafe { IsWindow(hwnd).as_bool() } {
-                unsafe {
-                    let _ = DestroyWindow(hwnd);
-                    let _ = PeekMessageW(
-                        &mut msg,
-                        None,
-                        windows::Win32::UI::WindowsAndMessaging::WM_QUIT,
-                        windows::Win32::UI::WindowsAndMessaging::WM_QUIT,
-                        PM_REMOVE,
-                    );
-                }
-            }
-            return Err(windows::core::Error::from_win32());
-        }
-        if status.0 == 0 {
-            break;
-        }
-        if msg.message == WM_KEYDOWN && msg.wParam.0 == VK_ESCAPE.0 as usize {
-            unsafe {
-                let _ = DestroyWindow(hwnd);
-            }
-            continue;
-        }
-        if !unsafe { windows::Win32::UI::WindowsAndMessaging::IsDialogMessageW(hwnd, &msg) }
-            .as_bool()
-        {
-            unsafe {
-                let _ = TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
-        }
+    update_scrollbars(hwnd, state.dpi);
+    unsafe {
+        let _ = ShowWindow(hwnd, SW_SHOW);
     }
+    activate_dialog(hwnd);
+    crate::diagnostics::record("settings", "Window activated");
+
+    crate::ui::window_loop(hwnd, crate::ui::WindowKind::Settings)?;
     if state.saved {
         Ok(Some(state.settings.clone()))
     } else {
         Ok(None)
     }
+}
+
+fn save_settings(settings: &Settings) -> std::result::Result<(), String> {
+    settings.validate().map_err(|error| error.to_string())?;
+    let previous = crate::startup::StartupRegistration::read()?;
+    crate::startup::set_start_with_windows(settings.start_with_windows)?;
+    if let Err(error) = settings.save() {
+        let rollback = previous
+            .restore()
+            .err()
+            .map(|error| format!(" Startup restoration also failed: {error}"))
+            .unwrap_or_default();
+        return Err(format!("{error}{rollback}"));
+    }
+    Ok(())
 }

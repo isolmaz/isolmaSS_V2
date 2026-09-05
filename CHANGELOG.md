@@ -5,7 +5,47 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [Unreleased] — 0.3.0
+
+### Added
+
+- Modern light Settings, editor toolbar and tray command menu, with rounded cards, Segoe UI, indigo accents, larger targets and labeled actions. Settings has General / Editor and system navigation, resizing, scrolling and DPI updates; the toolbar has a compact grid fallback.
+- Opaque Redact, selection magnifier/dimensions, keyboard positioning, richer single-line text selection/paste/undo, Save as and opening the last save folder.
+- MIT license, third-party notices, signing/distribution and security documentation, pinned Rust 1.98.0 and Windows CI.
+- Cargo-derived Windows file versions and a capture-to-visible benchmark command with explicit measurement boundaries.
+
+### Fixed
+
+- Stale toolbar hover panics, small-region resize bounds and Settings work-area clamp failures.
+- Child-window state lifetime and nested quit handling, modal input isolation, text export shortcuts, V/M routing, AltGr command handling and Ctrl+, while editing text.
+- Clipboard ownership on failure, opaque PNG/DIB output, capture GDI synchronization, text glyph measurement/surrogate handling, annotation history order and selection translations.
+- Blur layer ordering; final opaque masks also cover later annotations.
+- Hook initialization/cleanup errors, real fallback shortcut display, stale queued captures, live daemon preferences and editor-only configuration merges. Startup rollback preserves the exact previous registry value.
+- Update publisher identity, transport/worker bounds, cancellation, version checks, unique downloads and verification immediately before execution.
+- NSIS UPDATE detection, old-process waiting, executable staging/rollback and uninstall refusal when the application cannot be removed.
+- Fresh smoke installer compilation with the source version. Packaging now validates final artifact sizes/versions and refuses failed checksum generation instead of printing false success.
+
+### Performance
+
+- Coalesced scene drawing, bounded unchanged-scene and GDI caches, deferred editor preference writes, timer-based countdowns and bounded capture queues.
+- Large capture-buffer release, pen point coalescing/caps and cached geometry, background recent-file refresh, and skipped closing-frame composition.
+- Selected release optimization 3 after 50 repeated and 50 process-cold captures per profile. Repeated p95 was 51.016 ms versus 71.575 ms for z in that comparison; the 30 ms target remains open. See ROADMAP.md for the subsequent confirmation, memory figures and unmeasured scopes.
+
+### Verification — 2026-09-05
+
+- Formatting, locked/offline check, warning-free Clippy, 21 unit tests including tray lifecycle, release build, full existing Windows smoke command and NSIS packaging passed.
+- Smoke decoded PNG pixels/alpha, checked failed replacement preservation and repeated busy-clipboard failures; the local harness restored clipboard contents.
+- Wrong-publisher rejection was exercised with Edge's otherwise valid embedded signature. The artifacts are unsigned; a successful signed isolmaSS update and real install/uninstall fault scenarios remain unverified.
+- Final UI verification was stopped by the user with Escape. Alternate DPI and complete interactive UX validation remain open. Remote CI was not run.
+- All 27 locked registry package/version entries were compared with the 1,219 crate advisories in RustSec snapshot `5a0ebedfe8bdd2e295b171f4162f8c977bcad9a5`; no affected locked package was found. The only matching advisory is patched in windows 0.58.0. This used direct database metadata/range checks; cargo-audit/cargo-deny were not run.
+- Local unsigned executable: **888,832 bytes**; SHA-256: `0c05a0a46725deb59322a41a3d5807c09eb48b3dde72d2489c9fe1ba9149a66e`.
+- Local unsigned installer: **417,203 bytes**; SHA-256: `01e67dd9598fee6b33b4916d8452e22177769cc66c2ac72cfb88d9bd54c77490`. Both embed version 0.3.0 and pass their 2.5 / 3 MiB size limits.
+- Detailed audit disposition and remaining quality gates are in ROADMAP.md.
+
+## 0.2.0 working-tree history — 2026-09-04
+
+The entries below describe the earlier checkout and its verification at that time. They are retained as history, not evidence for the 0.3.0 interface or a claim that either version was published.
+
 
 ### Added
 - **Explicit Select and annotation transforms**:

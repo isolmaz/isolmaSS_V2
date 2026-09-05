@@ -1,8 +1,8 @@
-use crate::save::recent_screenshots;
 use crate::settings::Settings;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::SyncSender;
+use std::time::Instant;
 use windows::Win32::Foundation::{
     ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM,
 };
@@ -12,15 +12,7 @@ use windows::Win32::UI::Shell::{
     NIM_DELETE, NIM_MODIFY, NIM_SETVERSION, NIN_SELECT, NOTIFYICON_VERSION_4, NOTIFYICONDATAW,
     Shell_NotifyIconW,
 };
-use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow,
-    GWLP_USERDATA, GetCursorPos, GetWindowLongPtrW, HICON, IDI_APPLICATION, LoadIconW,
-    MB_ICONERROR, MB_OK, MF_GRAYED, MF_SEPARATOR, MF_STRING, MessageBoxW, PostMessageW,
-    PostQuitMessage, RegisterClassExW, RegisterWindowMessageW, SetForegroundWindow,
-    SetMenuDefaultItem, SetWindowLongPtrW, TPM_BOTTOMALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    TrackPopupMenu, WM_APP, WM_CLOSE, WM_CONTEXTMENU, WM_DESTROY, WM_LBUTTONDBLCLK, WM_LBUTTONUP,
-    WM_NULL, WM_RBUTTONUP, WNDCLASSEXW,
-};
+use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 
 pub const WM_TRAYICON: u32 = WM_APP + 101;
@@ -33,24 +25,63 @@ const NIN_KEYSELECT_EVENT: u32 = NIN_SELECT + 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TrayCommand {
-    Capture,
+    Capture(Instant),
+    CancelCapture,
     Settings,
     CheckUpdates,
     OpenRecent(PathBuf),
+    OpenFolder,
     Exit,
 }
 
+static PREFERENCES: std::sync::Mutex<Option<Settings>> = std::sync::Mutex::new(None);
+static ACTIVE_HOTKEY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+pub fn set_active_hotkey(description: &str) {
+    *ACTIVE_HOTKEY
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(description.to_owned());
+}
+pub fn refresh_preferences(settings: &Settings) {
+    *PREFERENCES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(settings.clone());
+    crate::save::recent::refresh(&settings.save_directory);
+}
+
 static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
+static LAST_FINISHED: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+static CAPTURE_PENDING: AtomicBool = AtomicBool::new(false);
+pub const WM_CANCEL_CAPTURE: u32 = WM_APP + 103;
+pub fn capture_finished() {
+    *LAST_FINISHED
+        .lock()
+        .unwrap_or_else(|error| error.into_inner()) = Some(Instant::now());
+    CAPTURE_PENDING.store(false, Ordering::Release);
+}
+pub fn capture_pending() -> bool {
+    CAPTURE_PENDING.load(Ordering::Acquire)
+}
+pub fn window_handle() -> HWND {
+    HWND(TRAY_HWND.load(Ordering::Acquire) as *mut _)
+}
+
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
 struct TrayWindowState {
-    event_tx: Sender<TrayCommand>,
+    event_tx: SyncSender<TrayCommand>,
 }
 
 fn copy_wide<const N: usize>(destination: &mut [u16; N], value: &str) {
-    let wide = value.encode_utf16().chain(Some(0));
-    for (slot, code_unit) in destination.iter_mut().zip(wide) {
+    destination.fill(0);
+    for (slot, code_unit) in destination
+        .iter_mut()
+        .take(N.saturating_sub(1))
+        .zip(value.encode_utf16())
+    {
         *slot = code_unit;
+    }
+    if N > 1 && (0xd800..=0xdbff).contains(&destination[N - 2]) {
+        destination[N - 2] = 0;
     }
 }
 
@@ -95,8 +126,37 @@ fn add_tray_icon(hwnd: HWND) -> Result<NOTIFYICONDATAW> {
     Ok(data)
 }
 
+pub fn capture_is_stale(triggered: Instant) -> bool {
+    LAST_FINISHED
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .is_some_and(|finished| triggered < finished)
+}
+
+pub fn queue_capture(sender: &SyncSender<TrayCommand>, triggered: Instant) {
+    if capture_is_stale(triggered) {
+        return;
+    }
+    if crate::hotkey::is_overlay_active()
+        || crate::hotkey::overlay_input_suspended()
+        || CAPTURE_PENDING.swap(true, Ordering::AcqRel)
+    {
+        return;
+    }
+    if sender.try_send(TrayCommand::Capture(triggered)).is_err() {
+        capture_finished();
+    }
+    notify_tray_wakeup();
+}
+
 fn send_command(state: &TrayWindowState, command: TrayCommand) {
-    let _ = state.event_tx.send(command);
+    if let TrayCommand::Capture(triggered) = command {
+        queue_capture(&state.event_tx, triggered);
+        return;
+    }
+    if let Err(error) = state.event_tx.try_send(command) {
+        crate::diagnostics::record("tray", &format!("Command queue unavailable: {error}"));
+    }
     notify_tray_wakeup();
 }
 
@@ -172,7 +232,9 @@ unsafe extern "system" fn tray_wnd_proc(
             let (event, icon_id, is_version_four) = decode_tray_event(wparam.0, lparam.0);
             let state = unsafe { &*state_ptr };
             match tray_event_action(event, icon_id) {
-                Some(TrayEventAction::Capture) => send_command(state, TrayCommand::Capture),
+                Some(TrayEventAction::Capture) => {
+                    send_command(state, TrayCommand::Capture(Instant::now()))
+                }
                 Some(TrayEventAction::ContextMenu) => {
                     let anchor = (is_version_four && event == WM_CONTEXTMENU)
                         .then(|| callback_point(wparam))
@@ -183,9 +245,29 @@ unsafe extern "system" fn tray_wnd_proc(
             }
             LRESULT(0)
         }
-        WM_CLOSE => {
-            let _ = unsafe { DestroyWindow(hwnd) };
+        WM_CANCEL_CAPTURE => {
+            if !state_ptr.is_null() {
+                send_command(unsafe { &*state_ptr }, TrayCommand::CancelCapture);
+            }
             LRESULT(0)
+        }
+        WM_CLOSE => {
+            if !state_ptr.is_null() {
+                send_command(unsafe { &*state_ptr }, TrayCommand::Exit);
+                if crate::hotkey::is_overlay_active() || crate::hotkey::overlay_input_suspended() {
+                    show_notification(
+                        "Close requested",
+                        "Finish the current capture or settings changes to close isolmaSS safely.",
+                    );
+                }
+            }
+            LRESULT(0)
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_NCDESTROY => {
+            unsafe {
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         WM_DESTROY => {
             unsafe { PostQuitMessage(0) };
@@ -195,6 +277,8 @@ unsafe extern "system" fn tray_wnd_proc(
     }
 }
 
+pub(crate) mod menu;
+
 fn show_context_menu(hwnd: HWND, state: &TrayWindowState, anchor: Option<POINT>) {
     let mut point = anchor.unwrap_or_default();
     if anchor.is_none() {
@@ -202,59 +286,21 @@ fn show_context_menu(hwnd: HWND, state: &TrayWindowState, anchor: Option<POINT>)
             let _ = GetCursorPos(&mut point);
         }
     }
-    let Ok(menu) = (unsafe { CreatePopupMenu() }) else {
-        return;
-    };
-
-    let settings = Settings::load_or_default();
-    let recent = recent_screenshots(&settings.save_directory, 5).unwrap_or_default();
-    unsafe {
-        let _ = AppendMenuW(menu, MF_STRING, 1, w!("Capture Now"));
-        let _ = AppendMenuW(menu, MF_STRING, 2, w!("Settings..."));
-        let _ = AppendMenuW(menu, MF_STRING, 3, w!("Check for Updates"));
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        if recent.is_empty() {
-            let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 99, w!("No Recent Captures"));
-        } else {
-            let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 98, w!("Recent Captures"));
-            for (index, path) in recent.iter().enumerate() {
-                let label = path
-                    .file_name()
-                    .and_then(|name| name.to_str())
-                    .unwrap_or("Screenshot");
-                let wide: Vec<u16> = label.encode_utf16().chain(Some(0)).collect();
-                let _ = AppendMenuW(menu, MF_STRING, 100 + index, PCWSTR(wide.as_ptr()));
-            }
-        }
-        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
-        let _ = AppendMenuW(menu, MF_STRING, 4, w!("Exit"));
-        let _ = SetMenuDefaultItem(menu, 1, 0);
-        let _ = SetForegroundWindow(hwnd);
-
-        let selected = TrackPopupMenu(
-            menu,
-            TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_RETURNCMD,
-            point.x,
-            point.y,
-            0,
-            hwnd,
-            None,
-        );
-        let _ = PostMessageW(hwnd, WM_NULL, WPARAM(0), LPARAM(0));
-        let _ = DestroyMenu(menu);
-        match selected.0 {
-            1 => send_command(state, TrayCommand::Capture),
-            2 => send_command(state, TrayCommand::Settings),
-            3 => send_command(state, TrayCommand::CheckUpdates),
-            4 => send_command(state, TrayCommand::Exit),
-            id if id >= 100 && (id as usize) < 100 + recent.len() => {
-                send_command(
-                    state,
-                    TrayCommand::OpenRecent(recent[id as usize - 100].clone()),
-                );
-            }
-            _ => {}
-        }
+    let preferences = PREFERENCES
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+        .unwrap_or_default();
+    crate::save::recent::refresh(&preferences.save_directory);
+    let active_hotkey = ACTIVE_HOTKEY
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .clone()
+        .unwrap_or(preferences.hotkey.description);
+    match menu::show(hwnd, point, crate::save::recent::list(), &active_hotkey) {
+        Ok(Some(command)) => send_command(state, command),
+        Ok(None) => {}
+        Err(error) => crate::ui::error(hwnd, "Menu could not be opened", &error.to_string()),
     }
 }
 
@@ -286,7 +332,7 @@ pub struct TrayManager {
 }
 
 impl TrayManager {
-    pub fn create(event_tx: Sender<TrayCommand>) -> Result<Self> {
+    pub fn create(event_tx: SyncSender<TrayCommand>) -> Result<Self> {
         register_tray_class()?;
         TASKBAR_CREATED.store(
             unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
@@ -384,7 +430,6 @@ pub fn notify_tray_wakeup() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::mpsc::channel;
 
     #[test]
     fn version_four_and_legacy_events_dispatch_for_our_icon() {
@@ -420,7 +465,7 @@ mod tests {
 
     #[test]
     fn test_tray_manager_lifecycle() {
-        let (tx, _rx) = channel::<TrayCommand>();
+        let (tx, _rx) = std::sync::mpsc::sync_channel::<TrayCommand>(16);
         let manager = TrayManager::create(tx);
         assert!(manager.is_ok(), "TrayManager::create should succeed");
         notify_tray_wakeup();

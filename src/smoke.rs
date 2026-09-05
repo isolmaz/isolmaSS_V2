@@ -12,8 +12,8 @@ use crate::tray;
 use crate::window_snap::{find_window_at_point, get_visible_windows};
 use crate::{capture, overlay};
 use std::io::Read;
+use std::os::windows::process::CommandExt;
 use std::rc::Rc;
-use std::sync::mpsc::channel;
 use std::time::Instant;
 use windows::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS};
 use windows::Win32::System::Threading::GetCurrentProcess;
@@ -195,11 +195,9 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     // ------------------------------------------------------------
     println!("\n[Slice A3] Verifying Fullscreen Layered Overlay Properties...");
     println!("  - Target Styles: WS_POPUP");
-    println!(
-        "  - Extended Styles: WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE"
-    );
+    println!("  - Extended Styles: WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST");
     println!("  - Cursor: IDC_CROSS / IDC_HAND");
-    println!("  -> Slice A3: PASSED");
+    println!("  -> Slice A3: informational; runtime window behavior is verified separately.");
 
     // ------------------------------------------------------------
     // Slice A4: Drag-to-Select Geometry & Fast Scanline Punch-Out
@@ -263,10 +261,9 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     assert!(!windows.is_empty());
     for (i, win) in windows.iter().take(5).enumerate() {
         println!(
-            "  [{}] HWND 0x{:08X} | '{}' ({}) | [{}, {} -> {}, {}]",
+            "  [{}] HWND 0x{:08X} | ({}) | [{}, {} -> {}, {}]",
             i,
             win.hwnd.0 as usize,
-            win.title,
             win.class_name,
             win.bounds.left,
             win.bounds.top,
@@ -297,7 +294,7 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         false,
         96,
     );
-    assert_eq!(tb.buttons.len(), 23); // Select/drawing/history + swatches/thickness/actions
+    assert_eq!(tb.buttons.len(), 24); // Select/drawing/history + swatches/thickness/actions
     assert!(tb.tool_bounds.left >= 0);
     assert!(tb.tool_bounds.bottom <= capture.height);
     assert!(tb.action_bounds.left >= 0);
@@ -461,6 +458,53 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         &Rect::new(100, 100, 400, 300),
     )?;
     assert!(sample_dib.len() > 40);
+    // A competing clipboard owner must fail without retaining each allocated DIB.
+    let (locked_tx, locked_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let owner = std::thread::spawn(move || {
+        let result = unsafe { windows::Win32::System::DataExchange::OpenClipboard(None) };
+        if result.is_ok() {
+            let _guard = crate::clipboard::ClipboardGuard;
+            let _ = locked_tx.send(true);
+            let _ = release_rx.recv();
+        } else {
+            let _ = locked_tx.send(false);
+        }
+    });
+    if !locked_rx.recv()? {
+        owner.join().map_err(|_| "Clipboard holder failed")?;
+        return Err("Clipboard is busy; retry the smoke check.".into());
+    }
+    let large_dib = vec![0u8; 8 * 1024 * 1024];
+    let mut before = windows::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS_EX::default();
+    unsafe {
+        GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            (&mut before as *mut windows::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS_EX)
+                .cast(),
+            std::mem::size_of_val(&before) as u32,
+        )?;
+    }
+    let failed = (0..32)
+        .filter(|_| copy_dib_to_clipboard(None, &large_dib).is_err())
+        .count();
+    release_tx.send(())?;
+    owner.join().map_err(|_| "Clipboard holder failed")?;
+    assert_eq!(failed, 32);
+    let mut after = windows::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS_EX::default();
+    unsafe {
+        GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            (&mut after as *mut windows::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS_EX)
+                .cast(),
+            std::mem::size_of_val(&after) as u32,
+        )?;
+    }
+    assert!(
+        after.PrivateUsage.saturating_sub(before.PrivateUsage) < 24 * 1024 * 1024,
+        "Failed copies retained image-sized allocations"
+    );
+    drop(large_dib);
     copy_dib_to_clipboard(None, &sample_dib)?;
     println!("  - Standalone 32-bit DIB copied to Windows Clipboard.");
     println!("  -> Slice A14: PASSED");
@@ -473,17 +517,21 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     println!("  - Level 2: Annotation selected -> Esc deselects.");
     println!("  - Level 3: Selection active -> Esc cancels selection.");
     println!("  - Level 4: In hover mode -> Esc destroys window.");
-    println!("  -> Slice A15: PASSED");
+    println!("  -> Slice A15: covered by the behavioral Escape checks in C1 below.");
 
     // ------------------------------------------------------------
     // Slice B1: Save to File (PNG via GDI+)
     // ------------------------------------------------------------
     println!("\n[Slice B1] Testing Save to File (PNG via Native GDI+)...");
     let test_dir = std::env::temp_dir();
-    let test_png_path = test_dir.join("isolmass_test_smoke.png");
+    let test_png_path = test_dir.join(format!("isolmass-smoke-{}.png", std::process::id()));
 
+    let mut export_pixels = capture.original.to_vec();
+    for pixel in export_pixels.as_chunks_mut::<4>().0 {
+        pixel[3] = 0;
+    }
     let saved_path = save_buffer_to_png(
-        &capture.original,
+        &export_pixels,
         capture.width,
         capture.height,
         &Rect::new(50, 50, 350, 250),
@@ -502,11 +550,71 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         "Generated file must have valid PNG magic header"
     );
 
+    {
+        #[link(name = "gdiplus")]
+        unsafe extern "system" {
+            fn GdipLoadImageFromFile(
+                path: windows::core::PCWSTR,
+                image: *mut *mut std::ffi::c_void,
+            ) -> i32;
+            fn GdipBitmapGetPixel(
+                image: *mut std::ffi::c_void,
+                x: i32,
+                y: i32,
+                color: *mut u32,
+            ) -> i32;
+            fn GdipGetImageWidth(image: *mut std::ffi::c_void, width: *mut u32) -> i32;
+            fn GdipGetImageHeight(image: *mut std::ffi::c_void, height: *mut u32) -> i32;
+        }
+        use std::os::windows::ffi::OsStrExt;
+        let _token = crate::save::GdiPlusToken::start()?;
+        let filename: Vec<u16> = saved_path
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        let mut raw = std::ptr::null_mut();
+        assert_eq!(
+            unsafe { GdipLoadImageFromFile(windows::core::PCWSTR(filename.as_ptr()), &mut raw) },
+            0
+        );
+        let bitmap = crate::save::GdiPlusBitmap(raw);
+        let mut width = 0;
+        let mut height = 0;
+        assert_eq!(unsafe { GdipGetImageWidth(bitmap.0, &mut width) }, 0);
+        assert_eq!(unsafe { GdipGetImageHeight(bitmap.0, &mut height) }, 0);
+        assert_eq!((width, height), (300, 200));
+        for y in 0..200 {
+            for x in 0..300 {
+                let mut actual = 0;
+                assert_eq!(
+                    unsafe { GdipBitmapGetPixel(bitmap.0, x, y, &mut actual) },
+                    0
+                );
+                let offset = ((y + 50) * capture.width + x + 50) as usize * 4;
+                let rgb = &capture.original[offset..offset + 3];
+                assert_eq!(
+                    actual,
+                    0xff000000 | (rgb[2] as u32) << 16 | (rgb[1] as u32) << 8 | rgb[0] as u32
+                );
+            }
+        }
+    }
+    assert!(save_buffer_to_png(&[], 300, 200, &Rect::new(0, 0, 300, 200), &saved_path).is_err());
+    assert_eq!(
+        std::fs::read(&saved_path)?,
+        png_bytes,
+        "A failed replacement must preserve the previous image"
+    );
+    drop(export_pixels);
     // Clean up temporary test file
     let _ = std::fs::remove_file(&saved_path);
 
     let default_dir = default_save_directory();
-    assert!(default_dir.exists(), "Default save directory must exist");
+    assert!(
+        !default_dir.as_os_str().is_empty(),
+        "The save folder is created on the first save"
+    );
     let gen_name = generate_screenshot_filename();
     assert!(gen_name.starts_with("Screenshot_") && gen_name.ends_with(".png"));
     println!(
@@ -633,7 +741,7 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     // ------------------------------------------------------------
     // Slice B5: Build & Size / RAM Verification
     // ------------------------------------------------------------
-    println!("\n[Slice B5] Verifying Executable Size and RAM Budgets...");
+    println!("\n[Slice B5] Verifying Executable Size and Sampling Process Memory...");
 
     // 1. Executable size check (target <= 2.5 MB)
     let exe_path = "target/release/isolmass.exe";
@@ -656,36 +764,19 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // 2. RAM working set check (target <= 15 MB at idle)
-    // Trim working set pages from temporary test buffers
-    unsafe {
-        let _ = windows::Win32::System::Threading::SetProcessWorkingSetSize(
-            GetCurrentProcess(),
-            usize::MAX,
-            usize::MAX,
-        );
-    }
-
+    // The smoke process has just captured images and loaded encoders; this is not an idle daemon.
     let mut pmc = PROCESS_MEMORY_COUNTERS::default();
-    let mem_ok = unsafe {
+    unsafe {
         GetProcessMemoryInfo(
             GetCurrentProcess(),
             &mut pmc,
             std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
-        )
-    };
-    if mem_ok.is_ok() {
-        let working_set_kb = pmc.WorkingSetSize / 1024;
-        let working_set_mb = working_set_kb as f64 / 1024.0;
-        println!(
-            "  - Idle Working Set Memory: {} KB ({:.2} MB) [Budget: <= 15.0 MB]",
-            working_set_kb, working_set_mb
-        );
-        assert!(
-            working_set_mb <= 15.0,
-            "Idle memory footprint must be under 15 MB budget"
-        );
+        )?;
     }
+    println!(
+        "  - Smoke process working set: {} bytes (untrimmed; informational, not an idle budget result).",
+        pmc.WorkingSetSize
+    );
     println!("  -> Slice B5: PASSED");
 
     // ============================================================
@@ -719,7 +810,7 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     // When overlay active: Esc is consumed with LRESULT(1)
-    hotkey::register_overlay(windows::Win32::Foundation::HWND::default());
+    hotkey::register_overlay(windows::Win32::Foundation::HWND::default())?;
     let res_active = unsafe { hotkey::process_keyboard_hook(0, wparam_down, lparam_esc, 0) };
     assert_eq!(
         res_active,
@@ -727,15 +818,15 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         "Esc must be consumed with LRESULT(1) when overlay is active"
     );
 
-    // When overlay text editing: characters and editing keys are consumed
+    // Native text characters pass to the focused Win32 text/IME input path.
     hotkey::set_overlay_text_editing(true);
     let kb_char = hotkey::create_test_kbdllhookstruct(0x41); // 'A'
     let lparam_char = windows::Win32::Foundation::LPARAM(&kb_char as *const _ as isize);
     let res_edit = unsafe { hotkey::process_keyboard_hook(0, wparam_down, lparam_char, 0) };
-    assert_eq!(
+    assert_ne!(
         res_edit,
         windows::Win32::Foundation::LRESULT(1),
-        "Keystrokes in text edit mode must be consumed"
+        "Text characters must reach the native input path"
     );
 
     // When overlay active not editing: shortcuts are consumed
@@ -845,6 +936,23 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     assert!(edit_state.move_right());
     assert_eq!(edit_state.caret, 1);
 
+    edit_state.select_all();
+    edit_state.insert_text("A&B İıŞşĞğ");
+    edit_state.insert_utf16(0xd83d);
+    edit_state.insert_utf16(0xde42);
+    assert_eq!(edit_state.text, "A&B İıŞşĞğ🙂");
+    edit_state.undo();
+    assert_eq!(edit_state.text, "A&B İıŞşĞğ");
+    edit_state.redo();
+    assert_eq!(edit_state.text, "A&B İıŞşĞğ🙂");
+    edit_state.select_all();
+    edit_state.insert_text(&"x".repeat(16_384));
+    assert_eq!(edit_state.text.len(), 16_384);
+    edit_state.select_all();
+    edit_state.insert_text("replacement");
+    assert_eq!(edit_state.text, "replacement");
+    edit_state.select_all();
+    edit_state.insert_text("Hell");
     // Commit text object
     let text_obj = AnnotationObject::new(
         1,
@@ -1023,7 +1131,7 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     // Slice C5: System Tray Icon & Right-Click Menu Lifecycle
     // ------------------------------------------------------------
     println!("\n[Slice C5] Testing System Tray Manager Lifecycle...");
-    let (tray_tx, _tray_rx) = channel::<tray::TrayCommand>();
+    let (tray_tx, _tray_rx) = std::sync::mpsc::sync_channel::<tray::TrayCommand>(16);
     let tray_manager = tray::TrayManager::create(tray_tx)?;
     println!("  - System Tray icon registered with Shell_NotifyIconW(NIM_ADD)");
 
@@ -1123,34 +1231,21 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         nsi_path.exists(),
         "installer.nsi must exist at repository root"
     );
-    let nsi_content = std::fs::read_to_string(nsi_path)?;
-    assert!(
-        nsi_content.contains("PRODUCT_NAME"),
-        "installer.nsi must define PRODUCT_NAME"
-    );
-    assert!(
-        nsi_content.contains("OutFile"),
-        "installer.nsi must define OutFile"
-    );
-    assert!(
-        nsi_content.contains("SetCompressor"),
-        "installer.nsi must define SetCompressor"
-    );
-    println!("  - installer.nsi configuration and directives validated.");
-
     let setup_path = std::path::Path::new("target/release/isolmass-setup.exe");
-    if !setup_path.exists() {
+    {
         let makensis_local = format!(
             "{}\\Programs\\nsis-3.10\\makensis.exe",
             std::env::var("LOCALAPPDATA").unwrap_or_default()
         );
         let makensis_cmd = if std::process::Command::new("where")
             .arg("makensis")
+            .creation_flags(0x08000000)
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
             || std::process::Command::new("makensis")
                 .arg("/VERSION")
+                .creation_flags(0x08000000)
                 .output()
                 .map(|o| o.status.success())
                 .unwrap_or(false)
@@ -1166,7 +1261,9 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
 
         println!("  - Building installer with NSIS ({makensis_cmd})...");
         let compile_status = std::process::Command::new(&makensis_cmd)
+            .arg(format!("/DPRODUCT_VERSION={}", env!("CARGO_PKG_VERSION")))
             .arg("installer.nsi")
+            .creation_flags(0x08000000)
             .status()?;
         assert!(
             compile_status.success(),
@@ -1178,6 +1275,16 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         setup_path.exists(),
         "Installer artifact 'target/release/isolmass-setup.exe' MUST exist!"
     );
+    for path in [
+        setup_path,
+        std::path::Path::new("target/release/isolmass.exe"),
+    ] {
+        assert_eq!(
+            crate::updater::file_version(path)?,
+            env!("CARGO_PKG_VERSION"),
+            "Artifact version must match the source version"
+        );
+    }
     let mut setup_file = std::fs::File::open(setup_path)?;
     let mut pe_magic = [0u8; 2];
     setup_file.read_exact(&mut pe_magic)?;
@@ -1195,7 +1302,7 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         BUDGET_BYTES
     );
     println!(
-        "  - Authentic installer executable verified: '{}' ({} bytes, budget: <= {} bytes / 3 MB)",
+        "  - Installer structure, version and size verified (signature is a separate release gate): '{}' ({} bytes, budget: <= {} bytes / 3 MB)",
         setup_path.display(),
         setup_size,
         BUDGET_BYTES
@@ -1203,8 +1310,60 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     println!("  -> C9 Packaging Check: PASSED (Installer artifact & <= 3 MB size budget verified)");
 
     println!("\n============================================================");
-    println!(" AUTOMATED SMOKE CHECKS PASSED (A1-C8 + C9 packaging checks)");
+    println!(" AUTOMATED SMOKE CHECKS PASSED (listed behavior and packaging checks)");
     println!(" External runtime budget status is documented separately and is not verified here.");
     println!("============================================================");
+    Ok(())
+}
+
+/// Optional user-facing diagnostic. It never saves captured pixels or changes settings/clipboard.
+pub fn run_benchmark(samples: usize) -> Result<(), Box<dyn std::error::Error>> {
+    use windows::Win32::System::ProcessStatus::PROCESS_MEMORY_COUNTERS_EX;
+    if !(1..=500).contains(&samples) {
+        return Err("Benchmark sample count must be between 1 and 500.".into());
+    }
+    let memory = || -> windows::core::Result<(usize, usize)> {
+        let mut counters = PROCESS_MEMORY_COUNTERS_EX {
+            cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+            ..Default::default()
+        };
+        unsafe {
+            GetProcessMemoryInfo(
+                GetCurrentProcess(),
+                (&mut counters as *mut PROCESS_MEMORY_COUNTERS_EX).cast(),
+                std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32,
+            )?;
+        }
+        Ok((counters.WorkingSetSize, counters.PrivateUsage))
+    };
+    let initial = memory()?;
+    let mut latencies = Vec::with_capacity(samples);
+    for sample in 0..samples {
+        let triggered = Instant::now();
+        let capture = Rc::new(CaptureBuffer::capture_virtual_screen()?);
+        let geometry = (capture.width, capture.height, capture.x, capture.y);
+        let timings = (
+            capture.timings.total.as_micros(),
+            capture.timings.setup.as_micros(),
+            capture.timings.bit_blt.as_micros(),
+            capture.timings.dim.as_micros(),
+        );
+        let active = memory()?;
+        let visible = overlay::measure_overlay(capture, triggered)?.as_micros();
+        unsafe {
+            windows::Win32::Graphics::Dwm::DwmFlush()?;
+        }
+        let after = memory()?;
+        println!(
+            "{}",
+            serde_json::json!({"sample":sample,"version":env!("CARGO_PKG_VERSION"),"trigger":"synthetic_before_capture","geometry":geometry,"capture_to_visible_us":visible,"capture_us":timings.0,"setup_us":timings.1,"bitblt_us":timings.2,"dim_us":timings.3,"initial_working_set":initial.0,"initial_private":initial.1,"captured_working_set":active.0,"captured_private":active.1,"after_working_set":after.0,"after_private":after.1})
+        );
+        latencies.push(visible);
+    }
+    latencies.sort_unstable();
+    println!(
+        "{}",
+        serde_json::json!({"summary":true,"samples":samples,"p50_us":latencies[(samples - 1) / 2],"p95_us":latencies[(samples * 95).div_ceil(100) - 1],"maximum_us":latencies[samples-1],"physical_key_latency_measured":false})
+    );
     Ok(())
 }

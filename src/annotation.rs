@@ -1,13 +1,10 @@
 use crate::capture::Rect;
 use serde::{Deserialize, Serialize};
-use windows::Win32::Foundation::{COLORREF, POINT, RECT};
+use windows::Win32::Foundation::{COLORREF, POINT};
 use windows::Win32::Graphics::Gdi::{
-    CLIP_DEFAULT_PRECIS, CreateFontW, CreatePen, CreateSolidBrush, DEFAULT_CHARSET, DEFAULT_PITCH,
-    DEFAULT_QUALITY, DT_LEFT, DT_NOCLIP, DT_TOP, DeleteObject, DrawTextW, FF_DONTCARE, FW_BOLD,
-    GetStockObject, HBRUSH, HDC, HFONT, HGDIOBJ, HPEN, NULL_BRUSH, PS_DOT, PS_SOLID, Polygon,
-    Polyline, Rectangle as GdiRectangle, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+    CreatePen, CreateSolidBrush, DeleteObject, GetStockObject, HBRUSH, HDC, HGDIOBJ, HPEN,
+    NULL_BRUSH, PS_DOT, PS_SOLID, Polygon, Polyline, Rectangle as GdiRectangle, SelectObject,
 };
-use windows::core::PCWSTR;
 
 /// Available annotation tools.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -18,6 +15,7 @@ pub enum ToolKind {
     Pen,
     Text,
     Blur,
+    Redact,
     Select,
 }
 
@@ -60,21 +58,6 @@ impl Drop for BrushGuard {
     }
 }
 
-struct FontGuard {
-    hdc: HDC,
-    old: HGDIOBJ,
-    font: HFONT,
-}
-
-impl Drop for FontGuard {
-    fn drop(&mut self) {
-        unsafe {
-            SelectObject(self.hdc, self.old);
-            let _ = DeleteObject(HGDIOBJ(self.font.0));
-        }
-    }
-}
-
 /// The specific data for each annotation kind.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AnnotationKind {
@@ -104,6 +87,9 @@ pub enum AnnotationKind {
         rect: Rect,
         block_size: i32,
     },
+    Redact {
+        rect: Rect,
+    },
 }
 
 /// A standalone annotation object with an ID and geometry.
@@ -129,23 +115,24 @@ pub fn render_pen_preview(hdc: HDC, points: &[(i32, i32)], color: [u8; 4], thick
     if points.len() < 2 {
         return;
     }
-    let pen = unsafe { CreatePen(PS_SOLID, thickness, bgra_to_colorref(color)) };
-    let old_pen = unsafe { SelectObject(hdc, HGDIOBJ(pen.0)) };
-    let _pen_guard = PenGuard {
-        hdc,
-        old: old_pen,
-        pen,
-    };
-    let win_points: Vec<POINT> = points
-        .iter()
-        .map(|point| POINT {
+    thread_local! { static POINTS: std::cell::RefCell<Vec<POINT>> = const { std::cell::RefCell::new(Vec::new()) }; }
+    POINTS.with(|scratch| {
+        let mut scratch = scratch.borrow_mut();
+        scratch.clear();
+        scratch.extend(points.iter().map(|point| POINT {
             x: point.0,
             y: point.1,
-        })
-        .collect();
-    unsafe {
-        let _ = Polyline(hdc, &win_points);
-    }
+        }));
+        crate::drawing::with_pen(
+            hdc,
+            PS_SOLID,
+            thickness,
+            bgra_to_colorref(color),
+            || unsafe {
+                let _ = Polyline(hdc, &scratch);
+            },
+        );
+    });
 }
 
 impl AnnotationObject {
@@ -189,16 +176,10 @@ impl AnnotationObject {
                 font_size,
                 ..
             } => {
-                let estimated_width = (text.len() as i32 * (*font_size * 55 / 100)).max(*font_size);
-                let estimated_height = *font_size + 4;
-                Rect::new(
-                    pos.0,
-                    pos.1,
-                    pos.0 + estimated_width,
-                    pos.1 + estimated_height,
-                )
+                let (width, height) = crate::drawing::measure_text(text, *font_size);
+                Rect::new(pos.0, pos.1, pos.0 + width, pos.1 + height)
             }
-            AnnotationKind::Blur { rect, .. } => *rect,
+            AnnotationKind::Blur { rect, .. } | AnnotationKind::Redact { rect } => *rect,
         }
     }
 
@@ -250,7 +231,9 @@ impl AnnotationObject {
                 false
             }
             AnnotationKind::Text { .. } => self.bounds().inflate(4, 4).contains(pt.0, pt.1),
-            AnnotationKind::Blur { rect, .. } => rect.contains(pt.0, pt.1),
+            AnnotationKind::Blur { rect, .. } | AnnotationKind::Redact { rect } => {
+                rect.contains(pt.0, pt.1)
+            }
         }
     }
 
@@ -279,7 +262,7 @@ impl AnnotationObject {
                 pos.0 += dx;
                 pos.1 += dy;
             }
-            AnnotationKind::Blur { rect, .. } => {
+            AnnotationKind::Blur { rect, .. } | AnnotationKind::Redact { rect } => {
                 rect.left += dx;
                 rect.right += dx;
                 rect.top += dy;
@@ -290,7 +273,9 @@ impl AnnotationObject {
 
     pub fn geometry_bounds(&self) -> Rect {
         match &self.kind {
-            AnnotationKind::Rectangle { rect, .. } | AnnotationKind::Blur { rect, .. } => *rect,
+            AnnotationKind::Rectangle { rect, .. }
+            | AnnotationKind::Blur { rect, .. }
+            | AnnotationKind::Redact { rect } => *rect,
             AnnotationKind::Arrow { start, end, .. } => Rect::normalized(*start, *end),
             AnnotationKind::Pen { points, .. } => {
                 let Some(first) = points.first() else {
@@ -411,6 +396,9 @@ impl AnnotationObject {
                 color: *color,
                 thickness: *thickness,
             },
+            AnnotationKind::Redact { rect } => AnnotationKind::Redact {
+                rect: Self::resized_rect(*rect, handle, cursor, limit, 1),
+            },
             AnnotationKind::Blur { rect, block_size } => AnnotationKind::Blur {
                 rect: Self::resized_rect(*rect, handle, cursor, limit, 6),
                 block_size: *block_size,
@@ -490,19 +478,17 @@ impl AnnotationObject {
                 let requested_font = (*font_size as f64 * scale).round() as i32;
                 let available_width = limit.width().max(1);
                 let available_height = limit.height().max(1);
-                let chars = text.len().max(1) as i32;
-                let width_limited_font = if chars == 1 {
-                    available_width
-                } else {
-                    available_width.saturating_mul(100) / chars.saturating_mul(55)
-                };
+                let width_limited_font =
+                    ((available_width as f64 / source_w) * *font_size as f64).floor() as i32;
                 let max_font = width_limited_font
                     .min(available_height.saturating_sub(4))
                     .max(1);
-                let new_font = requested_font.clamp(8.min(max_font), max_font);
-                let applied_scale = new_font as f64 / (*font_size).max(1) as f64;
-                let width = (source_w * applied_scale).round() as i32;
-                let height = (source_h * applied_scale).round() as i32;
+                let mut new_font = requested_font.clamp(8.min(max_font), max_font);
+                let (mut width, mut height) = crate::drawing::measure_text(text, new_font);
+                while new_font > 1 && (width > available_width || height > available_height) {
+                    new_font -= 1;
+                    (width, height) = crate::drawing::measure_text(text, new_font);
+                }
                 let new_pos = match handle {
                     AnnotationResizeHandle::TopLeft => (anchor.0 - width, anchor.1 - height),
                     AnnotationResizeHandle::TopRight => (anchor.0, anchor.1 - height),
@@ -533,7 +519,7 @@ impl AnnotationObject {
             AnnotationKind::Arrow { color, .. } => *color = new_color,
             AnnotationKind::Pen { color, .. } => *color = new_color,
             AnnotationKind::Text { color, .. } => *color = new_color,
-            AnnotationKind::Blur { .. } => {}
+            AnnotationKind::Blur { .. } | AnnotationKind::Redact { .. } => {}
         }
     }
 
@@ -543,7 +529,9 @@ impl AnnotationObject {
             AnnotationKind::Rectangle { thickness, .. } => *thickness = new_thickness,
             AnnotationKind::Arrow { thickness, .. } => *thickness = new_thickness,
             AnnotationKind::Pen { thickness, .. } => *thickness = new_thickness,
-            AnnotationKind::Text { .. } | AnnotationKind::Blur { .. } => {}
+            AnnotationKind::Text { .. }
+            | AnnotationKind::Blur { .. }
+            | AnnotationKind::Redact { .. } => {}
         }
     }
 
@@ -554,7 +542,7 @@ impl AnnotationObject {
             | AnnotationKind::Arrow { color, .. }
             | AnnotationKind::Pen { color, .. }
             | AnnotationKind::Text { color, .. } => Some(*color),
-            AnnotationKind::Blur { .. } => None,
+            AnnotationKind::Blur { .. } | AnnotationKind::Redact { .. } => None,
         }
     }
 
@@ -564,7 +552,9 @@ impl AnnotationObject {
             AnnotationKind::Rectangle { thickness, .. }
             | AnnotationKind::Arrow { thickness, .. }
             | AnnotationKind::Pen { thickness, .. } => Some(*thickness),
-            AnnotationKind::Text { .. } | AnnotationKind::Blur { .. } => None,
+            AnnotationKind::Text { .. }
+            | AnnotationKind::Blur { .. }
+            | AnnotationKind::Redact { .. } => None,
         }
     }
 
@@ -677,57 +667,9 @@ impl AnnotationObject {
                 color,
                 font_size,
             } => {
-                if text.is_empty() {
-                    return;
-                }
-                let wide_face: Vec<u16> = "Segoe UI\0".encode_utf16().collect();
-                let font = unsafe {
-                    CreateFontW(
-                        *font_size,
-                        0,
-                        0,
-                        0,
-                        FW_BOLD.0 as i32,
-                        0,
-                        0,
-                        0,
-                        DEFAULT_CHARSET.0 as u32,
-                        CLIP_DEFAULT_PRECIS.0 as u32,
-                        CLIP_DEFAULT_PRECIS.0 as u32,
-                        DEFAULT_QUALITY.0 as u32,
-                        (DEFAULT_PITCH.0 | FF_DONTCARE.0) as u32,
-                        PCWSTR(wide_face.as_ptr()),
-                    )
-                };
-                let old_font = unsafe { SelectObject(hdc, HGDIOBJ(font.0)) };
-                let _font_guard = FontGuard {
-                    hdc,
-                    old: old_font,
-                    font,
-                };
-
-                unsafe {
-                    let _ = SetTextColor(hdc, bgra_to_colorref(*color));
-                    let _ = SetBkMode(hdc, TRANSPARENT);
-                }
-
-                let mut wide_text: Vec<u16> = text.encode_utf16().collect();
-                let mut draw_rect = RECT {
-                    left: pos.0,
-                    top: pos.1,
-                    right: pos.0 + 2000,
-                    bottom: pos.1 + 1000,
-                };
-                unsafe {
-                    let _ = DrawTextW(
-                        hdc,
-                        &mut wide_text,
-                        &mut draw_rect,
-                        DT_LEFT | DT_TOP | DT_NOCLIP,
-                    );
-                }
+                crate::drawing::text(hdc, *pos, text, *font_size, bgra_to_colorref(*color));
             }
-            AnnotationKind::Blur { .. } => {
+            AnnotationKind::Blur { .. } | AnnotationKind::Redact { .. } => {
                 // Blur modifies the underlying pixel buffer directly via `render_blur`
             }
         }
@@ -735,8 +677,25 @@ impl AnnotationObject {
 
     /// Renders the blur / pixelate effect directly onto the 32-bit BGRA buffer.
     pub fn render_blur(&self, buffer: &mut [u8], width: i32, height: i32) {
-        if let AnnotationKind::Blur { rect, block_size } = &self.kind {
-            apply_pixelate_blur(buffer, width, height, rect, *block_size);
+        match &self.kind {
+            AnnotationKind::Blur { rect, block_size } => {
+                apply_pixelate_blur(buffer, width, height, rect, *block_size)
+            }
+            AnnotationKind::Redact { rect } => {
+                let rect = rect.clamp(width, height);
+                if width <= 0 || height <= 0 {
+                    return;
+                }
+                for y in rect.top..rect.bottom {
+                    for x in rect.left..rect.right {
+                        let offset = (y as usize * width as usize + x as usize) * 4;
+                        if let Some(pixel) = buffer.get_mut(offset..offset + 4) {
+                            pixel.copy_from_slice(&[24, 24, 24, 255]);
+                        }
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
@@ -895,7 +854,15 @@ pub fn snap_angle_45(start: (i32, i32), current: (i32, i32)) -> (i32, i32) {
 #[derive(Debug, Clone)]
 pub enum EditCommand {
     Add(AnnotationObject),
-    Delete(AnnotationObject),
+    Delete {
+        object: AnnotationObject,
+        index: usize,
+    },
+    Selection {
+        before: Rect,
+        after: Rect,
+        shift: (i32, i32),
+    },
     Modify {
         id: usize,
         old_kind: AnnotationKind,
@@ -908,6 +875,7 @@ pub struct HistoryManager {
     undo_stack: Vec<EditCommand>,
     redo_stack: Vec<EditCommand>,
     max_entries: usize,
+    selection_update: Option<Rect>,
 }
 
 impl Default for HistoryManager {
@@ -922,7 +890,18 @@ impl HistoryManager {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             max_entries,
+            selection_update: None,
         }
+    }
+
+    pub fn clear(&mut self) {
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.selection_update = None;
+    }
+
+    pub fn take_selection_update(&mut self) -> Option<Rect> {
+        self.selection_update.take()
     }
 
     pub fn record(&mut self, cmd: EditCommand) {
@@ -955,13 +934,24 @@ impl HistoryManager {
                     self.redo_stack.push(EditCommand::Add(removed));
                 }
             }
-            EditCommand::Delete(obj) => {
-                // To undo Delete: restore the object and save to redo stack
-                let id = obj.id;
-                objects.push(obj);
-                self.redo_stack.push(EditCommand::Delete(
-                    objects.iter().find(|o| o.id == id).unwrap().clone(),
-                ));
+            EditCommand::Delete { object, index } => {
+                objects.insert(index.min(objects.len()), object.clone());
+                self.redo_stack.push(EditCommand::Delete { object, index });
+            }
+            EditCommand::Selection {
+                before,
+                after,
+                shift,
+            } => {
+                for object in objects.iter_mut() {
+                    object.translate(-shift.0, -shift.1);
+                }
+                self.selection_update = Some(before);
+                self.redo_stack.push(EditCommand::Selection {
+                    before,
+                    after,
+                    shift,
+                });
             }
             EditCommand::Modify {
                 id,
@@ -995,11 +985,29 @@ impl HistoryManager {
                     objects.iter().find(|o| o.id == id).unwrap().clone(),
                 ));
             }
-            EditCommand::Delete(obj) => {
-                if let Some(pos) = objects.iter().position(|o| o.id == obj.id) {
+            EditCommand::Delete { object, index } => {
+                if let Some(pos) = objects.iter().position(|o| o.id == object.id) {
                     let removed = objects.remove(pos);
-                    self.undo_stack.push(EditCommand::Delete(removed));
+                    self.undo_stack.push(EditCommand::Delete {
+                        object: removed,
+                        index,
+                    });
                 }
+            }
+            EditCommand::Selection {
+                before,
+                after,
+                shift,
+            } => {
+                for object in objects.iter_mut() {
+                    object.translate(shift.0, shift.1);
+                }
+                self.selection_update = Some(after);
+                self.undo_stack.push(EditCommand::Selection {
+                    before,
+                    after,
+                    shift,
+                });
             }
             EditCommand::Modify {
                 id,
@@ -1118,7 +1126,7 @@ mod tests {
         let AnnotationKind::Text { pos, font_size, .. } = &object.kind else {
             unreachable!();
         };
-        assert_eq!(*font_size, 25);
+        assert!(*font_size >= 20 && *font_size <= 40);
         assert_eq!(*pos, (10, 10));
         assert_within(object.geometry_bounds(), limit);
     }
@@ -1151,5 +1159,77 @@ mod tests {
         assert_eq!(objects[0].kind, new_kind);
         assert!(history.can_undo());
         assert!(!history.can_redo());
+    }
+    #[test]
+    fn deletion_and_selection_translation_restore_exact_history_order() {
+        let kind = AnnotationKind::Rectangle {
+            rect: Rect::new(10, 10, 30, 30),
+            color: COLOR,
+            thickness: 2,
+        };
+        let mut objects: Vec<_> = (1..=3)
+            .map(|id| AnnotationObject::new(id, kind.clone()))
+            .collect();
+        let mut history = HistoryManager::default();
+        let object = objects.remove(1);
+        history.record(EditCommand::Delete { object, index: 1 });
+        for object in &mut objects {
+            object.translate(20, 5);
+        }
+        let before = Rect::new(0, 0, 50, 50);
+        let after = Rect::new(20, 5, 70, 55);
+        history.record(EditCommand::Selection {
+            before,
+            after,
+            shift: (20, 5),
+        });
+        assert!(history.undo(&mut objects));
+        assert_eq!(history.take_selection_update(), Some(before));
+        assert!(history.undo(&mut objects));
+        assert_eq!(
+            objects.iter().map(|object| object.id).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert!(objects.iter().all(|object| object.kind == kind));
+        assert!(history.redo(&mut objects));
+        assert!(history.redo(&mut objects));
+        assert_eq!(history.take_selection_update(), Some(after));
+        history.clear();
+        assert!(!history.undo(&mut objects));
+        assert!(!history.redo(&mut objects));
+    }
+
+    #[test]
+    fn opaque_redaction_replaces_pixels_and_text_uses_real_glyph_width() {
+        let mut pixels = vec![200u8; 12 * 12 * 4];
+        AnnotationObject::new(
+            1,
+            AnnotationKind::Redact {
+                rect: Rect::new(2, 3, 9, 10),
+            },
+        )
+        .render_blur(&mut pixels, 12, 12);
+        assert_eq!(
+            &pixels[(3 * 12 + 2) * 4..(3 * 12 + 2) * 4 + 4],
+            &[24, 24, 24, 255]
+        );
+        assert_eq!(&pixels[..4], &[200; 4]);
+        let narrow = crate::drawing::measure_text("iiii", 22);
+        let wide = crate::drawing::measure_text("WWWW", 22);
+        assert!(wide.0 > narrow.0);
+        let text = "A&B İıŞşĞğ🙂";
+        let object = AnnotationObject::new(
+            2,
+            AnnotationKind::Text {
+                pos: (4, 5),
+                text: text.into(),
+                color: COLOR,
+                font_size: 22,
+            },
+        );
+        assert_eq!(
+            object.geometry_bounds().width(),
+            crate::drawing::measure_text(text, 22).0
+        );
     }
 }

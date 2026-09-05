@@ -24,15 +24,83 @@ fn main() {
     let resources = manifest_dir.join("resources");
     let output = PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo must provide OUT_DIR"))
         .join("app.res");
+    if let Ok(pins) = std::env::var("ISOLMASS_UPDATE_PUBLIC_KEYS") {
+        assert!(
+            pins.is_empty()
+                || pins.split(';').count() <= 8
+                    && pins
+                        .split(';')
+                        .all(|pin| pin.len() == 64
+                            && pin.bytes().all(|byte| byte.is_ascii_hexdigit())),
+            "ISOLMASS_UPDATE_PUBLIC_KEYS must contain at most eight semicolon-separated SHA-256 public-key digests"
+        );
+    }
+    let version = std::env::var("CARGO_PKG_VERSION").expect("Cargo package version");
+    let numeric = format!("{},0", version.replace('.', ","));
+    let generated = output.with_extension("rc");
+    let manifest = output.with_extension("manifest");
+    let manifest_template =
+        std::fs::read_to_string(resources.join("app.manifest")).expect("read manifest template");
+    std::fs::write(
+        &manifest,
+        manifest_template.replace("@PRODUCT_VERSION@", &format!("{version}.0")),
+    )
+    .expect("write versioned manifest");
+    let version_info = format!(
+        r#"
+#include "{}"
+1 24 "{}"
+1 VERSIONINFO
+FILEVERSION {}
+PRODUCTVERSION {}
+FILEFLAGSMASK 0x3fL
+FILEOS 0x40004L
+FILETYPE 0x1L
+BEGIN
+  BLOCK "StringFileInfo"
+  BEGIN
+    BLOCK "040904B0"
+    BEGIN
+      VALUE "CompanyName", "isolmaSS contributors\0"
+      VALUE "FileDescription", "isolmaSS screenshot utility\0"
+      VALUE "FileVersion", "{}\0"
+      VALUE "InternalName", "isolmass\0"
+      VALUE "LegalCopyright", "Copyright (c) 2026 isolmaSS contributors. MIT License.\0"
+      VALUE "OriginalFilename", "isolmass.exe\0"
+      VALUE "ProductName", "isolmaSS\0"
+      VALUE "ProductVersion", "{}\0"
+    END
+  END
+  BLOCK "VarFileInfo"
+  BEGIN
+    VALUE "Translation", 0x0409, 1200
+  END
+END
+"#,
+        resources
+            .join("app.rc")
+            .display()
+            .to_string()
+            .replace('\\', "/"),
+        manifest.display().to_string().replace('\\', "/"),
+        numeric,
+        numeric,
+        version,
+        version
+    );
+    std::fs::write(&generated, version_info).expect("write Windows version resources");
     let status = Command::new(resource_compiler())
         .current_dir(&resources)
         .args(["/nologo", "/fo"])
         .arg(&output)
-        .arg("app.rc")
+        .arg(&generated)
         .status()
         .expect("failed to launch the Windows resource compiler (set RC to rc.exe)");
     assert!(status.success(), "Windows resource compilation failed");
 
+    println!("cargo:rerun-if-env-changed=RC");
+    println!("cargo:rerun-if-env-changed=ISOLMASS_UPDATE_PUBLIC_KEYS");
+    println!("cargo:rerun-if-changed=Cargo.toml");
     println!("cargo:rerun-if-changed=resources/app.rc");
     println!("cargo:rerun-if-changed=resources/app.ico");
     println!("cargo:rerun-if-changed=resources/app.manifest");
