@@ -1,7 +1,7 @@
 //! A small native command palette. Real buttons retain keyboard and accessibility support.
 use super::*;
 use crate::capture::Rect;
-use windows::Win32::Foundation::{COLORREF, RECT};
+use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::UI::Controls::{DRAWITEMSTRUCT, ODS_FOCUS, ODS_SELECTED};
 use windows::Win32::UI::Input::KeyboardAndMouse::{GetFocus, SetFocus};
@@ -30,7 +30,10 @@ unsafe extern "system" fn procedure(
                 let _ = GetClientRect(hwnd, &mut client);
             }
             let bounds = Rect::new(0, 0, client.right, client.bottom);
-            crate::drawing::rounded(dc, bounds, 16, COLORREF(0xffffff), COLORREF(0xeee8e3));
+            // Tokens are read per paint: the palette follows a live theme
+            // flip without caching anything that could go stale.
+            let t = crate::theme::tokens();
+            crate::drawing::rounded(dc, bounds, 16, t.card, t.stroke);
             if !pointer.is_null() {
                 let state = unsafe { &*pointer };
                 let s = |value| value * state.dpi as i32 / 96;
@@ -39,7 +42,7 @@ unsafe extern "system" fn procedure(
                     Rect::new(s(20), s(12), client.right - s(20), s(42)),
                     "isolmaSS",
                     s(20),
-                    COLORREF(0x2a211b),
+                    t.text,
                     false,
                 );
                 crate::drawing::label(
@@ -47,7 +50,7 @@ unsafe extern "system" fn procedure(
                     Rect::new(s(20), s(40), client.right - s(20), s(62)),
                     "Capture. Annotate. Done.",
                     s(12),
-                    COLORREF(0x6d625a),
+                    t.text_secondary,
                     false,
                 );
                 crate::drawing::label(
@@ -60,7 +63,7 @@ unsafe extern "system" fn procedure(
                     ),
                     "RECENT CAPTURES",
                     s(11),
-                    COLORREF(0x8a7c72),
+                    t.text_secondary,
                     false,
                 );
                 if state.rows.len() == 5 {
@@ -74,7 +77,7 @@ unsafe extern "system" fn procedure(
                         ),
                         "Your next screenshot will appear here",
                         s(12),
-                        COLORREF(0x8a7c72),
+                        t.text_secondary,
                         false,
                     );
                 }
@@ -88,7 +91,7 @@ unsafe extern "system" fn procedure(
                     ),
                     concat!("Version ", env!("CARGO_PKG_VERSION"), " · MIT"),
                     s(11),
-                    COLORREF(0x8a7c72),
+                    t.text_secondary,
                     false,
                 );
             }
@@ -113,19 +116,20 @@ unsafe extern "system" fn procedure(
                     item.rcItem.right,
                     item.rcItem.bottom,
                 );
-                let fill = COLORREF(if primary {
-                    0xed625c
+                let t = crate::theme::tokens();
+                let fill = if primary {
+                    t.accent
                 } else if focused {
-                    0xfff1ed
+                    t.accent_tint
                 } else {
-                    0xffffff
-                });
+                    t.card
+                };
                 crate::drawing::rounded(
                     item.hDC,
                     bounds.inflate(-1, -1),
                     12,
                     fill,
-                    if focused { COLORREF(0xed625c) } else { fill },
+                    if focused { t.accent } else { fill },
                 );
                 let padding = 14 * state.dpi as i32 / 96;
                 crate::drawing::label(
@@ -138,7 +142,7 @@ unsafe extern "system" fn procedure(
                     ),
                     label,
                     14 * state.dpi as i32 / 96,
-                    COLORREF(if primary { 0xffffff } else { 0x2a211b }),
+                    if primary { t.accent_text } else { t.text },
                     false,
                 );
             }
@@ -173,6 +177,14 @@ unsafe extern "system" fn procedure(
                 let _ = DestroyWindow(hwnd);
             }
             LRESULT(0)
+        }
+        WM_SETTINGCHANGE | WM_DWMCOLORIZATIONCOLORCHANGED => {
+            // ui::window_loop invalidates the theme cache before dispatching,
+            // so repaint the palette and its row buttons with fresh tokens.
+            unsafe {
+                let _ = RedrawWindow(hwnd, None, None, RDW_INVALIDATE | RDW_ALLCHILDREN);
+            }
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
         WM_NCDESTROY => unsafe {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);

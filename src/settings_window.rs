@@ -389,7 +389,15 @@ fn draw_settings_button(
     } else {
         color_control_fill()
     };
-    let border = if checked && !toggle || draw.uItemState.contains(CDIS_FOCUS) {
+    let border = if draw.uItemState.contains(CDIS_FOCUS) {
+        if primary {
+            // An accent ring would blend into an accent-filled control;
+            // ring with the on-accent color so focus stays visible.
+            crate::theme::tokens().accent_text
+        } else {
+            color_accent()
+        }
+    } else if checked && !toggle {
         color_accent()
     } else if toggle {
         color_card()

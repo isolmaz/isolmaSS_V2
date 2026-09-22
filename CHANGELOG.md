@@ -61,6 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Faz 1: Settings shrinks from 960x820 to 800x600 with a 144 px sidebar; margins, card padding, control heights, spacing grid and card radii all come from the new `src/theme.rs` metrics block (24/16/32/4/8). Both views keep every control, with vertical scrolling covering the footer.
 - Faz 2: toolbar buttons 40/52 -> 36/48, panel radius 14 -> 8, button radius 10 -> 4; unicode glyphs replaced by Segoe Fluent Icons codepoints through a new `drawing::icon` helper (shared MDL2 subset for Windows 10 fallback); overlay HUD/tooltip colors resolve through theme tokens; the F10/Apps command menu is documented.
 - Faz 3: Settings gets the Windows 11 Mica backdrop (build 22621+, graceful no-op below), a dark title bar driven by `AppsUseLightTheme`, and live light/dark switching via `WM_SETTINGCHANGE`/`WM_DWMCOLORIZATIONCOLORCHANGED` with cached brushes recreated on flip; non-Win11 systems keep the solid background.
+- Faz 4: the tray command palette resolves every color through theme tokens and repaints on live theme flips; `ui::window_loop` centrally invalidates theme/accent caches for all pumped windows; keyboard focus now draws a visible accent ring (previously invisible on the accent-filled Save button); contrast measured at 5.7:1 or better for all non-exempt text pairs in both themes.
 
 ### Verification — 2026-09-22
 

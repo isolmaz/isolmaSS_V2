@@ -39,6 +39,13 @@ pub fn window_loop(hwnd: HWND, kind: WindowKind) -> Result<()> {
             break;
         }
         crate::updater::poll(hwnd, false);
+        // Central cache invalidation for every window this loop pumps; the
+        // message is still dispatched so window procs keep their own arms.
+        match msg.message {
+            WM_SETTINGCHANGE => crate::theme::invalidate_theme_cache(),
+            WM_DWMCOLORIZATIONCOLORCHANGED => crate::theme::invalidate_accent(),
+            _ => {}
+        }
         if dialog && msg.message == WM_KEYDOWN && msg.wParam == WPARAM(27) {
             unsafe {
                 PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0))?;
