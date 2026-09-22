@@ -19,7 +19,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect,
     GetDlgCtrlID, GetWindowLongPtrW, GetWindowRect, IDC_ARROW, IsWindow, RegisterClassExW, SW_HIDE,
     SW_SHOW, SetForegroundWindow, SetWindowLongPtrW, ShowWindow, WM_CLOSE, WM_CTLCOLORBTN,
-    WM_CTLCOLORSTATIC, WM_DESTROY, WM_ERASEBKGND, WM_KEYDOWN, WM_PAINT, WNDCLASSEXW,
+    WM_CTLCOLORSTATIC, WM_DESTROY, WM_DWMCOLORIZATIONCOLORCHANGED, WM_ERASEBKGND, WM_KEYDOWN,
+    WM_PAINT, WM_SETTINGCHANGE, WNDCLASSEXW,
 };
 use windows::core::{PCWSTR, Result, w};
 
@@ -41,6 +42,26 @@ pub struct SettingsWindowState {
     heading_font: windows::Win32::Graphics::Gdi::HFONT,
     background_brush: HBRUSH,
     card_brush: HBRUSH,
+    /// True while the Mica backdrop owns the page background: the client
+    /// area must stay unpainted so the backdrop shows through.
+    mica_active: bool,
+}
+
+impl SettingsWindowState {
+    /// Deletes and recreates the cached page/card brushes from the current
+    /// theme colors. Called at init and after every theme/accent change;
+    /// fonts never change with the theme and are left untouched.
+    fn refresh_brushes(&mut self) {
+        unsafe {
+            for brush in [self.background_brush, self.card_brush] {
+                if !brush.is_invalid() {
+                    let _ = DeleteObject(HGDIOBJ(brush.0));
+                }
+            }
+            self.background_brush = CreateSolidBrush(color_background());
+            self.card_brush = CreateSolidBrush(color_card());
+        }
+    }
 }
 
 impl Drop for SettingsWindowState {
@@ -297,7 +318,11 @@ fn paint_settings_surface(hwnd: HWND, state: &SettingsWindowState, hdc: HDC) {
     let mut client = RECT::default();
     unsafe {
         let _ = GetClientRect(hwnd, &mut client);
-        let _ = FillRect(hdc, &client, state.background_brush);
+        // Mica: the page itself stays transparent so the backdrop shows
+        // through; cards and controls still paint opaquely.
+        if !state.mica_active {
+            let _ = FillRect(hdc, &client, state.background_brush);
+        }
     }
 
     unsafe {
@@ -1338,14 +1363,84 @@ unsafe extern "system" fn settings_wnd_proc(
         WM_ERASEBKGND => {
             if !state_ptr.is_null() {
                 let state = unsafe { &*state_ptr };
-                let mut client = RECT::default();
-                unsafe {
-                    let _ = GetClientRect(hwnd, &mut client);
-                    let _ = FillRect(HDC(wparam.0 as *mut _), &client, state.background_brush);
+                // Always claim the erase so the class background brush never
+                // shows; with Mica active the client area is left untouched
+                // so the backdrop can show through.
+                if !state.mica_active {
+                    let mut client = RECT::default();
+                    unsafe {
+                        let _ = GetClientRect(hwnd, &mut client);
+                        let _ = FillRect(HDC(wparam.0 as *mut _), &client, state.background_brush);
+                    }
                 }
                 return LRESULT(1);
             }
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        WM_SETTINGCHANGE => {
+            // Theme/accent broadcast: re-read the registry caches, rebuild
+            // the theme-colored brushes and repaint with the new palette.
+            let name = if lparam.0 == 0 {
+                String::new()
+            } else {
+                unsafe {
+                    let pointer = lparam.0 as *const u16;
+                    let mut length = 0;
+                    while *pointer.add(length) != 0 {
+                        length += 1;
+                    }
+                    String::from_utf16_lossy(std::slice::from_raw_parts(pointer, length))
+                }
+            };
+            if !state_ptr.is_null() {
+                let state = unsafe { &mut *state_ptr };
+                if name.eq_ignore_ascii_case("AppsUseLightTheme") {
+                    crate::theme::invalidate_theme_cache();
+                    let current = crate::theme::theme();
+                    crate::theme::set_theme(current);
+                    unsafe {
+                        crate::theme::apply_window_theme(
+                            hwnd,
+                            current == crate::theme::Theme::Dark,
+                            true,
+                        );
+                    }
+                } else {
+                    // Accent colors live under HKCU\...\Explorer\Accent and
+                    // arrive as plain WM_SETTINGCHANGE broadcasts as well.
+                    crate::theme::invalidate_accent();
+                }
+                state.refresh_brushes();
+                unsafe {
+                    let _ = InvalidateRect(hwnd, None, true);
+                    let _ = windows::Win32::Graphics::Gdi::RedrawWindow(
+                        hwnd,
+                        None,
+                        None,
+                        windows::Win32::Graphics::Gdi::RDW_INVALIDATE
+                            | windows::Win32::Graphics::Gdi::RDW_ALLCHILDREN,
+                    );
+                }
+            }
+            LRESULT(0)
+        }
+        WM_DWMCOLORIZATIONCOLORCHANGED => {
+            if !state_ptr.is_null() {
+                let state = unsafe { &mut *state_ptr };
+                crate::theme::invalidate_accent();
+                state.refresh_brushes();
+                unsafe {
+                    let _ = InvalidateRect(hwnd, None, true);
+                    let _ = windows::Win32::Graphics::Gdi::RedrawWindow(
+                        hwnd,
+                        None,
+                        None,
+                        windows::Win32::Graphics::Gdi::RDW_INVALIDATE
+                            | windows::Win32::Graphics::Gdi::RDW_ALLCHILDREN,
+                    );
+                }
+            }
+            LRESULT(0)
         }
         WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
             if state_ptr.is_null() {
@@ -1628,6 +1723,8 @@ pub fn show_settings_dialog(current: &Settings, owner: Option<HWND>) -> Result<O
     }
     crate::diagnostics::record("settings", "Opening settings window");
     register_settings_class()?;
+    // Mica is only ever active when the build supports the backdrop attribute.
+    let mica = crate::theme::backdrop_supported();
     let mut state = Box::new(SettingsWindowState {
         settings: current.clone(),
         saved: false,
@@ -1636,9 +1733,12 @@ pub fn show_settings_dialog(current: &Settings, owner: Option<HWND>) -> Result<O
         font: Default::default(),
         title_font: Default::default(),
         heading_font: Default::default(),
-        background_brush: unsafe { CreateSolidBrush(color_background()) },
-        card_brush: unsafe { CreateSolidBrush(color_card()) },
+        background_brush: Default::default(),
+        card_brush: Default::default(),
+        mica_active: mica,
     });
+    // Initial brush creation from the current theme colors.
+    state.refresh_brushes();
     let hwnd = unsafe {
         CreateWindowExW(
             Default::default(),
@@ -1663,6 +1763,13 @@ pub fn show_settings_dialog(current: &Settings, owner: Option<HWND>) -> Result<O
         )?
     };
     crate::diagnostics::record("settings", "Window created");
+    unsafe {
+        crate::theme::apply_window_theme(
+            hwnd,
+            crate::theme::theme() == crate::theme::Theme::Dark,
+            true,
+        );
+    }
     let _window = crate::ui::OwnedWindow(hwnd);
     let _suspend = crate::hotkey::OverlayInputSuspension::new();
     let _modal_owner = ModalOwner::disable(owner);

@@ -43,7 +43,7 @@ A non-PrintScreen shortcut that is unavailable falls back to Ctrl+Shift+S with a
 
 ## Settings and tray menu
 
-Settings has **General** and **Editor and system** views. It opens at a compact 800 x 600 (96-DPI base) using the shared Fluent metrics, unsaved choices survive navigation, and the window resizes, fits the monitor, scrolls when needed, and brings keyboard focus into view. Native buttons, radio choices and checkboxes retain keyboard/accessibility semantics beneath the custom drawing.
+Settings has **General** and **Editor and system** views. It opens at a compact 800 x 600 (96-DPI base) using the shared Fluent metrics, uses the Windows 11 Mica backdrop with a dark title bar on supported systems (build 22621+), and follows the system light/dark theme live. Unsaved choices survive navigation, and the window resizes, fits the monitor, scrolls when needed, and brings keyboard focus into view. Native buttons, radio choices and checkboxes retain keyboard/accessibility semantics beneath the custom drawing.
 
 Settings controls include the capture shortcut and delay, PNG/JPEG and JPEG quality, destination folder, annotation defaults, window snapping, whether the editor closes after an action, startup registration, notifications, and update preferences. PNG disables JPEG quality controls. Save failures keep the window open and show an error. Startup registration is restored to its exact previous value if saving settings fails.
 

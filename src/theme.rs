@@ -6,8 +6,8 @@
 //! (window procs call it from `WM_SETTINGCHANGE`).
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU8, Ordering};
-use windows::Win32::Foundation::COLORREF;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use windows::Win32::Foundation::{COLORREF, HWND};
 
 /// Current system theme, derived from `AppsUseLightTheme`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -47,6 +47,10 @@ static THEME: AtomicU8 = AtomicU8::new(0);
 static ACCENT: Mutex<Option<u32>> = Mutex::new(None);
 static REGISTRY_FALLBACK_LOGGED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
+// One-shot diagnostics flags for the backdrop/DWM helpers below.
+static BACKDROP_CHECK_LOGGED: AtomicBool = AtomicBool::new(false);
+static DWM_DARK_LOGGED: AtomicBool = AtomicBool::new(false);
+static DWM_BACKDROP_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// Blends `fraction` (0..=256) of color `b` into color `a`.
 const fn mix(a: COLORREF, b: COLORREF, fraction: u32) -> COLORREF {
@@ -221,3 +225,149 @@ pub const CONTROL_HEIGHT: i32 = 32;
 pub const PAGE_MARGIN: i32 = 24;
 /// Inner padding inside a card.
 pub const CARD_PADDING: i32 = 16;
+
+// ---------------------------------------------------------------------------
+// Cache control — live theme flips and accent broadcasts.
+// ---------------------------------------------------------------------------
+
+/// Overrides the cached system theme (used when `WM_SETTINGCHANGE` reports a
+/// new `AppsUseLightTheme` value).
+pub fn set_theme(value: Theme) {
+    let known = match value {
+        Theme::Light => 1,
+        Theme::Dark => 2,
+    };
+    THEME.store(known, Ordering::Release);
+}
+
+/// Drops the theme and accent caches so the next read hits the registry.
+pub fn invalidate_theme_cache() {
+    THEME.store(0, Ordering::Release);
+    invalidate_accent();
+}
+
+/// Drops only the accent cache (`WM_DWMCOLORIZATIONCOLORCHANGED` and
+/// accent-related `WM_SETTINGCHANGE` broadcasts).
+pub fn invalidate_accent() {
+    let mut guard = match ACCENT.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *guard = None;
+}
+
+// ---------------------------------------------------------------------------
+// Window backdrop — dark title bars and Mica.
+// ---------------------------------------------------------------------------
+
+/// System backdrop type values passed with [`DWMWA_SYSTEMBACKDROP_TYPE`].
+/// `BACKDROP_NONE` keeps the solid frame; `BACKDROP_MICA` enables Mica.
+pub const BACKDROP_NONE: i32 = 1;
+pub const BACKDROP_MICA: i32 = 2;
+/// `DWMWA_SYSTEMBACKDROP_TYPE` — Windows 11, build 22621+.
+pub const DWMWA_SYSTEMBACKDROP_TYPE: i32 = 38;
+/// `DWMWA_USE_IMMERSIVE_DARK_MODE` — Windows 10 2004+, build 18985+.
+pub const DWMWA_USE_IMMERSIVE_DARK_MODE: i32 = 20;
+/// The same attribute under its pre-2004 number.
+const DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_2004: i32 = 19;
+
+fn log_once(flag: &AtomicBool, message: &str) {
+    if flag
+        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+    {
+        crate::diagnostics::record("theme", message);
+    }
+}
+
+/// True when the OS understands [`DWMWA_SYSTEMBACKDROP_TYPE`] (Windows 11
+/// 22H2+, build 22621). A registry read failure assumes "not supported".
+pub fn backdrop_supported() -> bool {
+    use std::ffi::c_void;
+    use windows::Win32::System::Registry::{HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ, RegGetValueW};
+
+    let subkey: Vec<u16> = r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let value: Vec<u16> = "CurrentBuildNumber".encode_utf16().chain(Some(0)).collect();
+    let mut data = [0u16; 32];
+    let mut size = std::mem::size_of_val(&data) as u32;
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            windows::core::PCWSTR(subkey.as_ptr()),
+            windows::core::PCWSTR(value.as_ptr()),
+            RRF_RT_REG_SZ,
+            None,
+            Some(data.as_mut_ptr() as *mut c_void),
+            Some(&mut size),
+        )
+    };
+    let build = (status.0 == 0)
+        .then(|| {
+            let end = data.iter().position(|&c| c == 0).unwrap_or(data.len());
+            std::str::from_utf16(&data[..end])
+                .ok()
+                .and_then(|text| text.trim().parse::<u32>().ok())
+        })
+        .flatten();
+    match build {
+        Some(build) => build >= 22621,
+        None => {
+            log_once(
+                &BACKDROP_CHECK_LOGGED,
+                "CurrentBuildNumber is unavailable; assuming no system backdrop",
+            );
+            false
+        }
+    }
+}
+
+/// One `DwmSetWindowAttribute` call with a 4-byte payload; `false` when DWM
+/// rejected the attribute.
+unsafe fn set_window_attribute<T>(hwnd: HWND, attribute: i32, value: &T) -> bool {
+    use windows::Win32::Graphics::Dwm::{DWMWINDOWATTRIBUTE, DwmSetWindowAttribute};
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWINDOWATTRIBUTE(attribute),
+            std::ptr::from_ref(value).cast(),
+            std::mem::size_of::<T>() as u32,
+        )
+        .is_ok()
+    }
+}
+
+/// Applies the dark title bar and (when requested and supported) the Mica
+/// backdrop to `hwnd`. Attribute failures are recorded once through
+/// diagnostics instead of being swallowed; the window keeps its default look.
+///
+/// # Safety
+/// `hwnd` must be a valid window handle.
+pub unsafe fn apply_window_theme(hwnd: HWND, dark: bool, mica: bool) {
+    unsafe {
+        // Immersive dark mode is a BOOL (0/1) carried as a u32: attribute 20
+        // on modern builds, 19 before Windows 10 2004.
+        let dark_value: u32 = if dark { 1 } else { 0 };
+        let dark_set = set_window_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &dark_value)
+            || set_window_attribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_BEFORE_2004, &dark_value);
+        if !dark_set {
+            log_once(
+                &DWM_DARK_LOGGED,
+                "DwmSetWindowAttribute failed for the immersive dark mode attribute",
+            );
+        }
+        let backdrop = if mica && backdrop_supported() {
+            BACKDROP_MICA
+        } else {
+            BACKDROP_NONE
+        };
+        if !set_window_attribute(hwnd, DWMWA_SYSTEMBACKDROP_TYPE, &backdrop) {
+            log_once(
+                &DWM_BACKDROP_LOGGED,
+                "DwmSetWindowAttribute failed for the system backdrop attribute",
+            );
+        }
+    }
+}
