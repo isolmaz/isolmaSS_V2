@@ -307,7 +307,7 @@ pub fn backdrop_supported() -> bool {
     let build = (status.0 == 0)
         .then(|| {
             let end = data.iter().position(|&c| c == 0).unwrap_or(data.len());
-            std::str::from_utf16(&data[..end])
+            String::from_utf16(&data[..end])
                 .ok()
                 .and_then(|text| text.trim().parse::<u32>().ok())
         })
