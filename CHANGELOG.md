@@ -54,6 +54,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Local unsigned installer: **417,203 bytes**; SHA-256: `01e67dd9598fee6b33b4916d8452e22177769cc66c2ac72cfb88d9bd54c77490`. Both embed version 0.3.0 and pass their 2.5 / 3 MiB size limits.
 - Detailed audit disposition and remaining quality gates are in ROADMAP.md.
 
+### Changed — native Windows 11 refresh (Faz 0)
+
+- Added `src/theme.rs`, the single source of Fluent design tokens: light/dark palettes, the current user's system accent color (with Fluent fallbacks), theme detection via `AppsUseLightTheme`, on-accent readable text, and a 14/12/20 px Segoe UI type scale.
+- Settings colors no longer use hardcoded warm/indigo constants; every paint resolves through the token module. Fonts moved from point math to the shared pixel scale (body 15 px -> 14 px, title 27 px -> 20 px).
+
 ### Verification — 2026-09-22
 
 - `cargo fmt --check`, `cargo check --all-targets --locked`, `cargo clippy --all-targets -- -D warnings` and `cargo build --release --locked` all passed on the final tree. Unit tests and the full smoke command were explicitly skipped this round; the 2026-09-05 entry above remains the last recorded test, smoke and packaging run.

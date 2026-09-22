@@ -34,7 +34,7 @@ The remaining release gates below (signed install/rollback, alternate-DPI visual
 
 The older interface has been replaced across the main application surfaces:
 
-- **Settings:** a resizable light window with a sidebar, General / Editor and system views, rounded cards, Segoe UI, indigo accents, larger controls, and a Save changes / Cancel footer available in both views. Work-area clamping, scrolling, focus scrolling and DPI font/layout updates keep small windows usable.
+- **Settings:** a resizable light window with a sidebar, General / Editor and system views, rounded cards, Windows 11 Fluent colors from `src/theme.rs` (system accent, light/dark token sets), a 14/12/20 px Segoe UI type scale, and a Save changes / Cancel footer available in both views. Work-area clamping, scrolling, focus scrolling and DPI font/layout updates keep small windows usable.
 - **Editor:** larger tool targets, named Save / Copy actions, consistent selected/hover states and tooltips. The normal L-shaped arrangement switches to a compact grid when the selected monitor cannot accommodate it.
 - **Tray:** a custom native command menu with keyboard navigation, recent captures, the actual active capture shortcut, Settings, folder access, update and quit actions.
 - **Dialogs and setup:** native Windows task/file/folder dialogs and a matching Segoe UI/light installer treatment. No browser runtime or new external package was introduced.
@@ -42,6 +42,12 @@ The older interface has been replaced across the main application surfaces:
 Opaque Redact, a selection magnifier and pixel dimensions, arrow-key positioning, richer single-line text editing, Save as and opening the last save folder are implemented. The design uses native controls where their keyboard/accessibility semantics are useful. A complete screen-reader/high-contrast review has not been performed.
 
 **Visual verification remains incomplete.** An intermediate Settings view was inspected, but the user stopped Computer Use with physical Escape before the final interface pass. No subsequent computer-control workaround was used. The final Settings/tray/editor surfaces, alternate DPI and all interaction paths must still be inspected together. Compilation and geometry tests are not a substitute for this review.
+
+## Native W11 UI refresh — 2026-09-22
+
+Phased plan approved by the user: a native Windows 11 (Fluent) look, smaller/denser surfaces, the system accent color, Mica + dark mode, and a commit after every phase with docs kept in sync.
+
+- **Faz 0 — Fluent token layer:** new `src/theme.rs` is the single source for colors and typography (upcoming phases add metrics): light/dark Fluent palettes, system accent read from `AccentColorMenu` with documented Fluent fallbacks, theme detection via `AppsUseLightTheme`, readable on-accent text, and the 14/12/20 px Segoe UI type scale. The settings window no longer hardcodes its palette; every color resolves through the token module, and its fonts moved from point math to the shared pixel scale (body 15 px -> 14 px, title 27 px -> 20 px). Window metrics, toolbar metrics/icons, Mica/dark wiring and the tray/dialog pass arrive in Faz 1-4 as each consumer lands.
 
 ## Audit findings: implementation and evidence
 

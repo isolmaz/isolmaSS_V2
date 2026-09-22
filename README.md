@@ -2,7 +2,7 @@
 
 A small, native Windows screenshot editor written in Rust. Capture a region or a window, annotate it, then copy or save it. Screenshots stay on your computer; the optional update check contacts GitHub.
 
-Version **0.3.0** introduces a modern light interface across Settings, the editor toolbar, the tray command menu, and application dialogs. Rounded cards, Segoe UI typography, indigo accents, larger controls, and labeled Save/Copy actions replace the older visual treatment. No web runtime or new external package was added.
+Version **0.3.0** introduces a modern light interface across Settings, the editor toolbar, the tray command menu, and application dialogs. A single Windows 11 Fluent token module (`src/theme.rs`) drives the palette (the current user's system accent color, light/dark sets) and the Segoe UI type scale (14 px body, 12 px section labels, 20 px titles); labeled Save/Copy actions remain. No web runtime or new external package was added.
 
 ## Capture and edit
 

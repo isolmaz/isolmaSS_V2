@@ -13,6 +13,7 @@ mod settings;
 mod settings_window;
 mod smoke;
 mod startup;
+mod theme;
 mod toolbar;
 mod tray;
 mod ui;

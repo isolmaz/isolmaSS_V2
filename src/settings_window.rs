@@ -87,15 +87,39 @@ const ID_QUALITY_FIRST: i32 = 610;
 const SETTINGS_WIDTH: i32 = 960;
 const SETTINGS_HEIGHT: i32 = 820;
 const CONTENT_HEIGHT: i32 = 754;
-const COLOR_BACKGROUND: COLORREF = COLORREF(0x00fbf8f6);
-const COLOR_CARD: COLORREF = COLORREF(0x00ffffff);
-const COLOR_BORDER: COLORREF = COLORREF(0x00eee8e3);
-const COLOR_TEXT: COLORREF = COLORREF(0x002a211b);
-const COLOR_PROPERTY: COLORREF = COLORREF(0x006d625a);
-const COLOR_MUTED: COLORREF = COLORREF(0x008a7c72);
-const COLOR_ACCENT: COLORREF = COLORREF(0x00ed625c);
-const COLOR_TINT: COLORREF = COLORREF(0x00fff1ed);
-const COLOR_DISABLED: COLORREF = COLORREF(0x0099948f);
+fn color_background() -> COLORREF {
+    crate::theme::tokens().page
+}
+fn color_card() -> COLORREF {
+    crate::theme::tokens().card
+}
+fn color_border() -> COLORREF {
+    crate::theme::tokens().stroke
+}
+fn color_text() -> COLORREF {
+    crate::theme::tokens().text
+}
+fn color_property() -> COLORREF {
+    crate::theme::tokens().text_secondary
+}
+fn color_muted() -> COLORREF {
+    crate::theme::tokens().text_secondary
+}
+fn color_accent() -> COLORREF {
+    crate::theme::tokens().accent
+}
+fn color_tint() -> COLORREF {
+    crate::theme::tokens().accent_tint
+}
+fn color_disabled() -> COLORREF {
+    crate::theme::tokens().text_disabled
+}
+fn color_control_fill() -> COLORREF {
+    crate::theme::tokens().control_fill
+}
+fn color_control_hover() -> COLORREF {
+    crate::theme::tokens().control_hover
+}
 
 fn scale(value: i32, dpi: u32) -> i32 {
     value * dpi as i32 / 96
@@ -166,9 +190,9 @@ fn move_control(hwnd: HWND, id: i32, x: i32, y: i32, width: i32, height: i32, dp
     }
 }
 
-fn create_ui_font(dpi: u32, points: i32, weight: i32) -> windows::Win32::Graphics::Gdi::HFONT {
+fn create_font_px(dpi: u32, pixels: i32, weight: i32) -> windows::Win32::Graphics::Gdi::HFONT {
     let face = wide_string("Segoe UI");
-    let pixel_height = (points * dpi as i32 + 36) / 72;
+    let pixel_height = pixels * dpi as i32 / 96;
     unsafe {
         windows::Win32::Graphics::Gdi::CreateFontW(
             -pixel_height,
@@ -190,15 +214,27 @@ fn create_ui_font(dpi: u32, points: i32, weight: i32) -> windows::Win32::Graphic
 }
 
 fn create_settings_font(dpi: u32) -> windows::Win32::Graphics::Gdi::HFONT {
-    create_ui_font(dpi, 11, windows::Win32::Graphics::Gdi::FW_NORMAL.0 as i32)
+    create_font_px(
+        dpi,
+        crate::theme::FONT_BODY_PX,
+        windows::Win32::Graphics::Gdi::FW_NORMAL.0 as i32,
+    )
 }
 
 fn create_title_font(dpi: u32) -> windows::Win32::Graphics::Gdi::HFONT {
-    create_ui_font(dpi, 20, 650)
+    create_font_px(
+        dpi,
+        crate::theme::FONT_TITLE_PX,
+        crate::theme::FONT_WEIGHT_TITLE,
+    )
 }
 
 fn create_heading_font(dpi: u32) -> windows::Win32::Graphics::Gdi::HFONT {
-    create_ui_font(dpi, 11, 600)
+    create_font_px(
+        dpi,
+        crate::theme::FONT_SECTION_PX,
+        crate::theme::FONT_WEIGHT_SECTION,
+    )
 }
 
 fn set_controls_font(hwnd: HWND, font: windows::Win32::Graphics::Gdi::HFONT) {
@@ -266,7 +302,7 @@ fn paint_settings_surface(hwnd: HWND, state: &SettingsWindowState, hdc: HDC) {
             None,
         );
     }
-    let pen = unsafe { CreatePen(PS_SOLID, scale(1, state.dpi), COLOR_BORDER) };
+    let pen = unsafe { CreatePen(PS_SOLID, scale(1, state.dpi), color_border()) };
     let old_pen = unsafe { SelectObject(hdc, HGDIOBJ(pen.0)) };
     let old_brush = unsafe { SelectObject(hdc, HGDIOBJ(state.card_brush.0)) };
     for &(left, top, right, bottom) in card_rects(state.active_view) {
@@ -306,22 +342,22 @@ fn draw_settings_button(
     let disabled = draw.uItemState.contains(CDIS_DISABLED);
     let hot = draw.uItemState.contains(CDIS_HOT) || draw.uItemState.contains(CDIS_SELECTED);
     let fill = if primary {
-        COLOR_ACCENT
+        color_accent()
     } else if checked && !toggle {
-        COLOR_TINT
+        color_tint()
     } else if hot {
-        COLORREF(0x00faf1ed)
+        color_control_hover()
     } else if toggle {
-        COLOR_CARD
+        color_card()
     } else {
-        COLORREF(0x00fdfaf8)
+        color_control_fill()
     };
     let border = if checked && !toggle || draw.uItemState.contains(CDIS_FOCUS) {
-        COLOR_ACCENT
+        color_accent()
     } else if toggle {
-        COLOR_CARD
+        color_card()
     } else {
-        COLOR_BORDER
+        color_border()
     };
     let mut rect = RECT::default();
     unsafe {
@@ -360,7 +396,7 @@ fn draw_settings_button(
         let x = rect.left + scale(12, dpi);
         let y = (rect.top + rect.bottom - scale(16, dpi)) / 2;
         crate::drawing::with_brush(hdc, color, || {
-            crate::drawing::with_pen(hdc, PS_SOLID, 1, COLOR_BORDER, || unsafe {
+            crate::drawing::with_pen(hdc, PS_SOLID, 1, color_border(), || unsafe {
                 let _ = Ellipse(hdc, x, y, x + scale(16, dpi), y + scale(16, dpi));
             })
         });
@@ -370,9 +406,9 @@ fn draw_settings_button(
         let x = rect.right - scale(48, dpi);
         let y = (rect.top + rect.bottom - scale(22, dpi)) / 2;
         let color = if checked {
-            COLOR_ACCENT
+            color_accent()
         } else {
-            COLORREF(0x00d7cdc5)
+            color_control_fill()
         };
         crate::drawing::with_brush(hdc, color, || {
             crate::drawing::with_pen(hdc, PS_SOLID, 1, color, || unsafe {
@@ -388,8 +424,8 @@ fn draw_settings_button(
             })
         });
         let knob = x + scale(if checked { 21 } else { 3 }, dpi);
-        crate::drawing::with_brush(hdc, COLOR_CARD, || {
-            crate::drawing::with_pen(hdc, PS_SOLID, 1, COLOR_CARD, || unsafe {
+        crate::drawing::with_brush(hdc, color_card(), || {
+            crate::drawing::with_pen(hdc, PS_SOLID, 1, color_card(), || unsafe {
                 let _ = Ellipse(
                     hdc,
                     knob,
@@ -414,11 +450,11 @@ fn draw_settings_button(
             let _ = SetTextColor(
                 hdc,
                 if disabled {
-                    COLOR_DISABLED
+                    color_disabled()
                 } else if primary {
-                    COLOR_CARD
+                    crate::theme::tokens().accent_text
                 } else {
-                    COLOR_TEXT
+                    color_text()
                 },
             );
             let flags = DT_VCENTER
@@ -1283,13 +1319,13 @@ unsafe extern "system" fn settings_wnd_proc(
             unsafe {
                 let _ = SetBkMode(hdc, TRANSPARENT);
                 let color = if !IsWindowEnabled(child).as_bool() {
-                    COLOR_DISABLED
+                    color_disabled()
                 } else if matches!(id, 708 | 709) {
-                    COLOR_MUTED
+                    color_muted()
                 } else if matches!(id, 701..=707) {
-                    COLOR_PROPERTY
+                    color_property()
                 } else {
-                    COLOR_TEXT
+                    color_text()
                 };
                 let _ = SetTextColor(hdc, color);
             }
@@ -1561,8 +1597,8 @@ pub fn show_settings_dialog(current: &Settings, owner: Option<HWND>) -> Result<O
         font: Default::default(),
         title_font: Default::default(),
         heading_font: Default::default(),
-        background_brush: unsafe { CreateSolidBrush(COLOR_BACKGROUND) },
-        card_brush: unsafe { CreateSolidBrush(COLOR_CARD) },
+        background_brush: unsafe { CreateSolidBrush(color_background()) },
+        card_brush: unsafe { CreateSolidBrush(color_card()) },
     });
     let hwnd = unsafe {
         CreateWindowExW(
