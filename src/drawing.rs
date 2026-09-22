@@ -2,11 +2,13 @@
 use std::cell::RefCell;
 use windows::Win32::Foundation::{COLORREF, SIZE};
 use windows::Win32::Graphics::Gdi::*;
-use windows::core::w;
+use windows::core::PCWSTR;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Key {
-    Font(i32, i32),
+    /// (face, pixel height, weight): the face keeps the Segoe UI text cache
+    /// and the Segoe Fluent Icons glyph cache as distinct entries.
+    Font(&'static str, i32, i32),
     Pen(i32, i32, u32),
     Brush(u32),
 }
@@ -119,10 +121,26 @@ fn with_object<T>(
 }
 
 pub fn with_font<T>(hdc: HDC, height: i32, weight: i32, action: impl FnOnce() -> T) -> T {
+    with_font_face(hdc, "Segoe UI", height, weight, action)
+}
+
+/// Like [`with_font`], but for an arbitrary typeface — e.g.
+/// `"Segoe Fluent Icons"` for toolbar glyphs. Fonts are cached per
+/// `(face, height, weight)` so both faces coexist in the same cache.
+pub fn with_font_face<T>(
+    hdc: HDC,
+    face: &'static str,
+    height: i32,
+    weight: i32,
+    action: impl FnOnce() -> T,
+) -> T {
     with_object(
         hdc,
-        Key::Font(height, weight),
+        Key::Font(face, height, weight),
         || unsafe {
+            // The wide conversion allocates only on a cache miss; the created
+            // HFONT is then reused for every later draw with this face.
+            let wide: Vec<u16> = face.encode_utf16().chain(Some(0)).collect();
             HGDIOBJ(
                 CreateFontW(
                     height,
@@ -138,7 +156,7 @@ pub fn with_font<T>(hdc: HDC, height: i32, weight: i32, action: impl FnOnce() ->
                     CLIP_DEFAULT_PRECIS.0 as u32,
                     CLEARTYPE_QUALITY.0 as u32,
                     DEFAULT_PITCH.0 as u32,
-                    w!("Segoe UI"),
+                    PCWSTR(wide.as_ptr()),
                 )
                 .0,
             )
@@ -272,6 +290,41 @@ pub fn label(
                 | DT_NOPREFIX
                 | DT_END_ELLIPSIS
                 | if centered { DT_CENTER } else { DT_LEFT },
+        );
+    });
+}
+
+/// Draws one Segoe Fluent Icons glyph (a single UTF-16 PUA codepoint) inside
+/// `rect`, using the same layout rules as [`label`]. The chosen E-range
+/// codepoints are shared with Segoe MDL2 Assets, so the same value still
+/// resolves on Windows 10 where only MDL2 ships.
+pub fn icon(
+    hdc: HDC,
+    rect: crate::capture::Rect,
+    codepoint: u16,
+    size_px: i32,
+    color: COLORREF,
+    center: bool,
+) {
+    with_font_face(hdc, "Segoe Fluent Icons", -size_px.max(1), 600, || unsafe {
+        let _ = SetTextColor(hdc, color);
+        let _ = SetBkMode(hdc, TRANSPARENT);
+        let mut wide = [codepoint];
+        let mut bounds = windows::Win32::Foundation::RECT {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+        };
+        let _ = DrawTextW(
+            hdc,
+            &mut wide,
+            &mut bounds,
+            DT_SINGLELINE
+                | DT_VCENTER
+                | DT_NOPREFIX
+                | DT_END_ELLIPSIS
+                | if center { DT_CENTER } else { DT_LEFT },
         );
     });
 }

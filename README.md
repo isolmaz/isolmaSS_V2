@@ -12,7 +12,7 @@ Version **0.3.0** introduces a modern light interface across Settings, the edito
 4. Add rectangles, arrows, pen strokes, text, blur, or opaque redaction. Use **Select** to edit existing annotations.
 5. Choose **Copy** or **Save**. The exported image excludes the toolbar, selection frame, handles, caret, magnifier, and unfinished drawing previews.
 
-The editor toolbar uses the selected monitor's work area and DPI. On short or narrow work areas it switches to a grid so all commands remain reachable. Full-frame presentation is retained for compatibility with applications that hook GDI, including RTSS.
+The editor toolbar uses the selected monitor's work area and DPI. Buttons are 36 px tall with Fluent 4/8 px corner radii and Segoe Fluent Icons glyphs (shared MDL2 codepoints, so older Windows still renders them). On short or narrow work areas it switches to a grid so all commands remain reachable. Full-frame presentation is retained for compatibility with applications that hook GDI, including RTSS.
 
 **Redact** covers pixels with an opaque fill, including annotations added underneath it later. Blur is a visual mosaic effect and should not be used to remove confidential information.
 
@@ -27,6 +27,7 @@ The editor toolbar uses the selected monitor's work area and DPI. On short or na
 | Ctrl+Shift+S | Save as, with a native file picker and overwrite confirmation |
 | Ctrl+Z / Ctrl+Y | Undo / Redo |
 | Ctrl+, | Open Settings |
+| F10 or Apps key | Open the toolbar as a native command menu (keyboard/screen-reader access) |
 | Delete / Backspace | Delete the selected annotation |
 | Arrow keys | Move the selected annotation; otherwise move the screenshot region |
 | Shift+arrows | Move by 10 pixels |

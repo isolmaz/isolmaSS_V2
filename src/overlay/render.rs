@@ -7,6 +7,7 @@ impl OverlayState {
         };
         let viewport = selection_work_viewport(&self.capture, selection);
         let scale = |value: i32| (value * self.dpi as i32 / 96).max(1);
+        let tokens = crate::theme::tokens();
         let label = format!("{} × {} px", selection.width(), selection.height());
         let label_width = scale(144).min(viewport.width().max(1));
         let label_height = scale(28);
@@ -19,21 +20,8 @@ impl OverlayState {
             (viewport.bottom - label_height).max(viewport.top),
         );
         let bounds = Rect::new(x, y, x + label_width, y + label_height);
-        crate::drawing::rounded(
-            self.mem_dc,
-            bounds,
-            scale(8),
-            COLORREF(0x2a211b),
-            COLORREF(0x2a211b),
-        );
-        crate::drawing::label(
-            self.mem_dc,
-            bounds,
-            &label,
-            scale(12),
-            COLORREF(0xffffff),
-            true,
-        );
+        crate::drawing::rounded(self.mem_dc, bounds, scale(8), tokens.card, tokens.stroke);
+        crate::drawing::label(self.mem_dc, bounds, &label, scale(12), tokens.text, true);
         if self.mode != OverlayMode::DraggingSelection {
             return;
         }
@@ -68,8 +56,8 @@ impl OverlayState {
                 top + size + scale(30),
             ),
             scale(10),
-            COLORREF(0xffffff),
-            COLORREF(0xeee8e3),
+            tokens.card,
+            tokens.stroke,
         );
         let bitmap = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
@@ -106,12 +94,12 @@ impl OverlayState {
         }
         let center = size / 2;
         let cell = (size / SIDE as i32).max(1);
-        crate::drawing::with_brush(self.mem_dc, COLORREF(0xffffff), || {
+        crate::drawing::with_brush(self.mem_dc, tokens.card, || {
             crate::drawing::with_pen(
                 self.mem_dc,
                 windows::Win32::Graphics::Gdi::PS_SOLID,
                 1,
-                COLORREF(0xed625c),
+                tokens.accent,
                 || unsafe {
                     let previous = SelectObject(
                         self.mem_dc,
@@ -135,7 +123,7 @@ impl OverlayState {
             Rect::new(left, top + size, left + size, top + size + scale(26)),
             "Pixel precision",
             scale(11),
-            COLORREF(0x6d625a),
+            tokens.text_secondary,
             true,
         );
     }

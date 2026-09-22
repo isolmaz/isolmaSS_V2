@@ -3,6 +3,10 @@ use crate::capture::Rect;
 use crate::settings::{PRESET_COLORS, PRESET_THICKNESSES};
 use windows::Win32::Foundation::{COLORREF, HWND, POINT};
 use windows::Win32::Graphics::Gdi::{HDC, PS_SOLID, Polyline};
+/// Corner radius (96-dpi px, scaled at each use site) for toolbar buttons and
+/// color swatches. Panel radii use `crate::theme::RADIUS_CARD` instead.
+const RADIUS_CONTROL: i32 = 4;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolbarAction {
     Undo,
@@ -43,8 +47,8 @@ pub struct Toolbar {
 }
 
 impl Toolbar {
-    pub const TOOL_BUTTON: i32 = 40;
-    pub const ACTION_HEIGHT: i32 = 52;
+    pub const TOOL_BUTTON: i32 = 36;
+    pub const ACTION_HEIGHT: i32 = 48;
 
     /// Builds a Lightshot-style tool rail beside the selection and a compact
     /// action strip below it. Each panel flips to the opposite edge as needed.
@@ -87,7 +91,7 @@ impl Toolbar {
         let color_step = scale(28);
         let thickness_width = scale(28);
         let thickness_step = scale(31);
-        let action_button = scale(40);
+        let action_button = scale(36);
         let action_step = scale(44);
         let section_gap = scale(12);
         let colors_width = if show_color {
@@ -387,14 +391,16 @@ impl Toolbar {
 
     /// Flat, high-contrast controls share the settings window's visual language.
     pub fn render(&self, hdc: HDC) {
-        use crate::drawing::{label, rounded, with_pen};
+        use crate::drawing::{icon, label, rounded, with_pen};
         let scale = |value: i32| (value * self.dpi as i32 / 96).max(1);
-        let white = COLORREF(0xffffff);
-        let border = COLORREF(0xeee8e3);
-        let text = COLORREF(0x2a211b);
-        let muted = COLORREF(0x99948f);
-        let accent = COLORREF(0xed625c);
-        let tint = COLORREF(0xfff1ed);
+        // Native Fluent chrome from the shared token set (light/dark aware).
+        let tokens = crate::theme::tokens();
+        let card = tokens.card;
+        let stroke = tokens.stroke;
+        let text = tokens.text;
+        let muted = tokens.text_disabled;
+        let accent = tokens.accent;
+        let tint = tokens.accent_tint;
         for (index, panel) in [self.tool_bounds, self.action_bounds]
             .into_iter()
             .enumerate()
@@ -402,8 +408,14 @@ impl Toolbar {
             if index == 1 && self.tool_bounds == self.action_bounds {
                 continue;
             }
-            rounded(hdc, panel.inflate(1, 1), scale(14), border, border);
-            rounded(hdc, panel, scale(14), white, border);
+            rounded(
+                hdc,
+                panel.inflate(1, 1),
+                scale(crate::theme::RADIUS_CARD),
+                stroke,
+                stroke,
+            );
+            rounded(hdc, panel, scale(crate::theme::RADIUS_CARD), card, stroke);
         }
         for button in &self.buttons {
             let hovered = self.hovered_item == Some(button.item) && button.is_enabled;
@@ -415,12 +427,12 @@ impl Toolbar {
             } else if selected || hovered {
                 tint
             } else {
-                white
+                card
             };
             let ink = if !button.is_enabled {
                 muted
             } else if primary {
-                white
+                tokens.accent_text
             } else if selected {
                 accent
             } else {
@@ -429,7 +441,7 @@ impl Toolbar {
             rounded(
                 hdc,
                 button.rect,
-                scale(10),
+                scale(RADIUS_CONTROL),
                 fill,
                 if selected { accent } else { fill },
             );
@@ -439,27 +451,23 @@ impl Toolbar {
                     rounded(
                         hdc,
                         swatch,
-                        scale(8),
+                        scale(RADIUS_CONTROL),
                         bgra_to_colorref(color),
                         if color == self.active_color {
                             accent
                         } else {
-                            border
+                            stroke
                         },
                     );
                     if color == self.active_color {
-                        label(
-                            hdc,
-                            swatch,
-                            "✓",
-                            scale(13),
-                            if color[0] as u32 + color[1] as u32 + color[2] as u32 > 450 {
-                                text
-                            } else {
-                                white
-                            },
-                            true,
-                        );
+                        // Ink against the swatch color itself, so this pair
+                        // stays theme-independent black/white.
+                        let check = if color[0] as u32 + color[1] as u32 + color[2] as u32 > 450 {
+                            COLORREF(0x2a211b)
+                        } else {
+                            COLORREF(0xffffff)
+                        };
+                        icon(hdc, swatch, 0xe73e, scale(13), check, true);
                     }
                 }
                 ToolbarItem::Thickness(value) => {
@@ -481,31 +489,48 @@ impl Toolbar {
                     });
                 }
                 item => {
-                    let glyph = match item {
-                        ToolbarItem::Tool(ToolKind::Select) => "↖",
-                        ToolbarItem::Tool(ToolKind::Rectangle) => "□",
-                        ToolbarItem::Tool(ToolKind::Arrow) => "↗",
-                        ToolbarItem::Tool(ToolKind::Pen) => "✎",
-                        ToolbarItem::Tool(ToolKind::Text) => "T",
-                        ToolbarItem::Tool(ToolKind::Blur) => "▦",
-                        ToolbarItem::Tool(ToolKind::Redact) => "■",
-                        ToolbarItem::Action(ToolbarAction::Undo) => "↶",
-                        ToolbarItem::Action(ToolbarAction::Redo) => "↷",
-                        ToolbarItem::Action(ToolbarAction::Save) => "Save",
-                        ToolbarItem::Action(ToolbarAction::Copy) => "Copy",
-                        ToolbarItem::Action(ToolbarAction::Settings) => "⚙",
-                        ToolbarItem::Action(ToolbarAction::Cancel) => "×",
-                        _ => "",
+                    // Segoe Fluent Icons codepoints, each verified present in
+                    // BOTH official glyph tables (Segoe Fluent Icons on
+                    // Windows 11, Segoe MDL2 Assets on Windows 10) so the
+                    // shared range still renders as a Windows 10 fallback:
+                    //   Select E7C4 TaskView, Rectangle E799 AspectRatio,
+                    //   Arrow E72A Forward, Pen E70F Edit (pencil),
+                    //   Text E90A Comment (text-callout bubble),
+                    //   Undo E7A7, Redo E7A6, Save E74E, Copy E8C8,
+                    //   Settings E713, Cancel E711, swatch check E73E.
+                    // Suggested values that are wrong in the real tables were
+                    // avoided: E734 is FavoriteStar, E74C is OEM, E72C is
+                    // Refresh (Redo is E7A6).
+                    // Blur (▦ mosaic) and Redact (■ solid bar) stay Segoe UI
+                    // text: neither icon font has a shared blur/redaction
+                    // glyph — Effects E794, Contrast E7A1, PortraitBlur EABE
+                    // and Blocked E733 are Fluent-only and would not resolve
+                    // on Windows 10.
+                    let codepoint = match item {
+                        ToolbarItem::Tool(ToolKind::Select) => Some(0xe7c4u16),
+                        ToolbarItem::Tool(ToolKind::Rectangle) => Some(0xe799),
+                        ToolbarItem::Tool(ToolKind::Arrow) => Some(0xe72a),
+                        ToolbarItem::Tool(ToolKind::Pen) => Some(0xe70f),
+                        ToolbarItem::Tool(ToolKind::Text) => Some(0xe90a),
+                        ToolbarItem::Action(ToolbarAction::Undo) => Some(0xe7a7),
+                        ToolbarItem::Action(ToolbarAction::Redo) => Some(0xe7a6),
+                        ToolbarItem::Action(ToolbarAction::Save) => Some(0xe74e),
+                        ToolbarItem::Action(ToolbarAction::Copy) => Some(0xe8c8),
+                        ToolbarItem::Action(ToolbarAction::Settings) => Some(0xe713),
+                        ToolbarItem::Action(ToolbarAction::Cancel) => Some(0xe711),
+                        _ => None,
                     };
-                    let size = if matches!(
-                        item,
-                        ToolbarItem::Action(ToolbarAction::Save | ToolbarAction::Copy)
-                    ) {
-                        13
-                    } else {
-                        21
-                    };
-                    label(hdc, button.rect, glyph, scale(size), ink, true);
+                    match codepoint {
+                        Some(codepoint) => icon(hdc, button.rect, codepoint, scale(18), ink, true),
+                        None => {
+                            let glyph = match item {
+                                ToolbarItem::Tool(ToolKind::Blur) => "▦",
+                                ToolbarItem::Tool(ToolKind::Redact) => "■",
+                                _ => "",
+                            };
+                            label(hdc, button.rect, glyph, scale(21), ink, true);
+                        }
+                    }
                 }
             }
         }
@@ -544,8 +569,14 @@ impl Toolbar {
                 (self.viewport.bottom - height - margin).max(self.viewport.top + margin),
             );
             let bounds = Rect::new(x, y, x + width, y + height);
-            rounded(hdc, bounds, scale(8), text, text);
-            label(hdc, bounds, &tip, scale(12), white, true);
+            rounded(
+                hdc,
+                bounds,
+                scale(crate::theme::RADIUS_CARD),
+                tokens.card,
+                tokens.stroke,
+            );
+            label(hdc, bounds, &tip, scale(12), tokens.text, true);
         }
     }
 }
