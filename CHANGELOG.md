@@ -63,6 +63,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Faz 3: Settings gets the Windows 11 Mica backdrop (build 22621+, graceful no-op below), a dark title bar driven by `AppsUseLightTheme`, and live light/dark switching via `WM_SETTINGCHANGE`/`WM_DWMCOLORIZATIONCOLORCHANGED` with cached brushes recreated on flip; non-Win11 systems keep the solid background.
 - Faz 4: the tray command palette resolves every color through theme tokens and repaints on live theme flips; `ui::window_loop` centrally invalidates theme/accent caches for all pumped windows; keyboard focus now draws a visible accent ring (previously invisible on the accent-filled Save button); contrast measured at 5.7:1 or better for all non-exempt text pairs in both themes.
 
+### Verification — native Windows 11 refresh (Faz 0-4)
+
+- `cargo fmt --check`, `cargo check --all-targets --locked`, `cargo clippy --all-targets -- -D warnings` and `cargo build --release --locked` passed after every phase; unit tests and the smoke command remain explicitly skipped per the user's instruction.
+- The new Settings window was launched from the fresh release binary on a real desktop: it opened at exactly 800 x 600 at 96 DPI, rendered the Fluent layout (sidebar, cards, chip controls, accent focus ring, stacked JPEG-quality row, working vertical scrollbar) with no clipping, and closed cleanly. Mica backdrop compositing and dark-mode flips cannot appear in a PrintWindow capture and remain for the user's visual pass.
+
 ### Verification — 2026-09-22
 
 - `cargo fmt --check`, `cargo check --all-targets --locked`, `cargo clippy --all-targets -- -D warnings` and `cargo build --release --locked` all passed on the final tree. Unit tests and the full smoke command were explicitly skipped this round; the 2026-09-05 entry above remains the last recorded test, smoke and packaging run.
