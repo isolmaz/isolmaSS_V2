@@ -4,7 +4,7 @@ use windows::Win32::Foundation::{COLORREF, SIZE};
 use windows::Win32::Graphics::Gdi::*;
 use windows::core::w;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Key {
     Font(i32, i32),
     Pen(i32, i32, u32),
@@ -23,6 +23,35 @@ impl Drop for Cache {
 type TextMetrics = Vec<(String, i32, (i32, i32))>;
 thread_local! { static METRICS: RefCell<TextMetrics> = const { RefCell::new(Vec::new()) }; }
 thread_local! { static CACHE: RefCell<Cache> = const { RefCell::new(Cache(Vec::new())) }; }
+thread_local! { static LOGGED_FAILURES: RefCell<Vec<Key>> = const { RefCell::new(Vec::new()) }; }
+
+/// Records a GDI creation failure once per object key so the paint loop cannot
+/// flood the bounded diagnostic log, while the failure stays observable.
+fn note_create_failure(key: Key) {
+    LOGGED_FAILURES.with(|seen| {
+        let mut seen = seen.borrow_mut();
+        if seen.len() < 64 && !seen.contains(&key) {
+            seen.push(key);
+            // Consoleless app: go through the rotating diagnostic log, not stderr.
+            crate::diagnostics::record(
+                "gdi",
+                &format!("GDI object creation failed for {key:?}; using stock fallback"),
+            );
+        }
+    });
+}
+
+/// Stock stand-ins for failed creations: visibly degraded (black strokes, white
+/// fills, system font) instead of a silent no-op, and never deleted by owners.
+fn stock_fallback(key: Key) -> HGDIOBJ {
+    unsafe {
+        match key {
+            Key::Font(..) => GetStockObject(SYSTEM_FONT),
+            Key::Pen(..) => GetStockObject(BLACK_PEN),
+            Key::Brush(..) => GetStockObject(WHITE_BRUSH),
+        }
+    }
+}
 
 fn with_object<T>(
     hdc: HDC,
@@ -43,6 +72,15 @@ fn with_object<T>(
             (object, true)
         }
     });
+    // A failed creation must never be selected: substitute a stock object for
+    // this draw only (the next call retries the real creation) and log it. The
+    // stock object is not owned, so Drop only restores the previous selection.
+    let (object, owned) = if object.is_invalid() {
+        note_create_failure(key);
+        (stock_fallback(key), false)
+    } else {
+        (object, owned)
+    };
     struct Selection {
         hdc: HDC,
         previous: HGDIOBJ,
@@ -52,16 +90,28 @@ fn with_object<T>(
     impl Drop for Selection {
         fn drop(&mut self) {
             unsafe {
-                SelectObject(self.hdc, self.previous);
-                if self.owned {
+                // A failed SelectObject leaves the DC unchanged and returns an
+                // invalid sentinel; restoring that sentinel would corrupt the DC.
+                if !self.previous.is_invalid() {
+                    SelectObject(self.hdc, self.previous);
+                }
+                // Stock fallbacks are never owned, so they are never deleted.
+                if self.owned && !self.object.is_invalid() {
                     let _ = DeleteObject(self.object);
                 }
             }
         }
     }
+    // Never hand an invalid handle (failed creation or failed stock fallback)
+    // to SelectObject: skip the selection and leave the DC untouched instead.
+    let previous = if object.is_invalid() {
+        HGDIOBJ::default()
+    } else {
+        unsafe { SelectObject(hdc, object) }
+    };
     let _selection = Selection {
         hdc,
-        previous: unsafe { SelectObject(hdc, object) },
+        previous,
         object,
         owned,
     };
@@ -136,19 +186,19 @@ pub fn measure_text(text: &str, font_size: i32) -> (i32, i32) {
         return (font_size.max(1), font_size.max(1));
     }
     let wide: Vec<u16> = text.encode_utf16().collect();
-    let size = with_font(dc, font_size, 700, || {
-        let mut size = SIZE::default();
-        unsafe {
-            let _ = GetTextExtentPoint32W(dc, &wide, &mut size);
-        }
-        size
+    let mut size = SIZE::default();
+    let measured_ok = with_font(dc, font_size, 700, || unsafe {
+        GetTextExtentPoint32W(dc, &wide, &mut size).as_bool()
     });
     unsafe {
         let _ = DeleteDC(dc);
     }
     let measured = (size.cx.max(1), size.cy.max(font_size.max(1)));
     // Bounded and session-local: never retain large user text or grow with every caret move.
-    if text.len() <= 1024 {
+    // Only a real measurement enters the cache; after a failed
+    // GetTextExtentPoint32W a later successful measurement can still replace
+    // the fallback for this string.
+    if measured_ok && text.len() <= 1024 {
         METRICS.with(|cache| {
             let mut cache = cache.borrow_mut();
             if cache.len() == 32 {

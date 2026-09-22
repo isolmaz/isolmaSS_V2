@@ -137,7 +137,7 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         "  - Low-level keyboard hook callback verified: VK_SNAPSHOT consumed (LRESULT 1), auto-repeat handled, non-PrintScreen passed through."
     );
 
-    let loaded_cfg = HotkeyConfig::load_or_default();
+    let loaded_cfg = HotkeyConfig::load()?;
     assert!(!loaded_cfg.description.is_empty());
     drop(handle);
     println!("  - Hotkey unregistered, WH_KEYBOARD_LL unhooked, and thread cleanly shut down.");
@@ -731,7 +731,7 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     let corrupt_json = "{ invalid json content: true }";
     let fallback_res = serde_json::from_str::<Settings>(corrupt_json);
     assert!(fallback_res.is_err(), "Corrupt JSON must error gracefully");
-    let fallback_settings = Settings::load_or_default();
+    let fallback_settings = Settings::load()?;
     assert!(!fallback_settings.hotkey.description.is_empty());
 
     println!("  - Settings serialization & deserialization verified.");
@@ -1131,8 +1131,7 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     // Slice C5: System Tray Icon & Right-Click Menu Lifecycle
     // ------------------------------------------------------------
     println!("\n[Slice C5] Testing System Tray Manager Lifecycle...");
-    let (tray_tx, _tray_rx) = std::sync::mpsc::sync_channel::<tray::TrayCommand>(16);
-    let tray_manager = tray::TrayManager::create(tray_tx)?;
+    let tray_manager = tray::TrayManager::create()?;
     println!("  - System Tray icon registered with Shell_NotifyIconW(NIM_ADD)");
 
     tray::notify_tray_wakeup();

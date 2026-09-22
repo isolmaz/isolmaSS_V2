@@ -26,7 +26,6 @@ use overlay::show_overlay_session;
 use settings::{Settings, show_settings_dialog};
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::mpsc::{SyncSender, sync_channel};
 use std::time::Instant;
 use tray::{TrayCommand, TrayManager};
 use windows::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole};
@@ -56,10 +55,7 @@ fn print_usage() {
     println!("  isolmass --help            Show this help message");
 }
 
-fn start_hotkey_runtime(
-    config: HotkeyConfig,
-    daemon_tx: SyncSender<TrayCommand>,
-) -> Result<HotkeyRuntime, Box<dyn std::error::Error>> {
+fn start_hotkey_runtime(config: HotkeyConfig) -> Result<HotkeyRuntime, Box<dyn std::error::Error>> {
     let requested = config.description.clone();
     let (event_rx, handle) = start_hotkey_listener(config)?;
     tray::set_active_hotkey(&handle.active_description);
@@ -74,7 +70,7 @@ fn start_hotkey_runtime(
     }
     let forward_thread = std::thread::spawn(move || {
         while let Ok(triggered) = event_rx.recv() {
-            tray::queue_capture(&daemon_tx, triggered);
+            tray::queue_capture(triggered);
         }
     });
     Ok(HotkeyRuntime {
@@ -140,29 +136,49 @@ fn apply_settings(
     settings: &mut Settings,
     mut latest: Settings,
     runtime: &mut Option<HotkeyRuntime>,
-    sender: &SyncSender<TrayCommand>,
-) -> Result<(), Box<dyn std::error::Error>> {
+) {
     if latest.hotkey != settings.hotkey {
         drop(runtime.take());
-        match start_hotkey_runtime(latest.hotkey.clone(), sender.clone()) {
+        match start_hotkey_runtime(latest.hotkey.clone()) {
             Ok(next) => *runtime = Some(next),
             Err(error) => {
-                *runtime = Some(start_hotkey_runtime(
-                    settings.hotkey.clone(),
-                    sender.clone(),
-                )?);
-                let mut detail = error.to_string();
-                if let Err(rollback) = rollback_hotkey_setting(&mut latest, &settings.hotkey) {
-                    detail.push_str(&format!(" {rollback}"));
+                let requested = latest.hotkey.description.clone();
+                match start_hotkey_runtime(settings.hotkey.clone()) {
+                    Ok(previous) => {
+                        *runtime = Some(previous);
+                        let mut detail = format!("'{requested}' could not start: {error}");
+                        if let Err(rollback) =
+                            rollback_hotkey_setting(&mut latest, &settings.hotkey)
+                        {
+                            detail.push_str(&format!(" {rollback}"));
+                        }
+                        tray::show_notification("Hotkey unchanged", &detail);
+                    }
+                    Err(restart_error) => {
+                        // Keep the daemon alive without a shortcut instead of
+                        // aborting the message loop; say so accurately.
+                        *runtime = None;
+                        tray::set_active_hotkey("");
+                        let mut detail = format!(
+                            "'{requested}' could not start ({error}) and the previous shortcut failed too ({restart_error})"
+                        );
+                        if let Err(rollback) =
+                            rollback_hotkey_setting(&mut latest, &settings.hotkey)
+                        {
+                            detail.push_str(&format!(" {rollback}"));
+                        }
+                        detail.push_str(
+                            ". Capture from the tray menu or open Settings to choose a shortcut.",
+                        );
+                        tray::show_notification("Capture shortcut unavailable", &detail);
+                    }
                 }
-                tray::show_notification("Hotkey unchanged", &detail);
             }
         }
     }
     updater::configure(settings, &latest);
     *settings = latest;
     tray::refresh_preferences(settings);
-    Ok(())
 }
 
 fn capture(triggered: Instant) {
@@ -181,27 +197,22 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
         InstanceState::Primary(instance) => instance,
         InstanceState::ExistingNotified => return Ok(()),
     };
-    let (mut settings, warning) = Settings::load_with_warning();
+    let (mut settings, warning) = Settings::load_with_warning()?;
     if let Err(error) = startup::set_start_with_windows(settings.start_with_windows) {
         diagnostics::record("startup", &error);
     }
-    let (sender, receiver) = sync_channel::<TrayCommand>(16);
-    let tray_manager = TrayManager::create(sender.clone())?;
+    let tray_manager = TrayManager::create()?;
     let services = BackgroundServices;
     tray::refresh_preferences(&settings);
     if let Some(warning) = warning {
         tray::show_notification("Settings recovered", &warning);
     }
-    let mut runtime = Some(start_hotkey_runtime(
-        settings.hotkey.clone(),
-        sender.clone(),
-    )?);
+    let mut runtime = Some(start_hotkey_runtime(settings.hotkey.clone())?);
     if settings.check_updates_automatically {
         updater::run_automatic_update_check(settings.install_updates_automatically);
     }
     if open_settings {
-        sender.try_send(TrayCommand::Settings)?;
-        tray::notify_tray_wakeup();
+        tray::queue_command(TrayCommand::Settings);
     }
     const CAPTURE_TIMER: usize = 41;
     let mut scheduled: Option<Instant> = None;
@@ -229,7 +240,7 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
                 reload = true;
             }
         }
-        while let Ok(command) = receiver.try_recv() {
+        for command in tray::take_commands() {
             match command {
                 TrayCommand::Capture(triggered) => {
                     if tray::capture_is_stale(triggered) {
@@ -279,10 +290,8 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
                     }
                     scheduled = None;
                     tray::capture_finished();
-                    match show_settings_dialog(&settings, None) {
-                        Ok(Some(latest)) => {
-                            apply_settings(&mut settings, latest, &mut runtime, &sender)?
-                        }
+                    match show_settings_dialog(&settings, Some(tray::window_handle())) {
+                        Ok(Some(latest)) => apply_settings(&mut settings, latest, &mut runtime),
                         Ok(None) => {}
                         Err(error) => {
                             ui::error(tray::window_handle(), "Settings failed", &error.to_string())
@@ -310,11 +319,21 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
             }
         }
         if reload {
-            let (latest, warning) = Settings::load_with_warning();
-            if let Some(warning) = warning {
-                tray::show_notification("Settings recovered", &warning);
+            match Settings::load_with_warning() {
+                Ok((latest, warning)) => {
+                    if let Some(warning) = warning {
+                        tray::show_notification("Settings recovered", &warning);
+                    }
+                    apply_settings(&mut settings, latest, &mut runtime);
+                }
+                Err(error) => {
+                    diagnostics::record("settings", &error.to_string());
+                    tray::show_notification(
+                        "Settings not reloaded",
+                        &format!("Keeping the current settings. {error}"),
+                    );
+                }
             }
-            apply_settings(&mut settings, latest, &mut runtime, &sender)?;
         }
         if running {
             updater::poll(tray::window_handle(), true);
@@ -336,11 +355,10 @@ fn run_capture_once() -> Result<(), Box<dyn std::error::Error>> {
     let triggered = Instant::now();
     let capture = CaptureBuffer::capture_virtual_screen()?;
     println!(
-        "[isolmaSS] Capture={}us (setup={}us, BitBlt={}us, copy={}us, dim={}us).",
+        "[isolmaSS] Capture={}us (setup={}us, BitBlt={}us, dim={}us).",
         capture.timings.total.as_micros(),
         capture.timings.setup.as_micros(),
         capture.timings.bit_blt.as_micros(),
-        capture.timings.copy.as_micros(),
         capture.timings.dim.as_micros(),
     );
     let capture_rc = Rc::new(capture);

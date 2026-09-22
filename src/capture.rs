@@ -202,7 +202,6 @@ impl Rect {
 pub struct CaptureTimings {
     pub setup: Duration,
     pub bit_blt: Duration,
-    pub copy: Duration,
     pub dim: Duration,
     pub total: Duration,
 }
@@ -357,13 +356,21 @@ impl CaptureBuffer {
         let height = unsafe { GetSystemMetrics(SM_CYVIRTUALSCREEN) };
 
         if width <= 0 || height <= 0 {
-            return Err(Error::from_win32());
+            return Err(Error::new(
+                windows::core::HRESULT::from_win32(87),
+                "The virtual screen has no capturable area.",
+            ));
         }
 
         let buffer_size = (width as usize)
             .checked_mul(height as usize)
             .and_then(|px| px.checked_mul(4))
-            .ok_or_else(Error::from_win32)?;
+            .ok_or_else(|| {
+                Error::new(
+                    windows::core::HRESULT::from_win32(534),
+                    "The virtual screen exceeds the supported pixel-buffer size.",
+                )
+            })?;
 
         // 1. Get desktop window DC
         let screen_dc = unsafe { GetDC(HWND::default()) };
@@ -403,13 +410,22 @@ impl CaptureBuffer {
         let mut bits_ptr: *mut c_void = std::ptr::null_mut();
         let hbitmap: HBITMAP =
             unsafe { CreateDIBSection(screen_dc, &bmi, DIB_RGB_COLORS, &mut bits_ptr, None, 0)? };
-        if hbitmap.is_invalid() || bits_ptr.is_null() {
-            return Err(Error::from_win32());
-        }
         let _bitmap_guard = GdiObjectGuard(HGDIOBJ(hbitmap.0));
+        if hbitmap.is_invalid() || bits_ptr.is_null() {
+            return Err(Error::new(
+                windows::core::HRESULT::from_win32(31),
+                "Windows did not allocate a usable screenshot bitmap.",
+            ));
+        }
 
         // 4. Select DIB section into memory DC
         let old_obj = unsafe { SelectObject(mem_dc, HGDIOBJ(hbitmap.0)) };
+        if old_obj.is_invalid() {
+            return Err(Error::new(
+                windows::core::HRESULT::from_win32(31),
+                "Windows could not select the screenshot bitmap.",
+            ));
+        }
 
         let setup = total_start.elapsed();
         // 5. BitBlt from screen DC to memory DC with CAPTUREBLT
@@ -439,7 +455,10 @@ impl CaptureBuffer {
             unsafe {
                 SelectObject(mem_dc, old_obj);
             }
-            return Err(Error::from_win32());
+            return Err(Error::new(
+                windows::core::HRESULT::from_win32(31),
+                "Windows could not finish drawing the captured screen.",
+            ));
         }
         let bit_blt = bit_blt_start.elapsed();
 
@@ -470,7 +489,6 @@ impl CaptureBuffer {
             timings: CaptureTimings {
                 setup,
                 bit_blt,
-                copy: Duration::ZERO,
                 dim,
                 total: total_start.elapsed(),
             },

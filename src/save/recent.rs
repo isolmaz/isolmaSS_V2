@@ -61,41 +61,63 @@ pub fn refresh(directory: &Path) {
     }
     CANCELLED.store(false, Ordering::Release);
     let directory = directory.to_owned();
-    let handle = std::thread::spawn(move || {
-        let result = super::recent_screenshots(&directory, 5);
-        let mut cache = CACHE.lock().unwrap_or_else(|error| error.into_inner());
-        if !CANCELLED.load(Ordering::Acquire) && cache.directory == directory {
-            match result {
-                Ok(paths) => {
-                    let mut merged: Vec<_> = cache
-                        .saved
-                        .iter()
-                        .filter(|(revision, _)| *revision > generation)
-                        .map(|(_, path)| path.clone())
-                        .collect();
-                    for path in paths {
-                        if merged.len() < 5 && !merged.contains(&path) {
-                            merged.push(path);
-                        }
-                    }
-                    cache.paths = merged;
+    let spawned = std::thread::Builder::new()
+        .name("recent-captures".to_string())
+        .spawn(move || {
+            // Release builds abort on panic (no recoverable freeze to guard there);
+            // this only guarantees RUNNING clears on normal exit and on unwind in
+            // panic=unwind builds, so refresh() can never wedge.
+            struct ResetRunning;
+            impl Drop for ResetRunning {
+                fn drop(&mut self) {
+                    RUNNING.store(false, Ordering::Release);
                 }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    cache.paths = cache
-                        .saved
-                        .iter()
-                        .filter(|(revision, _)| *revision > generation)
-                        .map(|(_, path)| path.clone())
-                        .collect();
-                }
-                Err(error) => crate::diagnostics::record("recent captures", &error.to_string()),
             }
-            cache.refreshed = Some(Instant::now());
+            let _reset = ResetRunning;
+            let result = super::recent_screenshots(&directory, 5);
+            let mut cache = CACHE.lock().unwrap_or_else(|error| error.into_inner());
+            if !CANCELLED.load(Ordering::Acquire) && cache.directory == directory {
+                match result {
+                    Ok(paths) => {
+                        let mut merged: Vec<_> = cache
+                            .saved
+                            .iter()
+                            .filter(|(revision, _)| *revision > generation)
+                            .map(|(_, path)| path.clone())
+                            .collect();
+                        for path in paths {
+                            if merged.len() < 5 && !merged.contains(&path) {
+                                merged.push(path);
+                            }
+                        }
+                        cache.paths = merged;
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                        cache.paths = cache
+                            .saved
+                            .iter()
+                            .filter(|(revision, _)| *revision > generation)
+                            .map(|(_, path)| path.clone())
+                            .collect();
+                    }
+                    Err(error) => crate::diagnostics::record("recent captures", &error.to_string()),
+                }
+                cache.refreshed = Some(Instant::now());
+            }
+            crate::tray::notify_tray_wakeup();
+        });
+    match spawned {
+        Ok(handle) => {
+            *WORKER.lock().unwrap_or_else(|error| error.into_inner()) = Some(handle);
         }
-        RUNNING.store(false, Ordering::Release);
-        crate::tray::notify_tray_wakeup();
-    });
-    *WORKER.lock().unwrap_or_else(|error| error.into_inner()) = Some(handle);
+        Err(error) => {
+            RUNNING.store(false, Ordering::Release);
+            crate::diagnostics::record(
+                "recent captures",
+                &format!("Could not start the directory worker: {error}"),
+            );
+        }
+    }
 }
 
 pub fn list() -> Vec<PathBuf> {

@@ -21,7 +21,14 @@ pub fn read_text(owner: HWND) -> Result<String> {
     let _clipboard = ClipboardGuard;
     let handle = unsafe { GetClipboardData(13)? };
     let memory = HGLOBAL(handle.0);
-    let size = unsafe { GlobalSize(memory) }.min(32_768);
+    let full_size = unsafe { GlobalSize(memory) };
+    if full_size == 0 {
+        return Err(Error::new(
+            windows::core::HRESULT::from_win32(windows::Win32::Foundation::ERROR_INVALID_HANDLE.0),
+            "Clipboard text memory is unavailable.",
+        ));
+    }
+    let size = full_size.min(32_768);
     let pointer = unsafe { GlobalLock(memory) };
     if pointer.is_null() {
         return Err(Error::from_win32());
@@ -31,9 +38,18 @@ pub fn read_text(owner: HWND) -> Result<String> {
         .iter()
         .position(|unit| *unit == 0)
         .unwrap_or(units.len());
+    // Oversized input stays bounded, but a cut is never silent: report only
+    // when the terminator really lies past the bound.
+    let truncated = size < full_size && length == units.len();
     let text = String::from_utf16_lossy(&units[..length]);
     unsafe {
         let _ = GlobalUnlock(memory);
+    }
+    if truncated {
+        crate::diagnostics::record(
+            "clipboard",
+            "Clipboard text exceeded 32768 bytes and was truncated.",
+        );
     }
     Ok(text.replace(['\r', '\n'], " ").replace('\t', "    "))
 }

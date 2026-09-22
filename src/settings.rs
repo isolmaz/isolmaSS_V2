@@ -103,46 +103,67 @@ impl Settings {
         crate::hotkey::settings_path()
     }
 
-    /// Loads settings and returns a user-visible warning when recovery was required.
-    pub fn load_with_warning() -> (Self, Option<String>) {
+    /// Loads settings, returning a user-visible warning when recovery was required.
+    ///
+    /// A missing file yields defaults. Invalid content is preserved once under
+    /// the cross-process settings lock and then reset to defaults. Every other
+    /// read error (sharing violation, permissions, AV lock) is propagated
+    /// unchanged and never causes a write over the existing file.
+    pub fn load_with_warning() -> std::io::Result<(Self, Option<String>)> {
         let Some(path) = Self::config_path() else {
-            return (
+            return Ok((
                 Self::default(),
                 Some("Settings could not be loaded because %APPDATA% is unavailable.".to_string()),
-            );
+            ));
         };
 
         match Self::load_from_path(&path) {
-            Ok(settings) => (settings, None),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (Self::default(), None),
-            Err(error) => {
-                let backup = path.with_extension(format!(
-                    "corrupt-{}.json",
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map_or(0, |duration| duration.as_secs())
-                ));
-                let backup_note = match std::fs::copy(&path, &backup) {
-                    Ok(_) => format!(" A copy was preserved at {}.", backup.display()),
-                    Err(_) => String::new(),
-                };
-                (
-                    Self::default(),
-                    Some(format!(
-                        "Settings were reset because settings.json is invalid: {error}.{backup_note}"
-                    )),
-                )
+            Ok(settings) => Ok((settings, None)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok((Self::default(), None))
             }
+            Err(error) if error.kind() == std::io::ErrorKind::InvalidData => {
+                let _lock = crate::instance::SettingsLock::acquire()?;
+                // Single fixed backup name: repeated loads can never accumulate
+                // more than one preserved copy.
+                let backup = path.with_extension("corrupt.json");
+                std::fs::copy(&path, &backup).map_err(|copy_error| {
+                    std::io::Error::new(
+                        copy_error.kind(),
+                        format!(
+                            "settings.json is invalid ({error}) and could not be preserved before recovery: {copy_error}"
+                        ),
+                    )
+                })?;
+                let defaults = Self::default();
+                defaults.save_to_path(&path).map_err(|save_error| {
+                    std::io::Error::new(
+                        save_error.kind(),
+                        format!(
+                            "settings.json is invalid but was preserved at {}; resetting it failed: {save_error}",
+                            backup.display()
+                        ),
+                    )
+                })?;
+                Ok((
+                    defaults,
+                    Some(format!(
+                        "Settings were invalid and have been reset. The original was preserved at {}.",
+                        backup.display()
+                    )),
+                ))
+            }
+            Err(error) => Err(error),
         }
     }
 
-    /// Loads settings from disk or returns default configuration.
-    pub fn load_or_default() -> Self {
-        let (settings, warning) = Self::load_with_warning();
+    /// Loads settings from disk, recording any recovery warning to diagnostics.
+    pub fn load() -> std::io::Result<Self> {
+        let (settings, warning) = Self::load_with_warning()?;
         if let Some(warning) = warning {
             crate::diagnostics::record("settings recovery", &warning);
         }
-        settings
+        Ok(settings)
     }
 
     /// Saves settings through a same-directory temporary file and an atomic replacement.
@@ -219,10 +240,10 @@ impl Settings {
             Some("capture_delay_ms must be between 0 and 5000")
         } else if !(1..=100).contains(&self.jpeg_quality) {
             Some("jpeg_quality must be between 1 and 100")
-        } else if self.save_directory.as_os_str().is_empty()
+        } else if !self.save_directory.is_absolute()
             || self.save_directory.to_string_lossy().contains('\0')
         {
-            Some("save_directory must be a nonempty Windows path without NUL characters")
+            Some("save_directory must be an absolute Windows path without NUL characters")
         } else if !self.hotkey.is_valid() {
             Some("hotkey description, key and modifiers must describe the same supported shortcut")
         } else {
@@ -266,6 +287,17 @@ impl Settings {
     /// Saves settings to disk as formatted JSON.
     pub fn save(&self) -> std::io::Result<()> {
         let _lock = crate::instance::SettingsLock::acquire()?;
+        // Existence check lives only on this user-initiated path: validate()
+        // runs on every overlay open and save_directory may be a UNC location.
+        // An inaccessible folder is skipped, never treated as an error here.
+        if let Ok(metadata) = std::fs::metadata(&self.save_directory)
+            && metadata.is_file()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "save_directory exists and is not a directory",
+            ));
+        }
         let path = Self::config_path();
         self.save_to_config_path(path.as_deref())
     }

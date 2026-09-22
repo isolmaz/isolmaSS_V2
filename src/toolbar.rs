@@ -1,7 +1,7 @@
 use crate::annotation::{ToolKind, bgra_to_colorref};
 use crate::capture::Rect;
 use crate::settings::{PRESET_COLORS, PRESET_THICKNESSES};
-use windows::Win32::Foundation::{COLORREF, POINT};
+use windows::Win32::Foundation::{COLORREF, HWND, POINT};
 use windows::Win32::Graphics::Gdi::{HDC, PS_SOLID, Polyline};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolbarAction {
@@ -26,6 +26,8 @@ pub struct ToolbarButton {
     pub item: ToolbarItem,
     pub rect: Rect,
     pub is_enabled: bool,
+    /// Mirrors the toolbar's active tool/color/thickness for menu check marks.
+    pub is_checked: bool,
 }
 
 pub struct Toolbar {
@@ -110,8 +112,9 @@ impl Toolbar {
         let safe = Rect::new(
             viewport.left + outer_pad,
             viewport.top + outer_pad,
-            viewport.right - outer_pad,
-            viewport.bottom - outer_pad,
+            // Never invert the insets on a degenerate (impossible tiny) work area.
+            (viewport.right - outer_pad).max(viewport.left + outer_pad),
+            (viewport.bottom - outer_pad).max(viewport.top + outer_pad),
         );
         let contains = |outer: Rect, inner: Rect| {
             inner.left >= outer.left
@@ -230,6 +233,7 @@ impl Toolbar {
         );
         let mut y = tool_bounds.bottom - pad - tool_button;
         for (item, enabled) in tool_items {
+            let is_checked = matches!(item, ToolbarItem::Tool(tool) if tool == active_tool);
             buttons.push(ToolbarButton {
                 item,
                 rect: Rect::new(
@@ -239,6 +243,7 @@ impl Toolbar {
                     y + tool_button,
                 ),
                 is_enabled: enabled,
+                is_checked,
             });
             y -= tool_button + scale(3);
         }
@@ -250,6 +255,7 @@ impl Toolbar {
                     item: ToolbarItem::Color(color),
                     rect: Rect::new(x, item_y, x + color_size, item_y + color_size),
                     is_enabled: true,
+                    is_checked: color == active_color,
                 });
                 x += color_step;
             }
@@ -262,6 +268,7 @@ impl Toolbar {
                     item: ToolbarItem::Thickness(thickness),
                     rect: Rect::new(x, y, x + thickness_width, y + tool_button),
                     is_enabled: true,
+                    is_checked: thickness == active_thickness,
                 });
                 x += thickness_step;
             }
@@ -284,33 +291,41 @@ impl Toolbar {
                 item: ToolbarItem::Action(action),
                 rect: Rect::new(x, y, x + button_width, y + action_button),
                 is_enabled: true,
+                is_checked: false,
             });
             x += button_width + scale(4);
         }
         if tool_height + action_height > safe.height() || action_width > safe.width() {
             // A grid keeps every command reachable on short/high-DPI work areas.
-            let count = buttons.len() as i32;
-            let mut cell = scale(44).max(1);
+            let count = (buttons.len() as i32).max(1);
+            let mut cell = scale(44).max(8);
             loop {
                 let cols = (safe.width() / cell).max(1);
                 let rows = (count + cols - 1) / cols;
-                if rows * cell <= safe.height() || cell <= 8 {
+                if (rows * cell <= safe.height() && cols * cell <= safe.width()) || cell <= 8 {
                     break;
                 }
                 cell -= 1;
             }
             let cols = (safe.width() / cell).max(1).min(count);
             let rows = (count + cols - 1) / cols;
+            // Clamp into the safe area: an undersized work area must still yield
+            // in-bounds rectangles instead of buttons above or beyond the viewport.
             let bounds = Rect::new(
                 safe.left,
-                safe.bottom - rows * cell,
-                safe.left + cols * cell,
+                (safe.bottom - rows * cell).max(safe.top),
+                (safe.left + cols * cell).min(safe.right).max(safe.left),
                 safe.bottom,
             );
+            let clamp = |value: i32, low: i32, high: i32| value.clamp(low, high.max(low));
             for (index, button) in buttons.iter_mut().enumerate() {
                 let x = bounds.left + index as i32 % cols * cell;
                 let y = bounds.top + index as i32 / cols * cell;
-                button.rect = Rect::new(x + 2, y + 2, x + cell - 2, y + cell - 2);
+                let left = clamp(x + 2, bounds.left, bounds.right);
+                let right = clamp(x + cell - 2, left, bounds.right);
+                let top = clamp(y + 2, bounds.top, bounds.bottom);
+                let bottom = clamp(y + cell - 2, top, bounds.bottom);
+                button.rect = Rect::new(left, top, right, bottom);
             }
             return Self {
                 tool_bounds: bounds,
@@ -517,7 +532,7 @@ impl Toolbar {
                 ToolbarItem::Thickness(value) => format!("{value} px stroke"),
             };
             let margin = scale(6);
-            let width = (crate::drawing::measure_text(&tip, scale(13)).0 + scale(24))
+            let width = (crate::drawing::measure_text(&tip, scale(12)).0 + scale(24))
                 .min((self.viewport.width() - margin * 2).max(1));
             let height = scale(32);
             let x = button.rect.left.clamp(
@@ -533,6 +548,118 @@ impl Toolbar {
             label(hdc, bounds, &tip, scale(12), white, true);
         }
     }
+}
+
+/// Presents the toolbar's commands as a native popup menu for keyboard and screen-reader
+/// access (F10 / Apps key). Returns the chosen command; the overlay is never mutated.
+pub fn show_command_menu(
+    owner: HWND,
+    buttons: &[ToolbarButton],
+) -> windows::core::Result<Option<ToolbarItem>> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, MF_CHECKED, MF_GRAYED, MF_STRING,
+        TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenuEx,
+    };
+    use windows::core::PCWSTR;
+    if buttons.is_empty() {
+        return Ok(None);
+    }
+    // The menu runs a modal loop; suspend overlay hotkeys for its lifetime.
+    let _suspension = crate::hotkey::OverlayInputSuspension::new();
+    struct MenuGuard(windows::Win32::UI::WindowsAndMessaging::HMENU);
+    impl Drop for MenuGuard {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = DestroyMenu(self.0);
+            }
+        }
+    }
+    fn wide(text: &str) -> Vec<u16> {
+        text.encode_utf16().chain(Some(0)).collect()
+    }
+    fn group(item: ToolbarItem) -> &'static str {
+        match item {
+            ToolbarItem::Tool(_) => "Tools",
+            ToolbarItem::Action(ToolbarAction::Undo | ToolbarAction::Redo) => "History",
+            ToolbarItem::Color(_) => "Color",
+            ToolbarItem::Thickness(_) => "Line width",
+            ToolbarItem::Action(_) => "Commands",
+        }
+    }
+    fn label(item: ToolbarItem) -> String {
+        match item {
+            ToolbarItem::Tool(ToolKind::Select) => "Select region".to_owned(),
+            ToolbarItem::Tool(ToolKind::Rectangle) => "Rectangle".to_owned(),
+            ToolbarItem::Tool(ToolKind::Arrow) => "Arrow".to_owned(),
+            ToolbarItem::Tool(ToolKind::Pen) => "Pen".to_owned(),
+            ToolbarItem::Tool(ToolKind::Text) => "Text".to_owned(),
+            ToolbarItem::Tool(ToolKind::Blur) => "Blur".to_owned(),
+            ToolbarItem::Tool(ToolKind::Redact) => "Redact".to_owned(),
+            ToolbarItem::Action(ToolbarAction::Undo) => "Undo".to_owned(),
+            ToolbarItem::Action(ToolbarAction::Redo) => "Redo".to_owned(),
+            ToolbarItem::Action(ToolbarAction::Save) => "Save screenshot".to_owned(),
+            ToolbarItem::Action(ToolbarAction::Copy) => "Copy to clipboard".to_owned(),
+            ToolbarItem::Action(ToolbarAction::Settings) => "Settings".to_owned(),
+            ToolbarItem::Action(ToolbarAction::Cancel) => "Cancel".to_owned(),
+            ToolbarItem::Color(color) => PRESET_COLORS
+                .iter()
+                .position(|preset| *preset == color)
+                .and_then(|index| {
+                    [
+                        "Red", "Orange", "Yellow", "Green", "Blue", "Purple", "White", "Black",
+                    ]
+                    .get(index)
+                })
+                .copied()
+                .unwrap_or("Custom color")
+                .to_owned(),
+            ToolbarItem::Thickness(value) => format!("{value} px"),
+        }
+    }
+
+    let menu = MenuGuard(unsafe { CreatePopupMenu()? });
+    let mut mapping: Vec<ToolbarItem> = Vec::with_capacity(buttons.len());
+    let mut heading: Option<&'static str> = None;
+    for button in buttons {
+        let group = group(button.item);
+        if heading != Some(group) {
+            heading = Some(group);
+            let text = wide(group);
+            unsafe {
+                AppendMenuW(menu.0, MF_STRING | MF_GRAYED, 0, PCWSTR(text.as_ptr()))?;
+            }
+        }
+        let text = wide(&label(button.item));
+        let mut flags = MF_STRING;
+        if !button.is_enabled {
+            flags |= MF_GRAYED;
+        }
+        if button.is_checked {
+            flags |= MF_CHECKED;
+        }
+        unsafe {
+            AppendMenuW(menu.0, flags, mapping.len() + 1, PCWSTR(text.as_ptr()))?;
+        }
+        mapping.push(button.item);
+    }
+    let mut point = POINT::default();
+    if unsafe { GetCursorPos(&mut point) }.is_err() {
+        return Ok(None);
+    }
+    let command = unsafe {
+        TrackPopupMenuEx(
+            menu.0,
+            (TPM_RETURNCMD | TPM_RIGHTBUTTON).0,
+            point.x,
+            point.y,
+            owner,
+            None,
+        )
+    };
+    if command.0 <= 0 {
+        return Ok(None);
+    }
+    Ok(mapping.get(command.0 as usize - 1).copied())
 }
 
 #[cfg(test)]

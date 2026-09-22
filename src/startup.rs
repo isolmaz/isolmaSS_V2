@@ -53,6 +53,17 @@ impl StartupRegistration {
         Ok(Self(Some((kind, data))))
     }
 
+    /// True when the current Run-key bytes differ from what `enabled` would write,
+    /// so callers can skip rewriting an unchanged registration.
+    pub fn needs_update(&self, enabled: bool) -> Result<bool, String> {
+        let desired = startup_value(enabled)?;
+        Ok(match (&self.0, &desired) {
+            (None, None) => false,
+            (Some(current), Some(desired)) => current.0.0 != desired.0.0 || current.1 != desired.1,
+            _ => true,
+        })
+    }
+
     pub fn restore(self) -> Result<(), String> {
         let key = open_run_key()?;
         let status = match self.0 {
@@ -107,29 +118,43 @@ fn open_run_key() -> Result<RegistryKey, String> {
     }
 }
 
+/// The exact bytes [`set_start_with_windows`] would write for `enabled`.
+fn startup_value(
+    enabled: bool,
+) -> Result<Option<(windows::Win32::System::Registry::REG_VALUE_TYPE, Vec<u8>)>, String> {
+    if !enabled {
+        return Ok(None);
+    }
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("Could not locate isolmaSS.exe: {error}"))?;
+    let command = format!("\"{}\"", executable.display());
+    let wide: Vec<u16> = command.encode_utf16().chain(Some(0)).collect();
+    let bytes =
+        unsafe { std::slice::from_raw_parts(wide.as_ptr().cast::<u8>(), wide.len() * 2) }.to_vec();
+    Ok(Some((REG_SZ, bytes)))
+}
+
 pub fn set_start_with_windows(enabled: bool) -> Result<(), String> {
+    let value = startup_value(enabled)?;
     let key = open_run_key()?;
-    if enabled {
-        let executable = std::env::current_exe()
-            .map_err(|error| format!("Could not locate isolmaSS.exe: {error}"))?;
-        let command = format!("\"{}\"", executable.display());
-        let wide: Vec<u16> = command.encode_utf16().chain(Some(0)).collect();
-        let bytes =
-            unsafe { std::slice::from_raw_parts(wide.as_ptr().cast::<u8>(), wide.len() * 2) };
-        let status = unsafe { RegSetValueExW(key.0, VALUE_NAME, 0, REG_SZ, Some(bytes)) };
-        if status.is_err() {
-            return Err(format!(
-                "Could not enable startup (registry error {}).",
-                status.0
-            ));
+    match value {
+        Some((kind, bytes)) => {
+            let status = unsafe { RegSetValueExW(key.0, VALUE_NAME, 0, kind, Some(&bytes)) };
+            if status.is_err() {
+                return Err(format!(
+                    "Could not enable startup (registry error {}).",
+                    status.0
+                ));
+            }
         }
-    } else {
-        let status = unsafe { RegDeleteValueW(key.0, VALUE_NAME) };
-        if status.is_err() && status != ERROR_FILE_NOT_FOUND {
-            return Err(format!(
-                "Could not disable startup (registry error {}).",
-                status.0
-            ));
+        None => {
+            let status = unsafe { RegDeleteValueW(key.0, VALUE_NAME) };
+            if status.is_err() && status != ERROR_FILE_NOT_FOUND {
+                return Err(format!(
+                    "Could not disable startup (registry error {}).",
+                    status.0
+                ));
+            }
         }
     }
     Ok(())

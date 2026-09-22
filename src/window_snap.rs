@@ -65,10 +65,12 @@ pub fn get_visible_windows(exclude_hwnd: Option<HWND>) -> Vec<WindowInfo> {
         let ex_style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32;
         let is_tool_window = (ex_style & WS_EX_TOOLWINDOW.0) != 0;
 
-        // Only title presence is needed to filter tool windows; do not copy user document titles.
-        let has_title = unsafe { GetWindowTextLengthW(hwnd) } > 0;
+        // Only query titles for tool windows, and never copy user document titles.
+        if is_tool_window && unsafe { GetWindowTextLengthW(hwnd) } <= 0 {
+            return BOOL(1);
+        }
 
-        // 6. Get window class name
+        // 5. Get window class name
         let mut class_buf = [0u16; 256];
         let class_len = unsafe { GetClassNameW(hwnd, &mut class_buf) };
         let class_name = if class_len > 0 {
@@ -77,12 +79,7 @@ pub fn get_visible_windows(exclude_hwnd: Option<HWND>) -> Vec<WindowInfo> {
             String::new()
         };
 
-        // Skip tool windows that don't have titles
-        if is_tool_window && !has_title {
-            return BOOL(1);
-        }
-
-        // 7. Get true visible bounds via DWMWA_EXTENDED_FRAME_BOUNDS
+        // 6. Get true visible bounds via DWMWA_EXTENDED_FRAME_BOUNDS
         let mut frame_rect = RECT::default();
         let bounds_res = unsafe {
             DwmGetWindowAttribute(
@@ -120,11 +117,13 @@ pub fn get_visible_windows(exclude_hwnd: Option<HWND>) -> Vec<WindowInfo> {
         BOOL(1)
     }
 
-    unsafe {
-        let _ = EnumWindows(
+    if let Err(error) = unsafe {
+        EnumWindows(
             Some(enum_proc),
             LPARAM(&mut context as *mut EnumContext as isize),
-        );
+        )
+    } {
+        crate::diagnostics::record("window enumeration", &error.to_string());
     }
 
     context.windows

@@ -4,7 +4,7 @@
 
 The application, manifest, Windows version resource and installer use the version from `Cargo.toml` (currently 0.3.0). Keep its `Cargo.lock` package entry synchronized. Rust 1.98.0 is pinned in `rust-toolchain.toml`; use the x64 MSVC target and the Windows SDK resource compiler. `RC` may point to a specific `rc.exe`.
 
-`package.bat` builds with `--locked`, passes the Cargo version to NSIS, checks embedded versions, enforces an executable limit of 2.5 MiB and installer limit of 3 MiB, and writes `isolmass-setup.exe.sha256` after signing. Output lives in `target/release`. NSIS 3.10 is required. No credential or private signing material belongs in the repository.
+`package.bat` builds with `--locked`, passes the Cargo version to NSIS, and resolves `makensis` from the `MAKENSIS` environment variable, then `PATH`, then the highest-versioned `%LOCALAPPDATA%\Programs\nsis-*` directory. It verifies on both the executable and the installer that the parsed `ProductVersion` and `FileVersion` agree with the Cargo version on their three numeric components, enforces an executable limit of 2.5 MiB and installer limit of 3 MiB, and writes `isolmass-setup.exe.sha256` after signing. Output lives in `target/release`. NSIS (makensis) is required; `installer.nsi` writes the three-part version as the string `FileVersion`/`ProductVersion` and appends `.0` for `VIProductVersion`, which requires exactly four numeric parts. No credential or private signing material belongs in the repository.
 
 The release profile uses `opt-level = 3`, LTO, one codegen unit and stripped symbols. Its measured p95 was lower than size optimization on the development machine; the complete comparison and limitations are in [ROADMAP.md](ROADMAP.md).
 
@@ -14,7 +14,7 @@ For a production build, configure `SIGNTOOL_CERT_SHA1` to select an existing tru
 
 The updater accepts the verified public-key digest of its own signed executable, or rotation digests compiled into a previously trusted release via `ISOLMASS_UPDATE_PUBLIC_KEYS`. The latter is a semicolon-separated list of at most eight SHA-256 digests of the DER-encoded public-key information (not certificate thumbprints). Public-key digests are public; the private signing key must remain in the signing environment. Introduce a new key's digest in a release signed by the old trusted key before switching signers. GitHub metadata cannot add a trusted key.
 
-Release assets must contain `isolmass-setup.exe`, a valid GitHub-provided SHA-256 digest, a strict three-part semantic tag (optional `v` prefix), and matching embedded file version. The release page must belong to `isolmaz/isolmaSS_V2`. Publish the checksum file alongside the installer for users performing manual downloads. Publishing, pushing, and creating a release were not performed by this change.
+Release assets must contain `isolmass-setup.exe`, a valid GitHub-provided SHA-256 digest, a strict three-part semantic tag (optional `v` prefix), and matching embedded file version. The release page must belong to `isolmaz/isolmaSS_V2`. Publish the checksum file alongside the installer for users performing manual downloads. Publishing and creating a release were not performed by this change.
 
 ## Installer behavior
 

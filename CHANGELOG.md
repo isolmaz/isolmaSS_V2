@@ -24,6 +24,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Update publisher identity, transport/worker bounds, cancellation, version checks, unique downloads and verification immediately before execution.
 - NSIS UPDATE detection, old-process waiting, executable staging/rollback and uninstall refusal when the application cannot be removed.
 - Fresh smoke installer compilation with the source version. Packaging now validates final artifact sizes/versions and refuses failed checksum generation instead of printing false success.
+- Fail-closed settings load: transient read errors propagate instead of silently substituting defaults; invalid JSON is copied to `settings.corrupt.json` under the cross-process write lock before any reset, and a failed backup aborts recovery; the save folder must be an absolute, NUL-free path, and an unreachable save folder such as an unavailable network share is skipped instead of failing the save.
+- Clipboard text reads report a failed size query as an error, stay bounded to 32 KiB, and record truncation only when text was actually cut.
+- Settings-write lock failures capture the Win32 error on `WAIT_FAILED` and return a distinct timeout error otherwise; diagnostic-log rotation falls back to appending when the rename fails instead of dropping the record.
+- The build script discovers `rc.exe` by numeric SDK version under the `WindowsSdkDir` and ProgramFiles roots with a descriptive launch error, honoring the `RC` override and `rc.exe` on `PATH`.
+- Packaging resolves `makensis` from the `MAKENSIS` environment variable, then `PATH`, then the highest versioned `%LOCALAPPDATA%\Programs\nsis-*` directory, and gates both artifacts on the three numeric components of `ProductVersion` and `FileVersion`; the installer's string `FileVersion` now matches the three-part Cargo version while `VIProductVersion` keeps its required four-part padding.
+- CI runs on pushes to `main` (and pull requests), runs tests with `--test-threads=1` while skipping `test_tray_manager_lifecycle`, provisions NSIS, and packages non-interactively under executable/installer size gates and an installer SHA-256 cross-check.
+- Escape during a selection drag cancels the drag instead of closing the editor; a cancelled tiny or click selection is no longer returned as a committed result; arrow nudges that move nothing record no undo entry.
+- Toolbar tooltips are measured with the same 12-pixel font used to draw them; the Settings heading control's font is restored on DPI change; modal dialogs route Escape to `WM_CLOSE`; the confirmation dialog falls back to a native message box when the task dialog cannot be shown.
+- `CaptureTimings` reports only the setup, bitblt, dim and total stages; the copy-stage timing was removed.
+- The tray/daemon control-command queue deduplicates commands, has a hard capacity bound with any drop recorded in diagnostics, and delivers commands issued during nested dialogs after those dialogs return.
+- A failed hotkey change no longer stops the daemon: it restarts the previous shortcut, or keeps running without one and says so, while attempting to restore the saved preference; listener registration, fallback, hook and wait failures are recorded through diagnostics; hook state is published before the keyboard hook is installed and cleared if installation fails.
+- Update cancellation now runs under the lock that publishes worker results, so a concurrent cancel discards or clears pending results instead of letting them surface later; failed automatic download attempts report through diagnostics and a tray notification instead of a modal error.
 
 ### Performance
 
@@ -41,6 +53,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Local unsigned executable: **888,832 bytes**; SHA-256: `0c05a0a46725deb59322a41a3d5807c09eb48b3dde72d2489c9fe1ba9149a66e`.
 - Local unsigned installer: **417,203 bytes**; SHA-256: `01e67dd9598fee6b33b4916d8452e22177769cc66c2ac72cfb88d9bd54c77490`. Both embed version 0.3.0 and pass their 2.5 / 3 MiB size limits.
 - Detailed audit disposition and remaining quality gates are in ROADMAP.md.
+
+### Verification — 2026-09-22
+
+- `cargo fmt --check`, `cargo check --all-targets --locked`, `cargo clippy --all-targets -- -D warnings` and `cargo build --release --locked` all passed on the final tree. Unit tests and the full smoke command were explicitly skipped this round; the 2026-09-05 entry above remains the last recorded test, smoke and packaging run.
+- Three corrected behaviors were re-exercised against the new release binary on a 3840x1080 dual-monitor desktop: a cancelled tiny/click selection prints `Overlay dismissed` instead of committing a 2x2 region; Escape during an active selection drag keeps the editor open and only cancels the drag (a later Escape then dismisses normally); an exclusively locked `settings.json` now fails with exit code 1 and an actionable `os error 32` read error while the file bytes stay unchanged (previously the same lock silently loaded defaults with exit 0).
+- The dependency advisory comparison was refreshed against RustSec snapshot `57ad4063bb49c1deb04b6fcee30cfbac6b508474` (fetched 2026-09-21, 1,238 crate records) using parsed TOML metadata and direct range comparison, without cargo-audit/cargo-deny. Only RUSTSEC-2022-0008 matched and no affected locked package was found; scope limitations are in SECURITY.md.
+- Remote CI has not been observed. Signed installation/rollback, the alternate-DPI visual pass, remote CI observation and the latency re-measure remain open release gates in ROADMAP.md.
 
 ## 0.2.0 working-tree history — 2026-09-04
 

@@ -419,6 +419,9 @@ pub fn save_screenshot(
     }
 
     let output_path = unique_output_path(&directory, format);
+    // This temp carries our pid + nanos and is removed on every handled failure below;
+    // only a hard process kill can orphan it. Deliberately no age-based sweeper: it could
+    // delete another process's in-flight temp or a user's own dotfile in a shared folder.
     let temp_path = directory.join(format!(
         ".isolmass-{}-{}.tmp",
         std::process::id(),
@@ -492,7 +495,20 @@ pub fn recent_screenshots(directory: &Path, limit: usize) -> std::io::Result<Vec
         if recent::cancelled() || started.elapsed() > std::time::Duration::from_secs(2) {
             break;
         }
-        let entry = entry?;
+        // Only a directory-level failure aborts the scan; individual entries that were
+        // removed or became unreadable since listing are skipped so one bad file cannot
+        // discard every successful result.
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                crate::diagnostics::record(
+                    "recent captures",
+                    &format!("Skipping unreadable directory entry: {error}"),
+                );
+                continue;
+            }
+        };
         let path = entry.path();
         if !path
             .extension()
@@ -506,12 +522,34 @@ pub fn recent_screenshots(directory: &Path, limit: usize) -> std::io::Result<Vec
         let metadata = match entry.metadata() {
             Ok(value) => value,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(error),
+            Err(error) => {
+                crate::diagnostics::record(
+                    "recent captures",
+                    &format!(
+                        "Skipping unreadable screenshot '{}': {error}",
+                        path.display()
+                    ),
+                );
+                continue;
+            }
         };
         if !metadata.is_file() {
             continue;
         }
-        newest.push(std::cmp::Reverse((metadata.modified()?, path)));
+        let modified = match metadata.modified() {
+            Ok(value) => value,
+            Err(error) => {
+                crate::diagnostics::record(
+                    "recent captures",
+                    &format!(
+                        "Skipping screenshot without timestamp '{}': {error}",
+                        path.display()
+                    ),
+                );
+                continue;
+            }
+        };
+        newest.push(std::cmp::Reverse((modified, path)));
         if newest.len() > limit.min(100) {
             newest.pop();
         }

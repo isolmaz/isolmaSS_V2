@@ -33,6 +33,7 @@ The editor toolbar uses the selected monitor's work area and DPI. On short or na
 | Ctrl+arrows | Resize the screenshot region when no annotation is selected |
 | Shift while drawing | Square rectangles/redaction regions; 45-degree arrow angles |
 | Esc or right-click | Cancel text editing, deselect an object, clear the region, then close the editor |
+| Esc during a selection drag | Cancel the selection drag; the editor stays open |
 | Esc during countdown | Cancel the pending capture |
 
 While editing text, **Enter commits text**; **Ctrl+C and Ctrl+S commit it before exporting**. Ctrl+A, Shift+Left/Right/Home/End, Backspace/Delete, Ctrl+V, and local text Undo/Redo are supported. Text uses the normal Windows character-input path, preserves UTF-16 surrogate pairs and literal ampersands, and uses the same measured font for preview and output. Text is single-line, capped at 16 KiB; pasted line breaks become spaces. Cursor movement is by Unicode scalar value, not grapheme cluster. Complex IME and keyboard-layout scenarios still need interactive verification.
@@ -47,18 +48,18 @@ Settings controls include the capture shortcut and delay, PNG/JPEG and JPEG qual
 
 `--settings` routes to the running daemon. If none exists, it starts the daemon and opens Settings. A request received during editing waits for the current session to finish. Saved hotkey and update changes are applied to the daemon; editor tool/color/stroke changes are merged into the latest configuration once at the end of a session.
 
-The tray command menu offers Capture now, Settings, Open screenshot folder, Check for updates, five recent captures, and Quit. Recent files are cached; directory refresh runs in the background at most every 30 seconds. A refresh scans for at most two seconds between filesystem calls, so the list is best-effort in large or slow folders. Successful saves update it immediately. Quit and update installation wait for an active editing/settings session to finish.
+The tray command menu offers Capture now, Settings, Open screenshot folder, Check for updates, five recent captures, and Quit. Recent files are cached; directory refresh runs in the background at most every 30 seconds. A refresh scans for at most two seconds between filesystem calls, so the list is best-effort in large or slow folders. Successful saves update it immediately. Quit and update installation wait for an active editing/settings session to finish. Control commands are deduplicated in a queue bounded at 16 entries, so a command issued during a nested dialog is delivered right after that dialog returns; if the queue fills, the dropped command is recorded in diagnostics.
 
 ## Files, configuration and privacy
 
 - Default output: the actual Windows **Pictures** known folder, then `Screenshots` (including redirected Pictures folders).
 - Settings: `%APPDATA%\isolmaSS\settings.json`.
-- Diagnostics: `%LOCALAPPDATA%\isolmaSS\logs\diagnostic.log`, bounded to about 1 MiB plus one rotated file. Logs contain stages and errors, not screenshots, typed annotation text, or keystroke logs. Error messages can contain local file paths.
+- Diagnostics: `%LOCALAPPDATA%\isolmaSS\logs\diagnostic.log`, rotated at about 1 MiB into a single previous file; if rotation fails, new records are appended instead of dropped. Logs contain stages and errors, not screenshots, typed annotation text, or keystroke logs. Error messages can contain local file paths.
 - Update downloads: `%LOCALAPPDATA%\isolmaSS\updates`.
 
-Settings JSON is limited to 64 KiB and validated on load/save. Supported limits include stroke width 1–64 pixels, delay 0–5000 ms, and JPEG quality 1–100. Invalid settings produce a recovery warning and a backup when readable. Writes use same-directory temporary files and atomic replacement. Configuration merge/write operations are serialized across app processes.
+Settings JSON is limited to 64 KiB and validated on load/save. Supported limits include stroke width 1–64 pixels, delay 0–5000 ms, and JPEG quality 1–100, and the save folder must be an absolute path without NUL characters. Loading fails closed: a missing file yields defaults, invalid JSON is first copied to `settings.corrupt.json` and only then reset — if that backup fails, recovery aborts and the error is reported — and transient read errors such as sharing violations propagate instead of silently substituting defaults. Saving skips an unreachable save folder, such as an unavailable network share, rather than failing the write. Writes use same-directory temporary files and atomic replacement. Configuration merge/write operations are serialized across app processes.
 
-PNG/JPEG output is explicitly opaque. Normal Save reserves a unique timestamped filename; Save as replaces an existing file only after successful encoding and flushing. Copy transfers a bottom-up 32-bit `CF_DIB` to Windows; ownership transfers only after success.
+PNG/JPEG output is explicitly opaque. Normal Save reserves a unique timestamped filename; Save as replaces an existing file only after successful encoding and flushing. Copy transfers a bottom-up 32-bit `CF_DIB` to Windows; ownership transfers only after success. Reading pasted text is bounded to 32 KiB: a failed size query is an error, and truncation is recorded only when text was actually cut.
 
 ## Build and verify
 
@@ -75,7 +76,7 @@ cargo build --release --locked
 
 The smoke command requires an interactive Windows desktop, a release build, and NSIS 3.10 on PATH or in `%LOCALAPPDATA%\Programs\nsis-3.10`. It exercises clipboard ownership/failure, capture geometry, PNG decoding and opaque pixels, history, text, configuration and fresh installer/version checks. **It changes the clipboard** and briefly registers hooks/tray resources; use a disposable desktop or preserve your clipboard before running it. It does not install or uninstall the application. Tests do not silently stand in for complete manual UX validation.
 
-The Windows CI workflow runs formatting, check, lint, tests (excluding the interactive tray lifecycle test), release build and the executable-size gate. Its remote execution has not been observed in this local change.
+The Windows CI workflow runs on pull requests and on pushes to `main`. It runs formatting, locked check, lint, tests with `--test-threads=1` while skipping the interactive `test_tray_manager_lifecycle` test, the release build with its executable-size gate, NSIS provisioning, and a non-interactive `package.bat` run that re-checks both size budgets and the recorded installer SHA-256. Its remote execution has not been observed.
 
 ```powershell
 # Actual capture/window/presentation path, 50 samples, JSON lines; no images saved.

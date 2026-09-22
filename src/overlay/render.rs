@@ -144,6 +144,10 @@ impl OverlayState {
     }
 
     pub(super) fn composite_scene_with(&mut self, policy: CompositionPolicy) {
+        assert!(
+            !self.bits_ptr.is_null(),
+            "Overlay pixel buffer is not initialized"
+        );
         // Synchronize the DIB's GDI target before replacing its pixels on the CPU.
         unsafe {
             let _ = GdiFlush();

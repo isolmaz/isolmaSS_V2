@@ -236,11 +236,13 @@ pub(super) fn show(
         info.rcWork.top + 8,
         (info.rcWork.bottom - height - 8).max(info.rcWork.top + 8),
     );
+    let capture_label = if hotkey.is_empty() {
+        "Capture now".to_string()
+    } else {
+        format!("Capture now   ·   {hotkey}")
+    };
     let mut rows = vec![
-        (
-            format!("Capture now   ·   {hotkey}"),
-            TrayCommand::Capture(Instant::now()),
-        ),
+        (capture_label, TrayCommand::Capture(Instant::now())),
         ("Settings".into(), TrayCommand::Settings),
         ("Open screenshot folder".into(), TrayCommand::OpenFolder),
         ("Check for updates".into(), TrayCommand::CheckUpdates),
@@ -289,9 +291,6 @@ pub(super) fn show(
     for (index, (label, _)) in state.rows.iter().enumerate() {
         if index == 4 {
             y = state.recent_top;
-            if state.rows.len() == 5 {
-                y += s(38);
-            }
         }
         if index == state.rows.len() - 1 {
             y = height - s(78);
@@ -316,7 +315,6 @@ pub(super) fn show(
         y += s(if index < 4 { 44 } else { 38 });
     }
     unsafe {
-        let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
         if let Ok(first) = GetDlgItem(hwnd, 100) {

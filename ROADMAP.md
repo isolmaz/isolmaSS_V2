@@ -1,6 +1,34 @@
 # isolmaSS implementation and verification status
 
-Updated **2026-09-05** for the **0.3.0 working tree**. This is an unreleased development build. [README.md](README.md) describes current behavior; [CHANGELOG.md](CHANGELOG.md) preserves the earlier history. A completed implementation row does not imply that all its interactive or release acceptance checks have passed.
+Updated **2026-09-22** for the **0.3.0 working tree**. This is an unreleased development build. [README.md](README.md) describes current behavior; [CHANGELOG.md](CHANGELOG.md) preserves the earlier history. A completed implementation row does not imply that all its interactive or release acceptance checks have passed.
+
+## Hardening pass — 2026-09-22
+
+A source-verified hardening round was applied before commit. `cargo fmt --check`, `cargo check --all-targets --locked`, `cargo clippy --all-targets -- -D warnings` and `cargo build --release --locked` passed on the final tree. Unit tests and the full smoke command were explicitly skipped this round (the user directed test work off), packaging was not re-run, and remote CI remains unobserved. Three corrected behaviors were re-exercised on the release binary: cancelled tiny selections dismiss instead of committing, Escape during a selection drag cancels the drag while keeping the editor open, and an exclusively locked settings file now fails loudly (exit 1, os error 32) without modifying the file instead of silently loading defaults.
+
+Verified fixes, each confirmed in the working-tree source:
+
+- **Settings:** `Settings::load_with_warning()` fails closed — transient read errors propagate, only a missing file yields defaults, invalid JSON is copied to `settings.corrupt.json` before any reset and a failed backup aborts recovery; `save_directory` must be absolute and NUL-free; an unavailable network folder is skipped on save instead of failing it.
+- **Clipboard:** text reads error on a failed size query, are bounded to 32 KiB, and record truncation only when text is actually cut.
+- **Locks and logs:** `SettingsLock` distinguishes `WAIT_FAILED` (with the captured Win32 error) from a lock timeout; diagnostic rotation falls back to appending when the rename fails so no record is dropped.
+- **Build:** `build.rs` discovers `rc.exe` by numeric SDK version under the `WindowsSdkDir` and ProgramFiles roots, honors the `RC` override and `rc.exe` on `PATH`, and reports a descriptive launch error listing what was searched.
+- **Packaging:** `package.bat` resolves makensis as `MAKENSIS` environment variable, then `PATH`, then the highest versioned `%LOCALAPPDATA%\Programs\nsis-*` directory; both artifacts are gated on the three numeric components of `ProductVersion` and `FileVersion`; `installer.nsi` writes the three-part `${PRODUCT_VERSION}` as the string `FileVersion` while `VIProductVersion` keeps its required four-part padding.
+- **CI:** push limited to `main` (plus pull requests), tests run with `--test-threads=1 --skip test_tray_manager_lifecycle`, NSIS is provisioned, and a non-interactive `package.bat` step enforces size and SHA-256 gates. None of this has been observed remotely.
+- **Advisories:** the comparison was refreshed against RustSec snapshot `57ad4063bb49c1deb04b6fcee30cfbac6b508474` (fetched 2026-09-21, 1,238 crate records) using parsed-TOML metadata and range comparison without cargo-audit; only RUSTSEC-2022-0008 (windows, patched in 0.58.0) matched and no affected locked package was found. Scope limits remain as stated in SECURITY.md.
+- **Overlay:** Escape during a selection drag cancels the drag instead of closing the editor; a cancelled tiny or click selection is no longer returned as a committed result; arrow nudges that move nothing record no undo entry; toolbar tooltip text is measured with the same 12-pixel font that draws it; the Settings heading control's font is restored on DPI change; modal dialogs route Escape to `WM_CLOSE`; `ui::confirm` falls back to `MessageBoxW` when the task dialog is unavailable.
+- **Tray and hotkey:** the control-command queue deduplicates with a hard capacity bound (a drop is recorded in diagnostics) and delivers commands issued during nested dialogs after those dialogs return; a hotkey change that fails — including a failed rollback of the saved preference — leaves the daemon running without a shortcut and notifies instead of exiting; listener registration, fallback, hook and wait failures are logged through diagnostics; hook state is published before the keyboard hook is installed and cleared if installation fails.
+- **Updater:** cancellation is set under the lock that publishes worker results, so a concurrent cancel discards or clears pending results instead of letting them surface later; failed automatic download attempts report through diagnostics and a tray notification rather than a modal error.
+
+Rejected claims from this round:
+
+| Claim | Disposition |
+|---|---|
+| Moving a selection moves all its annotations — reported as a bug | Rejected: intentional. A committed selection contains its annotations, so arrow-nudge and drag moves translate them together, recorded as one history entry. |
+| NSIS `Delete` of an absent file can abort uninstall by setting the error flag | Rejected: per the official NSIS reference, `Delete` does not set the error flag when the file does not exist. |
+| `find_window_at_point` is dead code and should be removed | Rejected: it is kept for the smoke command's window-snap hit check. |
+| Settings Escape was already handled through `IsDialogMessage` | Rejected: the dialog loop converts Escape to `WM_CLOSE` before dispatch; `IsDialogMessageW` handles navigation and focus only. |
+
+The remaining release gates below (signed install/rollback, alternate-DPI visual pass, remote CI observation and latency re-measure) are unchanged and still open.
 
 ## Interface and product changes
 
@@ -84,7 +112,7 @@ Raw JSON and temporary comparison binaries are local ignored artifacts under `ta
 - The existing full smoke command passed with desktop access. It covers its listed behavior checks, capture/dimming, clipboard failure/success, PNG decoded pixels, failed output replacement, text/history/configuration, GUI PE subsystem, tray resources and a fresh NSIS installer build/version check. It does not establish complete GUI usability or the open runtime budgets.
 - `package.bat` passed after correcting a checksum error-propagation defect exposed by this environment. The checksum was independently compared with Python hashlib. Local executable and installer remain **unsigned**.
 - The wrong-publisher negative check described above passed; no signing certificate was available for the successful publisher path.
-- All 27 locked registry package/version entries were compared against all 1,219 crate records in the official RustSec database snapshot `5a0ebedfe8bdd2e295b171f4162f8c977bcad9a5`. The only matching advisory, RUSTSEC-2022-0008 for windows, is patched in the locked version 0.58.0. No affected locked package was found. The check used parsed TOML metadata and a direct range comparison, not cargo-audit/cargo-deny; scope and source links are in SECURITY.md.
+- All 27 locked registry package/version entries were compared against all 1,219 crate records in the official RustSec database snapshot `5a0ebedfe8bdd2e295b171f4162f8c977bcad9a5` on 2026-09-05. The only matching advisory, RUSTSEC-2022-0008 for windows, is patched in the locked version 0.58.0. No affected locked package was found. The check used parsed TOML metadata and a direct range comparison, not cargo-audit/cargo-deny; this comparison was refreshed on 2026-09-21 — see the hardening section above. Scope and source links are in SECURITY.md.
 - The Windows CI workflow was added, but remote CI was not run. No installation, uninstall, push or release publication was performed.
 
 The final local artifact sizes/checksums are recorded in the 0.3.0 changelog verification entry. They describe the local unsigned artifacts; signing changes the file hashes and may change sizes.
@@ -97,6 +125,6 @@ Before calling 0.3.0 release-verified:
 2. Exercise graceful/nested shutdown, rapid capture/countdown requests, multi-instance preference updates, startup rollback and both update cancellation preferences on a disposable Windows desktop.
 3. Exercise installation/update/uninstall with the real publisher certificate, valueless UPDATE, a slow/locked old process, failed replacement, executable rollback and successful restart on a disposable Windows VM.
 4. Re-measure physical-event-to-visible latency with complete display metadata, decide on the next capture-path change for the still-open 30 ms target, and repeat current idle/long-session memory and rendering/GDI/menu budgets.
-5. Observe remote CI and repeat the dependency advisory comparison against the latest database before publishing.
+5. Observe remote CI before publishing; the dependency advisory comparison was refreshed on 2026-09-21 and must be repeated against the then-latest database at release time.
 
 OCR, pin-to-screen, cloud upload/custom domains/QR/delete tokens, HDR/DXGI capture, magnetic guides, counters, shutter sound, auto-save-on-copy and high-DPI output downscaling remain future candidates. They were not represented as completed features in this change. The current work keeps the native Win32/GDI architecture and does not add new dependencies to implement those larger features.

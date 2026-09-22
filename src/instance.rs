@@ -60,16 +60,25 @@ impl SettingsLock {
         if result == windows::Win32::Foundation::WAIT_OBJECT_0
             || result == windows::Win32::Foundation::WAIT_ABANDONED
         {
-            Ok(Self(handle))
-        } else {
+            return Ok(Self(handle));
+        }
+        if result == windows::Win32::Foundation::WAIT_FAILED {
+            // Capture the Win32 error before the handle is closed.
+            let failure = windows::core::Error::from_win32();
             unsafe {
                 let _ = CloseHandle(handle);
             }
-            Err(std::io::Error::new(
-                std::io::ErrorKind::TimedOut,
-                "Another process is updating isolmaSS settings; retry saving.",
-            ))
+            return Err(std::io::Error::other(format!(
+                "could not lock isolmaSS settings for writing: {failure}"
+            )));
         }
+        unsafe {
+            let _ = CloseHandle(handle);
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "Another process is updating isolmaSS settings; retry saving.",
+        ))
     }
 }
 impl Drop for SettingsLock {

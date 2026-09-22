@@ -721,6 +721,36 @@ fn check_radio(hwnd: HWND, first: i32, last: i32, selected: i32) {
     }
 }
 
+/// Checks `selected` when it is one of the group's presets; otherwise clears the whole
+/// group so a custom value never displays as a preset the user did not pick.
+fn set_radio_group(hwnd: HWND, first: i32, last: i32, selected: Option<i32>) {
+    match selected {
+        Some(id) => check_radio(hwnd, first, last, id),
+        None => {
+            for id in first..=last {
+                set_check(hwnd, id, false);
+            }
+        }
+    }
+}
+
+/// Shows a custom (non-preset) value beside its existing section label.
+fn set_label_note(hwnd: HWND, id: i32, base: &str, note: Option<String>) {
+    let text = match note {
+        Some(note) => format!("{base} ({note})"),
+        None => base.to_owned(),
+    };
+    let text = wide_string(&text);
+    if let Ok(child) = unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgItem(hwnd, id) } {
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowTextW(
+                child,
+                PCWSTR(text.as_ptr()),
+            );
+        }
+    }
+}
+
 fn set_jpeg_quality_enabled(hwnd: HWND, enabled: bool) {
     for id in std::iter::once(707).chain(ID_QUALITY_FIRST..=ID_QUALITY_FIRST + 2) {
         if let Ok(control) =
@@ -734,49 +764,63 @@ fn set_jpeg_quality_enabled(hwnd: HWND, enabled: bool) {
 }
 
 fn initialize_control_values(hwnd: HWND, settings: &Settings) {
+    // Custom (non-preset) values keep their originals in state and show no checked
+    // preset; the section label carries the actual value instead.
     let hotkey_id = if settings
         .hotkey
         .description
         .eq_ignore_ascii_case("Ctrl+Shift+S")
     {
-        ID_HOTKEY_CTRL_SHIFT_S
+        Some(ID_HOTKEY_CTRL_SHIFT_S)
     } else if settings
         .hotkey
         .description
         .eq_ignore_ascii_case("Alt+PrintScreen")
     {
-        ID_HOTKEY_ALT_PRINT
+        Some(ID_HOTKEY_ALT_PRINT)
+    } else if settings
+        .hotkey
+        .description
+        .eq_ignore_ascii_case("PrintScreen")
+    {
+        Some(ID_HOTKEY_PRINT)
     } else {
-        ID_HOTKEY_PRINT
+        None
     };
-    check_radio(hwnd, ID_HOTKEY_PRINT, ID_HOTKEY_ALT_PRINT, hotkey_id);
-    let color_index = PRESET_COLORS
+    set_radio_group(hwnd, ID_HOTKEY_PRINT, ID_HOTKEY_ALT_PRINT, hotkey_id);
+    let color_id = PRESET_COLORS
         .iter()
         .position(|color| *color == settings.default_color)
-        .unwrap_or(0) as i32;
-    check_radio(
+        .map(|index| ID_COLOR_FIRST + index as i32);
+    set_radio_group(
         hwnd,
         ID_COLOR_FIRST,
         ID_COLOR_FIRST + PRESET_COLORS.len() as i32 - 1,
-        ID_COLOR_FIRST + color_index,
+        color_id,
     );
-    let thickness_index = PRESET_THICKNESSES
+    let thickness_id = PRESET_THICKNESSES
         .iter()
         .position(|value| *value == settings.default_thickness)
-        .unwrap_or(1) as i32;
-    check_radio(
+        .map(|index| ID_THICKNESS_FIRST + index as i32);
+    set_radio_group(
         hwnd,
         ID_THICKNESS_FIRST,
         ID_THICKNESS_FIRST + PRESET_THICKNESSES.len() as i32 - 1,
-        ID_THICKNESS_FIRST + thickness_index,
+        thickness_id,
     );
-    let delay_id = match settings.capture_delay_ms {
-        1000 => ID_DELAY_FIRST + 1,
-        3000 => ID_DELAY_FIRST + 2,
-        5000 => ID_DELAY_FIRST + 3,
-        _ => ID_DELAY_FIRST,
-    };
-    check_radio(hwnd, ID_DELAY_FIRST, ID_DELAY_FIRST + 3, delay_id);
+    let delay_id = [0, 1000, 3000, 5000]
+        .iter()
+        .position(|&value| value == settings.capture_delay_ms)
+        .map(|index| ID_DELAY_FIRST + index as i32);
+    set_radio_group(hwnd, ID_DELAY_FIRST, ID_DELAY_FIRST + 3, delay_id);
+    set_label_note(
+        hwnd,
+        705,
+        "Capture delay",
+        delay_id
+            .is_none()
+            .then(|| format!("{} ms", settings.capture_delay_ms)),
+    );
     check_radio(
         hwnd,
         ID_FORMAT_PNG,
@@ -787,12 +831,19 @@ fn initialize_control_values(hwnd: HWND, settings: &Settings) {
             ID_FORMAT_JPEG
         },
     );
-    let quality_id = match settings.jpeg_quality {
-        1..=85 => ID_QUALITY_FIRST,
-        86..=95 => ID_QUALITY_FIRST + 1,
-        _ => ID_QUALITY_FIRST + 2,
-    };
-    check_radio(hwnd, ID_QUALITY_FIRST, ID_QUALITY_FIRST + 2, quality_id);
+    let quality_id = [80u8, 90, 100]
+        .iter()
+        .position(|&value| value == settings.jpeg_quality)
+        .map(|index| ID_QUALITY_FIRST + index as i32);
+    set_radio_group(hwnd, ID_QUALITY_FIRST, ID_QUALITY_FIRST + 2, quality_id);
+    set_label_note(
+        hwnd,
+        707,
+        "JPEG quality",
+        quality_id
+            .is_none()
+            .then(|| format!("{}%", settings.jpeg_quality)),
+    );
     set_jpeg_quality_enabled(hwnd, settings.save_format == SaveFormat::Jpeg);
     set_check(hwnd, ID_WINDOW_SNAP, settings.enable_window_snap);
     set_check(hwnd, ID_CLOSE_AFTER_ACTION, settings.close_after_action);
@@ -1254,6 +1305,14 @@ unsafe extern "system" fn settings_wnd_proc(
                 return LRESULT(0);
             }
             let id = (wparam.0 & 0xffff) as i32;
+            if id == 2 {
+                // IDCANCEL as translated from Escape by IsDialogMessage in ui::window_loop;
+                // with a child control focused the WM_KEYDOWN path never sees the key.
+                unsafe {
+                    let _ = DestroyWindow(hwnd);
+                }
+                return LRESULT(0);
+            }
             if id == ID_BROWSE {
                 match choose_folder(hwnd) {
                     Ok(Some(path)) => unsafe {
@@ -1317,6 +1376,7 @@ unsafe extern "system" fn settings_wnd_proc(
                 let old_heading_font = std::mem::replace(&mut state.heading_font, new_heading_font);
                 set_controls_font(hwnd, new_font);
                 set_control_font(hwnd, 700, new_title_font);
+                set_control_font(hwnd, 716, new_title_font);
                 for id in 710..=715 {
                     set_control_font(hwnd, id, new_heading_font);
                 }
@@ -1585,13 +1645,22 @@ pub fn show_settings_dialog(current: &Settings, owner: Option<HWND>) -> Result<O
 fn save_settings(settings: &Settings) -> std::result::Result<(), String> {
     settings.validate().map_err(|error| error.to_string())?;
     let previous = crate::startup::StartupRegistration::read()?;
-    crate::startup::set_start_with_windows(settings.start_with_windows)?;
+    // Compare the exact current registry bytes first: an unchanged toggle skips the
+    // registry write (and its rollback) entirely; only a real change writes before JSON.
+    let startup_changed = previous.needs_update(settings.start_with_windows)?;
+    if startup_changed {
+        crate::startup::set_start_with_windows(settings.start_with_windows)?;
+    }
     if let Err(error) = settings.save() {
-        let rollback = previous
-            .restore()
-            .err()
-            .map(|error| format!(" Startup restoration also failed: {error}"))
-            .unwrap_or_default();
+        let rollback = if startup_changed {
+            previous
+                .restore()
+                .err()
+                .map(|error| format!(" Startup restoration also failed: {error}"))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
         return Err(format!("{error}{rollback}"));
     }
     Ok(())

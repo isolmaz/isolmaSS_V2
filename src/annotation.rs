@@ -35,8 +35,14 @@ struct PenGuard {
 impl Drop for PenGuard {
     fn drop(&mut self) {
         unsafe {
-            SelectObject(self.hdc, self.old);
-            let _ = DeleteObject(HGDIOBJ(self.pen.0));
+            // Invalid `old` means SelectObject failed and the DC is unchanged:
+            // never restore the sentinel, never delete an invalid handle.
+            if !self.old.is_invalid() {
+                SelectObject(self.hdc, self.old);
+            }
+            if !self.pen.is_invalid() {
+                let _ = DeleteObject(HGDIOBJ(self.pen.0));
+            }
         }
     }
 }
@@ -50,8 +56,12 @@ struct BrushGuard {
 impl Drop for BrushGuard {
     fn drop(&mut self) {
         unsafe {
-            SelectObject(self.hdc, self.old);
-            if let Some(b) = self.brush {
+            if !self.old.is_invalid() {
+                SelectObject(self.hdc, self.old);
+            }
+            if let Some(b) = self.brush
+                && !b.is_invalid()
+            {
                 let _ = DeleteObject(HGDIOBJ(b.0));
             }
         }
@@ -307,7 +317,9 @@ impl AnnotationObject {
                 2,
             );
         }
-        let b = self.geometry_bounds();
+        // Same rect as render_selection_indicator so handles sit on the visible
+        // dashed box; hit-testing follows these points automatically.
+        let b = self.geometry_bounds().inflate(4, 4);
         (
             [
                 (AnnotationResizeHandle::TopLeft, (b.left, b.top)),
@@ -484,11 +496,27 @@ impl AnnotationObject {
                     .min(available_height.saturating_sub(4))
                     .max(1);
                 let mut new_font = requested_font.clamp(8.min(max_font), max_font);
-                let (mut width, mut height) = crate::drawing::measure_text(text, new_font);
-                while new_font > 1 && (width > available_width || height > available_height) {
-                    new_font -= 1;
-                    (width, height) = crate::drawing::measure_text(text, new_font);
+                // Extent grows with font size: binary-search the largest fitting
+                // size (O(log n) measures) instead of a per-pixel decrement loop
+                // re-measuring on every mouse move.
+                let (mut width, mut height) = crate::drawing::measure_text(text, 1);
+                let mut best_font = 1;
+                if width <= available_width && height <= available_height {
+                    let (mut low, mut high) = (1, new_font);
+                    while low <= high {
+                        let mid = low + (high - low) / 2;
+                        let (w, h) = crate::drawing::measure_text(text, mid);
+                        if w <= available_width && h <= available_height {
+                            best_font = mid;
+                            width = w;
+                            height = h;
+                            low = mid + 1;
+                        } else {
+                            high = mid - 1;
+                        }
+                    }
                 }
+                new_font = best_font;
                 let new_pos = match handle {
                     AnnotationResizeHandle::TopLeft => (anchor.0 - width, anchor.1 - height),
                     AnnotationResizeHandle::TopRight => (anchor.0, anchor.1 - height),
@@ -567,6 +595,9 @@ impl AnnotationObject {
                 thickness,
             } => {
                 let pen = unsafe { CreatePen(PS_SOLID, *thickness, bgra_to_colorref(*color)) };
+                if pen.is_invalid() {
+                    return;
+                }
                 let old_pen = unsafe { SelectObject(hdc, HGDIOBJ(pen.0)) };
                 let null_brush = unsafe { GetStockObject(NULL_BRUSH) };
                 let old_brush = unsafe { SelectObject(hdc, null_brush) };
@@ -601,6 +632,9 @@ impl AnnotationObject {
 
                 let colorref = bgra_to_colorref(*color);
                 let pen = unsafe { CreatePen(PS_SOLID, *thickness, colorref) };
+                if pen.is_invalid() {
+                    return;
+                }
                 let old_pen = unsafe { SelectObject(hdc, HGDIOBJ(pen.0)) };
                 let _pen_guard = PenGuard {
                     hdc,
@@ -634,6 +668,10 @@ impl AnnotationObject {
 
                 // Draw filled arrowhead triangle
                 let brush = unsafe { CreateSolidBrush(colorref) };
+                if brush.is_invalid() {
+                    // Shaft is already drawn; guards restore the pen on return.
+                    return;
+                }
                 let old_brush = unsafe { SelectObject(hdc, HGDIOBJ(brush.0)) };
                 let _brush_guard = BrushGuard {
                     hdc,
@@ -701,8 +739,16 @@ impl AnnotationObject {
 
     /// Renders selection bounding indicators (dashed rectangle + corner handles) around this object.
     pub fn render_selection_indicator(&self, hdc: HDC) {
-        let b = self.bounds().inflate(4, 4);
+        // Same rect as resize_handle_points so handles sit on the dashed box the
+        // user sees; arrows keep the stroke-inflated bounds to contain the head.
+        let b = match &self.kind {
+            AnnotationKind::Arrow { .. } => self.bounds().inflate(4, 4),
+            _ => self.geometry_bounds().inflate(4, 4),
+        };
         let pen = unsafe { CreatePen(PS_DOT, 1, COLORREF(0x00D77800)) }; // Accent blue in BGR
+        if pen.is_invalid() {
+            return;
+        }
         let old_pen = unsafe { SelectObject(hdc, HGDIOBJ(pen.0)) };
         let null_brush = unsafe { GetStockObject(NULL_BRUSH) };
         let old_brush = unsafe { SelectObject(hdc, null_brush) };
@@ -724,6 +770,9 @@ impl AnnotationObject {
 
         // Corner handles
         let handle_brush = unsafe { CreateSolidBrush(COLORREF(0x00D77800)) };
+        if handle_brush.is_invalid() {
+            return; // dashed box is already drawn; degrade to no handles
+        }
         let old_hbrush = unsafe { SelectObject(hdc, HGDIOBJ(handle_brush.0)) };
         let _handle_guard = BrushGuard {
             hdc,
@@ -979,11 +1028,10 @@ impl HistoryManager {
 
         match cmd {
             EditCommand::Add(obj) => {
-                let id = obj.id;
+                // The local object is the pushed one: clone it directly instead
+                // of re-finding by id (unwrap breaks if ids ever collide).
+                self.undo_stack.push(EditCommand::Add(obj.clone()));
                 objects.push(obj);
-                self.undo_stack.push(EditCommand::Add(
-                    objects.iter().find(|o| o.id == id).unwrap().clone(),
-                ));
             }
             EditCommand::Delete { object, index } => {
                 if let Some(pos) = objects.iter().position(|o| o.id == object.id) {

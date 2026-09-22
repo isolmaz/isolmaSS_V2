@@ -32,15 +32,18 @@ if !BIN_SIZE! gtr %MAX_BINARY_BUDGET% (
     exit /b 1
 )
 
-set MAKENSIS_CMD=makensis
-where makensis >nul 2>nul
-if errorlevel 1 (
-    if exist "%LOCALAPPDATA%\Programs\nsis-3.10\makensis.exe" (
-        set MAKENSIS_CMD=%LOCALAPPDATA%\Programs\nsis-3.10\makensis.exe
-    ) else (
-        echo [ERROR] makensis was not found
-        exit /b 1
-    )
+set "MAKENSIS_CMD="
+if defined MAKENSIS set "MAKENSIS_CMD=%MAKENSIS%"
+if not defined MAKENSIS_CMD (
+    where makensis >nul 2>nul
+    if not errorlevel 1 set "MAKENSIS_CMD=makensis"
+)
+if not defined MAKENSIS_CMD (
+    for /f "usebackq delims=" %%P in (`powershell -NoProfile -Command "$ErrorActionPreference='SilentlyContinue'; $root = Join-Path $env:LOCALAPPDATA 'Programs'; $dirs = Get-ChildItem -LiteralPath $root -Directory -Filter 'nsis-*'; $best = $dirs | Sort-Object { try { [version]($_.Name -replace '^nsis-','') } catch { [version]'0.0' } } | Select-Object -Last 1; if ($null -ne $best) { $exe = Join-Path $best.FullName 'makensis.exe'; if (Test-Path -LiteralPath $exe) { $exe } }"`) do set "MAKENSIS_CMD=%%P"
+)
+if not defined MAKENSIS_CMD (
+    echo [ERROR] makensis was not found. Set MAKENSIS to the full path of makensis.exe, put makensis on PATH, or install NSIS so that %%LOCALAPPDATA%%\Programs\nsis-*\makensis.exe exists.
+    exit /b 1
 )
 
 echo [INFO] Compiling NSIS installer...
@@ -54,7 +57,7 @@ if not exist "%SETUP_PATH%" (
 call :sign "%SETUP_PATH%"
 if errorlevel 1 exit /b 1
 
-powershell -NoProfile -Command "$ErrorActionPreference='Stop'; foreach ($path in @('%BIN_PATH%','%SETUP_PATH%')) { $version=(Get-Item -LiteralPath $path).VersionInfo.ProductVersion; if ($version -ne '%PRODUCT_VERSION%') { throw ('Artifact version mismatch: ' + $path) } }"
+powershell -NoProfile -Command "$ErrorActionPreference='Stop'; $expected = [version]'%PRODUCT_VERSION%'; foreach ($path in @('%BIN_PATH%','%SETUP_PATH%')) { $info = (Get-Item -LiteralPath $path).VersionInfo; foreach ($field in @('ProductVersion','FileVersion')) { $raw = $info.$field; $parsed = $null; if (-not [version]::TryParse($raw, [ref]$parsed)) { throw ('Unparseable ' + $field + ' on ' + $path + ': ' + $raw) }; if ($parsed.Major -ne $expected.Major -or $parsed.Minor -ne $expected.Minor -or $parsed.Build -ne $expected.Build) { throw ('Artifact ' + $field + ' mismatch on ' + $path + ': ' + $raw + ' != ' + '%PRODUCT_VERSION%') } } }"
 if errorlevel 1 exit /b 1
 if /I "%REQUIRE_SIGNING%"=="1" (
     "%BIN_PATH%" --verify-update "%SETUP_PATH%"

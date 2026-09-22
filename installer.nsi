@@ -54,10 +54,12 @@ BrandingText "isolmaSS | Capture. Annotate. Done."
 
 !insertmacro MUI_LANGUAGE "English"
 
+; VIProductVersion requires exactly four numeric parts; the trailing ".0" is
+; padding only. String versions below match the executable's three-part form.
 VIProductVersion "${PRODUCT_VERSION}.0"
 VIAddVersionKey /LANG=1033 "ProductName" "${PRODUCT_NAME}"
 VIAddVersionKey /LANG=1033 "ProductVersion" "${PRODUCT_VERSION}"
-VIAddVersionKey /LANG=1033 "FileVersion" "${PRODUCT_VERSION}.0"
+VIAddVersionKey /LANG=1033 "FileVersion" "${PRODUCT_VERSION}"
 VIAddVersionKey /LANG=1033 "FileDescription" "isolmaSS Setup"
 VIAddVersionKey /LANG=1033 "LegalCopyright" "Copyright (c) 2026 isolmaSS contributors"
 Name "${PRODUCT_NAME} ${PRODUCT_VERSION}"

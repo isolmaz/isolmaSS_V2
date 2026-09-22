@@ -1,7 +1,6 @@
 use crate::settings::Settings;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
-use std::sync::mpsc::SyncSender;
 use std::time::Instant;
 use windows::Win32::Foundation::{
     ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, WPARAM,
@@ -36,6 +35,8 @@ pub enum TrayCommand {
 
 static PREFERENCES: std::sync::Mutex<Option<Settings>> = std::sync::Mutex::new(None);
 static ACTIVE_HOTKEY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+/// Records the shortcut the running hook actually registered. An empty
+/// description means no shortcut is active and none must be advertised.
 pub fn set_active_hotkey(description: &str) {
     *ACTIVE_HOTKEY
         .lock()
@@ -67,8 +68,43 @@ pub fn window_handle() -> HWND {
 
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 
-struct TrayWindowState {
-    event_tx: SyncSender<TrayCommand>,
+static PENDING_COMMANDS: std::sync::Mutex<Vec<TrayCommand>> = std::sync::Mutex::new(Vec::new());
+const MAX_PENDING_COMMANDS: usize = 16;
+
+/// Enqueues one command, coalescing it with an identical pending command so the
+/// queue is bounded by the distinct command set. Returns false only when the
+/// hard capacity bound rejects it.
+fn push_pending(command: TrayCommand) -> bool {
+    let mut pending = PENDING_COMMANDS
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if pending.contains(&command) {
+        return true;
+    }
+    if pending.len() >= MAX_PENDING_COMMANDS {
+        crate::diagnostics::record("tray", &format!("Command queue full; dropped {command:?}."));
+        return false;
+    }
+    pending.push(command);
+    true
+}
+
+/// Queues a control command for the daemon message loop and wakes the loop, so
+/// a command produced during a nested modal session is delivered right after
+/// that session returns instead of being dropped.
+pub fn queue_command(command: TrayCommand) {
+    push_pending(command);
+    notify_tray_wakeup();
+}
+
+/// Moves every pending command out for the daemon message loop. Commands are
+/// taken under the lock so running one may safely open a nested modal loop.
+pub fn take_commands() -> Vec<TrayCommand> {
+    std::mem::take(
+        &mut *PENDING_COMMANDS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()),
+    )
 }
 
 fn copy_wide<const N: usize>(destination: &mut [u16; N], value: &str) {
@@ -133,7 +169,7 @@ pub fn capture_is_stale(triggered: Instant) -> bool {
         .is_some_and(|finished| triggered < finished)
 }
 
-pub fn queue_capture(sender: &SyncSender<TrayCommand>, triggered: Instant) {
+pub fn queue_capture(triggered: Instant) {
     if capture_is_stale(triggered) {
         return;
     }
@@ -143,19 +179,8 @@ pub fn queue_capture(sender: &SyncSender<TrayCommand>, triggered: Instant) {
     {
         return;
     }
-    if sender.try_send(TrayCommand::Capture(triggered)).is_err() {
+    if !push_pending(TrayCommand::Capture(triggered)) {
         capture_finished();
-    }
-    notify_tray_wakeup();
-}
-
-fn send_command(state: &TrayWindowState, command: TrayCommand) {
-    if let TrayCommand::Capture(triggered) = command {
-        queue_capture(&state.event_tx, triggered);
-        return;
-    }
-    if let Err(error) = state.event_tx.try_send(command) {
-        crate::diagnostics::record("tray", &format!("Command queue unavailable: {error}"));
     }
     notify_tray_wakeup();
 }
@@ -202,8 +227,6 @@ unsafe extern "system" fn tray_wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
-    let state_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut TrayWindowState;
-
     if msg == TASKBAR_CREATED.load(Ordering::SeqCst) && msg != 0 {
         if add_tray_icon(hwnd).is_err() {
             let _ = unsafe {
@@ -220,54 +243,39 @@ unsafe extern "system" fn tray_wnd_proc(
 
     match msg {
         WM_SHOW_EXISTING => {
-            if !state_ptr.is_null() {
-                send_command(unsafe { &*state_ptr }, TrayCommand::Settings);
-            }
+            queue_command(TrayCommand::Settings);
             LRESULT(0)
         }
         WM_TRAYICON => {
-            if state_ptr.is_null() {
-                return LRESULT(0);
-            }
             let (event, icon_id, is_version_four) = decode_tray_event(wparam.0, lparam.0);
-            let state = unsafe { &*state_ptr };
             match tray_event_action(event, icon_id) {
-                Some(TrayEventAction::Capture) => {
-                    send_command(state, TrayCommand::Capture(Instant::now()))
-                }
+                Some(TrayEventAction::Capture) => queue_capture(Instant::now()),
                 Some(TrayEventAction::ContextMenu) => {
                     let anchor = (is_version_four && event == WM_CONTEXTMENU)
                         .then(|| callback_point(wparam))
                         .flatten();
-                    show_context_menu(hwnd, state, anchor);
+                    show_context_menu(hwnd, anchor);
                 }
                 None => {}
             }
             LRESULT(0)
         }
         WM_CANCEL_CAPTURE => {
-            if !state_ptr.is_null() {
-                send_command(unsafe { &*state_ptr }, TrayCommand::CancelCapture);
-            }
+            queue_command(TrayCommand::CancelCapture);
             LRESULT(0)
         }
         WM_CLOSE => {
-            if !state_ptr.is_null() {
-                send_command(unsafe { &*state_ptr }, TrayCommand::Exit);
-                if crate::hotkey::is_overlay_active() || crate::hotkey::overlay_input_suspended() {
-                    show_notification(
-                        "Close requested",
-                        "Finish the current capture or settings changes to close isolmaSS safely.",
-                    );
-                }
+            queue_command(TrayCommand::Exit);
+            if crate::hotkey::is_overlay_active()
+                || crate::hotkey::overlay_input_suspended()
+                || capture_pending()
+            {
+                show_notification(
+                    "Close requested",
+                    "isolmaSS will quit as soon as the current capture or window finishes.",
+                );
             }
             LRESULT(0)
-        }
-        windows::Win32::UI::WindowsAndMessaging::WM_NCDESTROY => {
-            unsafe {
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-            }
-            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         WM_DESTROY => {
             unsafe { PostQuitMessage(0) };
@@ -279,7 +287,23 @@ unsafe extern "system" fn tray_wnd_proc(
 
 pub(crate) mod menu;
 
-fn show_context_menu(hwnd: HWND, state: &TrayWindowState, anchor: Option<POINT>) {
+static MENU_OPEN: AtomicBool = AtomicBool::new(false);
+
+struct MenuGuard;
+impl Drop for MenuGuard {
+    fn drop(&mut self) {
+        MENU_OPEN.store(false, Ordering::Release);
+    }
+}
+
+fn show_context_menu(hwnd: HWND, anchor: Option<POINT>) {
+    // Tray callbacks are sent messages: a second right-click arrives while the
+    // first palette's modal loop is pumping. Ignore it instead of nesting a
+    // second modal loop that the first palette's destruction would corrupt.
+    if MENU_OPEN.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let _guard = MenuGuard;
     let mut point = anchor.unwrap_or_default();
     if anchor.is_none() {
         unsafe {
@@ -298,7 +322,8 @@ fn show_context_menu(hwnd: HWND, state: &TrayWindowState, anchor: Option<POINT>)
         .clone()
         .unwrap_or(preferences.hotkey.description);
     match menu::show(hwnd, point, crate::save::recent::list(), &active_hotkey) {
-        Ok(Some(command)) => send_command(state, command),
+        Ok(Some(TrayCommand::Capture(triggered))) => queue_capture(triggered),
+        Ok(Some(command)) => queue_command(command),
         Ok(None) => {}
         Err(error) => crate::ui::error(hwnd, "Menu could not be opened", &error.to_string()),
     }
@@ -328,17 +353,15 @@ fn register_tray_class() -> Result<()> {
 pub struct TrayManager {
     hwnd: HWND,
     nid: NOTIFYICONDATAW,
-    _state: Box<TrayWindowState>,
 }
 
 impl TrayManager {
-    pub fn create(event_tx: SyncSender<TrayCommand>) -> Result<Self> {
+    pub fn create() -> Result<Self> {
         register_tray_class()?;
         TASKBAR_CREATED.store(
             unsafe { RegisterWindowMessageW(w!("TaskbarCreated")) },
             Ordering::SeqCst,
         );
-        let mut state = Box::new(TrayWindowState { event_tx });
         let hwnd = unsafe {
             CreateWindowExW(
                 Default::default(),
@@ -355,13 +378,6 @@ impl TrayManager {
                 None,
             )?
         };
-        unsafe {
-            SetWindowLongPtrW(
-                hwnd,
-                GWLP_USERDATA,
-                state.as_mut() as *mut TrayWindowState as isize,
-            );
-        }
         TRAY_HWND.store(hwnd.0 as isize, Ordering::SeqCst);
         let nid = match add_tray_icon(hwnd) {
             Ok(data) => data,
@@ -371,11 +387,7 @@ impl TrayManager {
                 return Err(error);
             }
         };
-        Ok(Self {
-            hwnd,
-            nid,
-            _state: state,
-        })
+        Ok(Self { hwnd, nid })
     }
 }
 
@@ -465,8 +477,7 @@ mod tests {
 
     #[test]
     fn test_tray_manager_lifecycle() {
-        let (tx, _rx) = std::sync::mpsc::sync_channel::<TrayCommand>(16);
-        let manager = TrayManager::create(tx);
+        let manager = TrayManager::create();
         assert!(manager.is_ok(), "TrayManager::create should succeed");
         notify_tray_wakeup();
         drop(manager);

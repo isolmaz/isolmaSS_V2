@@ -128,10 +128,9 @@ impl HotkeyConfig {
         })
     }
 
-    /// Attempts to load hotkey settings from %APPDATA%\isolmaSS\settings.json
-    /// or falls back to standard defaults.
-    pub fn load_or_default() -> Self {
-        crate::settings::Settings::load_or_default().hotkey
+    /// Loads the saved hotkey configuration from settings.json.
+    pub fn load() -> std::io::Result<Self> {
+        crate::settings::Settings::load().map(|settings| settings.hotkey)
     }
 }
 
@@ -235,8 +234,8 @@ pub fn register_overlay(hwnd: HWND) -> windows::core::Result<()> {
 
     let has_hook = HOOK_STATE
         .lock()
-        .ok()
-        .and_then(|g| g.as_ref().map(|_| ()))
+        .unwrap_or_else(|poison| poison.into_inner())
+        .as_ref()
         .is_some();
 
     if !has_hook {
@@ -416,10 +415,12 @@ pub unsafe fn process_keyboard_hook(
             let was_down = SNAPSHOT_HANDLED.swap(true, Ordering::SeqCst);
             if !was_down {
                 // First keydown: dispatch capture event to listener channel
-                if let Some(tx) = HOOK_STATE
+                let event_tx = HOOK_STATE
                     .lock()
-                    .ok()
-                    .and_then(|guard| guard.as_ref().map(|s| s.event_tx.clone()))
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .as_ref()
+                    .map(|state| state.event_tx.clone());
+                if let Some(tx) = event_tx
                     && !is_overlay_active()
                     && !overlay_input_suspended()
                 {
@@ -472,9 +473,9 @@ impl Drop for ListenerResources {
         TARGET_VK.store(0, Ordering::SeqCst);
         TARGET_MODS.store(0, Ordering::SeqCst);
         SNAPSHOT_HANDLED.store(false, Ordering::SeqCst);
-        if let Ok(mut state) = HOOK_STATE.lock() {
-            *state = None;
-        }
+        *HOOK_STATE
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = None;
     }
 }
 
@@ -541,6 +542,26 @@ pub fn start_hotkey_listener(
 
         let is_snapshot = requested_config.vk == VK_SNAPSHOT.0 as u32;
 
+        // Populate delivery state before installing the hook so no callback can
+        // ever run without it, and fail startup loudly on a poisoned state lock
+        // instead of continuing with a shortcut that swallows keys silently.
+        {
+            let mut guard = match HOOK_STATE.lock() {
+                Ok(guard) => guard,
+                Err(_) => {
+                    let _ = ready_tx.send(Err(
+                        "Keyboard hook state could not be initialized: state lock poisoned."
+                            .to_string(),
+                    ));
+                    return;
+                }
+            };
+            *guard = Some(HookState {
+                event_tx: event_tx.clone(),
+                _config: requested_config.clone(),
+            });
+        }
+
         // Set target VK and modifiers for low-level hook
         TARGET_VK.store(requested_config.vk, Ordering::SeqCst);
         TARGET_MODS.store(requested_config.modifiers, Ordering::SeqCst);
@@ -562,6 +583,9 @@ pub fn start_hotkey_listener(
             Err(error) => {
                 TARGET_VK.store(0, Ordering::SeqCst);
                 TARGET_MODS.store(0, Ordering::SeqCst);
+                *HOOK_STATE
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner()) = None;
                 let _ = ready_tx.send(Err(format!(
                     "Keyboard hook could not be installed: {error}"
                 )));
@@ -569,12 +593,6 @@ pub fn start_hotkey_listener(
             }
         };
         let _resources = ListenerResources(hook);
-        if let Ok(mut guard) = HOOK_STATE.lock() {
-            *guard = Some(HookState {
-                event_tx: event_tx.clone(),
-                _config: requested_config.clone(),
-            });
-        }
 
         let active_desc = if is_snapshot {
             // Low-level hook is primary for PrintScreen.
@@ -590,9 +608,12 @@ pub fn start_hotkey_listener(
             .is_ok();
 
             if !reg_ok {
-                eprintln!(
-                    "[hotkey] Note: RegisterHotKey for '{}' held by OS. WH_KEYBOARD_LL hook active; Snipping Tool suppressed.",
-                    requested_config.description
+                crate::diagnostics::record(
+                    "hotkey",
+                    &format!(
+                        "RegisterHotKey for '{}' held by OS; WH_KEYBOARD_LL hook active, Snipping Tool suppressed.",
+                        requested_config.description
+                    ),
                 );
             }
             // Do not switch to fallback: WH_KEYBOARD_LL intercepts VK_SNAPSHOT and consumes it!
@@ -624,9 +645,12 @@ pub fn start_hotkey_listener(
                 .is_ok();
 
                 if fallback_ok {
-                    eprintln!(
-                        "[hotkey] Note: '{}' was unavailable. Using fallback '{}'.",
-                        requested_config.description, fallback.description
+                    crate::diagnostics::record(
+                        "hotkey",
+                        &format!(
+                            "'{}' was unavailable; using fallback '{}'.",
+                            requested_config.description, fallback.description
+                        ),
                     );
                     TARGET_VK.store(fallback.vk, Ordering::SeqCst);
                     TARGET_MODS.store(fallback.modifiers, Ordering::SeqCst);

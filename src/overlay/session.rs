@@ -91,10 +91,11 @@ fn run_session(
 
     let mut bits_ptr: *mut c_void = std::ptr::null_mut();
     let dib = unsafe { CreateDIBSection(screen_dc, &bmi, DIB_RGB_COLORS, &mut bits_ptr, None, 0)? };
+    // Own the bitmap immediately so every later error path frees it.
+    let bitmap_guard = DeleteBitmapGuard(dib);
     if dib.is_invalid() || bits_ptr.is_null() {
         return Err(windows::core::Error::from_win32());
     }
-    let bitmap_guard = DeleteBitmapGuard(dib);
     drop(screen_guard);
 
     let old_bmp = unsafe { SelectObject(mem_dc, HGDIOBJ(dib.0)) };
@@ -104,7 +105,16 @@ fn run_session(
         std::ptr::copy_nonoverlapping(capture.dimmed.as_ptr(), bits_ptr as *mut u8, buffer_bytes);
     }
 
-    let settings = Settings::load_or_default();
+    let settings = Settings::load().map_err(|error| {
+        let hresult = match error.raw_os_error() {
+            Some(code) => windows::core::HRESULT::from_win32(code as u32),
+            None => windows::core::HRESULT(-1),
+        };
+        windows::core::Error::new(
+            hresult,
+            format!("could not load settings for the capture overlay: {error}"),
+        )
+    })?;
     let active_color = settings.default_color;
     let active_thickness = settings.default_thickness;
     let active_tool = settings.last_tool;
@@ -178,7 +188,6 @@ fn run_session(
             GWLP_USERDATA,
             state.as_mut() as *mut OverlayState as isize,
         );
-        let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = ShowWindow(hwnd, SW_SHOW);
         let _ = SetForegroundWindow(hwnd);
         let _ = SetFocus(hwnd);

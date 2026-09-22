@@ -286,8 +286,13 @@ impl OverlayState {
             EscapeAction::CancelledTextEdit
         } else if let Some(id) = self.selected_id.take() {
             EscapeAction::DeselectedObject(id)
-        } else if self.mode == OverlayMode::SelectionActive {
+        } else if matches!(
+            self.mode,
+            OverlayMode::SelectionActive | OverlayMode::DraggingSelection
+        ) {
             self.mode = OverlayMode::Hovering;
+            self.drag_start = None;
+            self.hover_snap_rect = None;
             self.committed_selection = None;
             self.toolbar = None;
             self.objects.clear();
@@ -295,6 +300,9 @@ impl OverlayState {
             self.drawing_shape = None;
             self.dragging_object = None;
             self.dragging_selection = None;
+            unsafe {
+                let _ = ReleaseCapture();
+            }
             EscapeAction::CancelledSelection
         } else {
             EscapeAction::CloseOverlay
@@ -340,11 +348,6 @@ impl OverlayState {
         self.mode
     }
 
-    #[allow(dead_code)]
-    pub fn set_mode(&mut self, mode: OverlayMode) {
-        self.mode = mode;
-    }
-
     pub fn text_edit(&self) -> Option<&TextEditState> {
         self.text_edit.as_ref()
     }
@@ -363,11 +366,6 @@ impl OverlayState {
 
     pub fn committed_selection(&self) -> Option<Rect> {
         self.committed_selection
-    }
-
-    #[allow(dead_code)]
-    pub fn set_committed_selection(&mut self, rect: Option<Rect>) {
-        self.committed_selection = rect;
     }
 
     pub fn set_selection_active(&mut self, rect: Rect) {
@@ -446,6 +444,47 @@ impl OverlayState {
     }
 
     fn handle_key_down(&mut self, hwnd: HWND, vk: usize, mods: isize) -> LRESULT {
+        // F10 / Apps: expose every toolbar command as a native popup menu for
+        // keyboard and screen-reader access. The chosen command is replayed
+        // through the ordinary click path so behavior stays identical.
+        if matches!(vk, 0x79 | 0x5d)
+            && self.mode == OverlayMode::SelectionActive
+            && self.text_edit.is_none()
+        {
+            let buttons = self.toolbar.as_ref().map(|toolbar| toolbar.buttons.clone());
+            let Some(buttons) = buttons else {
+                return LRESULT(0);
+            };
+            match crate::toolbar::show_command_menu(hwnd, &buttons) {
+                Ok(Some(item)) => {
+                    if let Some(rect) = buttons
+                        .iter()
+                        .find(|button| button.item == item)
+                        .map(|button| button.rect)
+                    {
+                        let packed = (((rect.left + rect.right) / 2) as u16 as u32)
+                            | ((((rect.top + rect.bottom) / 2) as u16 as u32) << 16);
+                        unsafe {
+                            let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                                hwnd,
+                                WM_LBUTTONDOWN,
+                                WPARAM(1),
+                                LPARAM(packed as isize),
+                            );
+                            let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                                hwnd,
+                                WM_LBUTTONUP,
+                                WPARAM(0),
+                                LPARAM(packed as isize),
+                            );
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => Self::show_action_error(hwnd, "Command menu", &error.to_string()),
+            }
+            return LRESULT(0);
+        }
         if !is_editor_shortcut(vk as u32, mods as u32, self.text_edit.is_some()) {
             return LRESULT(0);
         }
@@ -641,7 +680,6 @@ impl OverlayState {
                 .selected_id
                 .and_then(|id| self.objects.iter_mut().find(|o| o.id == id))
             {
-                let old_kind = object.kind.clone();
                 let bounds = object.geometry_bounds();
                 let limit = self.committed_selection.unwrap_or(Rect::new(
                     0,
@@ -659,6 +697,10 @@ impl OverlayState {
                 } else {
                     0
                 };
+                if dx == 0 && dy == 0 {
+                    return LRESULT(0);
+                }
+                let old_kind = object.kind.clone();
                 object.translate(dx, dy);
                 self.history.record(EditCommand::Modify {
                     id: object.id,
@@ -1724,10 +1766,12 @@ unsafe extern "system" fn overlay_wnd_proc(
                                         state.commit_selection(hwnd, snap_rect);
                                     } else {
                                         state.mode = OverlayMode::Hovering;
+                                        state.committed_selection = None;
                                         state.redraw(hwnd);
                                     }
                                 } else {
                                     state.mode = OverlayMode::Hovering;
+                                    state.committed_selection = None;
                                     state.redraw(hwnd);
                                 }
                             } else {
@@ -1743,6 +1787,7 @@ unsafe extern "system" fn overlay_wnd_proc(
                                     state.commit_selection(hwnd, drag_rect);
                                 } else {
                                     state.mode = OverlayMode::Hovering;
+                                    state.committed_selection = None;
                                     state.redraw(hwnd);
                                 }
                             }

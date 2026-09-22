@@ -1,5 +1,5 @@
 //! Shared Win32 lifetime and modal-loop rules. Child windows never quit the UI thread.
-use windows::Win32::Foundation::{HWND, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result};
 
@@ -41,7 +41,7 @@ pub fn window_loop(hwnd: HWND, kind: WindowKind) -> Result<()> {
         crate::updater::poll(hwnd, false);
         if dialog && msg.message == WM_KEYDOWN && msg.wParam == WPARAM(27) {
             unsafe {
-                let _ = DestroyWindow(hwnd);
+                PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0))?;
             }
             continue;
         }
@@ -109,7 +109,7 @@ pub fn confirm(owner: HWND, title: &str, message: &str) -> bool {
     let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
     let message: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
     let mut selected = 0;
-    unsafe {
+    match unsafe {
         TaskDialog(
             owner,
             None,
@@ -120,7 +120,25 @@ pub fn confirm(owner: HWND, title: &str, message: &str) -> bool {
             TD_INFORMATION_ICON,
             Some(&mut selected),
         )
+    } {
+        Ok(()) => selected == IDYES.0,
+        Err(error) => {
+            crate::diagnostics::record("confirmation dialog", &error.to_string());
+            let selected = unsafe {
+                MessageBoxW(
+                    owner,
+                    PCWSTR(message.as_ptr()),
+                    PCWSTR(title.as_ptr()),
+                    MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2,
+                )
+            };
+            if selected.0 == 0 {
+                crate::diagnostics::record(
+                    "confirmation fallback",
+                    &windows::core::Error::from_win32().to_string(),
+                );
+            }
+            selected == IDYES
+        }
     }
-    .is_ok()
-        && selected == IDYES.0
 }
