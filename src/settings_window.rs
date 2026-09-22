@@ -84,9 +84,19 @@ const ID_DELAY_FIRST: i32 = 500;
 const ID_FORMAT_PNG: i32 = 600;
 const ID_FORMAT_JPEG: i32 = 601;
 const ID_QUALITY_FIRST: i32 = 610;
-const SETTINGS_WIDTH: i32 = 960;
-const SETTINGS_HEIGHT: i32 = 820;
-const CONTENT_HEIGHT: i32 = 754;
+const SETTINGS_WIDTH: i32 = 800;
+const SETTINGS_HEIGHT: i32 = 600;
+/// Left edge of the content column: page margin + sidebar band + sidebar gap.
+const CONTENT_LEFT: i32 = 184;
+/// Right edge of the content column — the window keeps the same 60 px right
+/// band the 960-wide original had (960 - 900), so the horizontal scroll extent
+/// (`CONTENT_RIGHT` + page margin = 764) still fits the client width even when
+/// the vertical scrollbar is visible.
+const CONTENT_RIGHT: i32 = 740;
+/// Scrollable content height: footer band bottom (664 + 32) plus the bottom
+/// page margin — the same footer + bottom-air relationship the old
+/// `754 = 740 + 14` had, with the margin snapped to `theme::GRID`.
+const CONTENT_HEIGHT: i32 = 712;
 fn color_background() -> COLORREF {
     crate::theme::tokens().page
 }
@@ -267,16 +277,18 @@ fn set_control_font(hwnd: HWND, id: i32, font: windows::Win32::Graphics::Gdi::HF
 }
 
 fn card_rects(view: SettingsView) -> &'static [(i32, i32, i32, i32)] {
+    // Every card sits between CONTENT_LEFT and CONTENT_RIGHT; tops/bottoms are
+    // GRID-snapped and carry `theme::CARD_PADDING` (16) of inner padding.
     match view {
         SettingsView::Simple => &[
-            (220, 100, 900, 244),
-            (220, 260, 900, 422),
-            (220, 438, 900, 584),
+            (CONTENT_LEFT, 100, CONTENT_RIGHT, 252),
+            (CONTENT_LEFT, 268, CONTENT_RIGHT, 460),
+            (CONTENT_LEFT, 476, CONTENT_RIGHT, 612),
         ],
         SettingsView::Advanced => &[
-            (220, 100, 900, 298),
-            (220, 314, 900, 452),
-            (220, 468, 900, 666),
+            (CONTENT_LEFT, 100, CONTENT_RIGHT, 276),
+            (CONTENT_LEFT, 292, CONTENT_RIGHT, 428),
+            (CONTENT_LEFT, 444, CONTENT_RIGHT, 648),
         ],
     }
 }
@@ -313,8 +325,8 @@ fn paint_settings_surface(hwnd: HWND, state: &SettingsWindowState, hdc: HDC) {
                 scale(top, state.dpi),
                 scale(right, state.dpi),
                 scale(bottom, state.dpi),
-                scale(16, state.dpi),
-                scale(16, state.dpi),
+                scale(crate::theme::RADIUS_CARD, state.dpi),
+                scale(crate::theme::RADIUS_CARD, state.dpi),
             );
         }
     }
@@ -380,8 +392,8 @@ fn draw_settings_button(
                 rect.top + 1,
                 rect.right - 1,
                 rect.bottom - 1,
-                scale(14, dpi),
-                scale(14, dpi),
+                scale(crate::theme::RADIUS_CARD, dpi),
+                scale(crate::theme::RADIUS_CARD, dpi),
             );
         })
     });
@@ -439,7 +451,7 @@ fn draw_settings_button(
     }
     crate::drawing::with_font(
         hdc,
-        -scale(14, dpi),
+        -scale(crate::theme::FONT_BODY_PX, dpi),
         if primary || checked && !toggle {
             600
         } else {
@@ -482,72 +494,99 @@ fn control_uses_card(id: i32) -> bool {
 }
 
 fn layout_controls(hwnd: HWND, dpi: u32) {
-    const ROW: i32 = 36;
-    move_control(hwnd, 700, 24, 26, 180, 40, dpi);
-    move_control(hwnd, 709, 26, 72, 174, 42, dpi);
-    move_control(hwnd, ID_VIEW_SIMPLE, 20, 138, 180, 44, dpi);
-    move_control(hwnd, ID_VIEW_ADVANCED, 20, 190, 180, 44, dpi);
-    move_control(hwnd, 718, 26, 656, 174, 76, dpi);
-    move_control(hwnd, 716, 220, 26, 680, 40, dpi);
-    move_control(hwnd, 717, 222, 68, 670, 24, dpi);
-    move_control(hwnd, 710, 240, 118, 640, 26, dpi);
-    move_control(hwnd, 701, 240, 161, 126, ROW, dpi);
-    move_control(hwnd, ID_HOTKEY_PRINT, 370, 156, 132, ROW, dpi);
-    move_control(hwnd, ID_HOTKEY_CTRL_SHIFT_S, 510, 156, 154, ROW, dpi);
-    move_control(hwnd, ID_HOTKEY_ALT_PRINT, 672, 156, 208, ROW, dpi);
-    move_control(hwnd, 705, 240, 206, 126, ROW, dpi);
+    use crate::theme::{CARD_PADDING, PAGE_MARGIN};
+    // Every coordinate below is 96-DPI design pixels snapped to theme::GRID (4).
+    const ROW: i32 = crate::theme::CONTROL_HEIGHT;
+    const MARGIN: i32 = PAGE_MARGIN;
+    const SIDE: i32 = 144; // sidebar band (was 180)
+    const GAP: i32 = crate::theme::GRID * 4; // sidebar -> content column
+    const LBL: i32 = 96; // property label column
+    const COL_W: i32 = CONTENT_RIGHT - CONTENT_LEFT;
+    const CTL: i32 = CONTENT_LEFT + CARD_PADDING; // first control x (200)
+    const VAL: i32 = CTL + LBL + GAP; // value/chip column x (312)
+    const CTL_W: i32 = CONTENT_RIGHT - CARD_PADDING - CTL;
+    // Sidebar: brand, subtitle, navigation, version block.
+    move_control(hwnd, 700, MARGIN, MARGIN, SIDE, 40, dpi);
+    move_control(hwnd, 709, MARGIN, 72, SIDE, 40, dpi);
+    move_control(hwnd, ID_VIEW_SIMPLE, MARGIN, 136, SIDE, ROW, dpi);
+    move_control(hwnd, ID_VIEW_ADVANCED, MARGIN, 176, SIDE, ROW, dpi);
+    move_control(hwnd, 718, MARGIN, 612, SIDE, 76, dpi);
+    // Content header (title band) shared by both views.
+    move_control(hwnd, 716, CONTENT_LEFT, MARGIN, COL_W, 40, dpi);
+    move_control(hwnd, 717, CONTENT_LEFT, 68, COL_W, 24, dpi);
+    // Capture card (General).
+    move_control(hwnd, 710, CTL, 116, CTL_W, 24, dpi);
+    move_control(hwnd, 701, CTL, 156, LBL, 24, dpi);
+    move_control(hwnd, ID_HOTKEY_PRINT, VAL, 148, 124, ROW, dpi);
+    move_control(hwnd, ID_HOTKEY_CTRL_SHIFT_S, VAL + 132, 148, 124, ROW, dpi);
+    move_control(hwnd, ID_HOTKEY_ALT_PRINT, VAL + 264, 148, 148, ROW, dpi);
+    move_control(hwnd, 705, CTL, 196, LBL, 40, dpi);
     for i in 0..4 {
-        move_control(hwnd, ID_DELAY_FIRST + i, 370 + i * 128, 200, 120, ROW, dpi);
+        move_control(hwnd, ID_DELAY_FIRST + i, VAL + i * 104, 188, 96, ROW, dpi);
     }
-    move_control(hwnd, 711, 240, 278, 640, 26, dpi);
-    move_control(hwnd, 702, 240, 320, 112, ROW, dpi);
-    move_control(hwnd, ID_FOLDER_LABEL, 360, 320, 394, ROW, dpi);
-    move_control(hwnd, ID_BROWSE, 764, 314, 116, 40, dpi);
-    move_control(hwnd, 706, 240, 373, 116, ROW, dpi);
-    move_control(hwnd, ID_FORMAT_PNG, 360, 367, 74, ROW, dpi);
-    move_control(hwnd, ID_FORMAT_JPEG, 442, 367, 78, ROW, dpi);
-    move_control(hwnd, 707, 538, 373, 128, ROW, dpi);
+    // Saving card (General).
+    move_control(hwnd, 711, CTL, 284, CTL_W, 24, dpi);
+    move_control(hwnd, 702, CTL, 324, LBL, 24, dpi);
+    move_control(hwnd, ID_FOLDER_LABEL, VAL, 324, 276, 24, dpi);
+    move_control(hwnd, ID_BROWSE, 604, 316, 120, ROW, dpi);
+    move_control(hwnd, 706, CTL, 364, LBL, 24, dpi);
+    move_control(hwnd, ID_FORMAT_PNG, VAL, 356, 96, ROW, dpi);
+    move_control(hwnd, ID_FORMAT_JPEG, VAL + 104, 356, 96, ROW, dpi);
+    move_control(hwnd, 707, CTL, 404, LBL, 40, dpi);
     for i in 0..3 {
-        move_control(hwnd, ID_QUALITY_FIRST + i, 670 + i * 70, 367, 62, ROW, dpi);
+        move_control(
+            hwnd,
+            ID_QUALITY_FIRST + i,
+            VAL + i * 140,
+            396,
+            132,
+            ROW,
+            dpi,
+        );
     }
-    move_control(hwnd, 712, 240, 456, 640, 26, dpi);
-    move_control(hwnd, ID_WINDOW_SNAP, 240, 490, 640, ROW, dpi);
-    move_control(hwnd, ID_CLOSE_AFTER_ACTION, 240, 536, 640, ROW, dpi);
-    move_control(hwnd, 713, 240, 118, 640, 26, dpi);
-    move_control(hwnd, 703, 240, 164, 116, ROW, dpi);
+    // After capture card (General).
+    move_control(hwnd, 712, CTL, 492, CTL_W, 24, dpi);
+    move_control(hwnd, ID_WINDOW_SNAP, CTL, 524, CTL_W, ROW, dpi);
+    move_control(hwnd, ID_CLOSE_AFTER_ACTION, CTL, 564, CTL_W, ROW, dpi);
+    // Annotation defaults card (Editor and system).
+    move_control(hwnd, 713, CTL, 116, CTL_W, 24, dpi);
+    move_control(hwnd, 703, CTL, 156, LBL, 24, dpi);
     for i in 0..8 {
         move_control(
             hwnd,
             ID_COLOR_FIRST + i,
-            370 + i % 4 * 128,
-            156 + i / 4 * 44,
-            120,
+            VAL + i % 4 * 104,
+            148 + i / 4 * 40,
+            96,
             ROW,
             dpi,
         );
     }
-    move_control(hwnd, 704, 240, 249, 126, ROW, dpi);
+    move_control(hwnd, 704, CTL, 236, LBL, 24, dpi);
     for i in 0..3 {
         move_control(
             hwnd,
             ID_THICKNESS_FIRST + i,
-            370 + i * 170,
-            244,
-            162,
+            VAL + i * 140,
+            228,
+            132,
             ROW,
             dpi,
         );
     }
-    move_control(hwnd, 714, 240, 332, 640, 26, dpi);
-    move_control(hwnd, ID_START_WITH_WINDOWS, 240, 368, 640, ROW, dpi);
-    move_control(hwnd, ID_NOTIFY_AFTER_SAVE, 240, 410, 640, ROW, dpi);
-    move_control(hwnd, 715, 240, 486, 640, 26, dpi);
-    move_control(hwnd, ID_CHECK_UPDATES, 240, 522, 640, ROW, dpi);
-    move_control(hwnd, ID_AUTO_INSTALL, 240, 564, 640, ROW, dpi);
-    move_control(hwnd, ID_CHECK_UPDATE, 240, 614, 180, 36, dpi);
-    move_control(hwnd, 708, 436, 609, 444, 48, dpi);
-    move_control(hwnd, ID_CANCEL, 588, 698, 128, 42, dpi);
-    move_control(hwnd, ID_SAVE, 728, 698, 172, 42, dpi);
+    // Windows card (Editor and system).
+    move_control(hwnd, 714, CTL, 308, CTL_W, 24, dpi);
+    move_control(hwnd, ID_START_WITH_WINDOWS, CTL, 340, CTL_W, ROW, dpi);
+    move_control(hwnd, ID_NOTIFY_AFTER_SAVE, CTL, 380, CTL_W, ROW, dpi);
+    // Updates card (Editor and system).
+    move_control(hwnd, 715, CTL, 460, CTL_W, 24, dpi);
+    move_control(hwnd, ID_CHECK_UPDATES, CTL, 492, CTL_W, ROW, dpi);
+    move_control(hwnd, ID_AUTO_INSTALL, CTL, 532, CTL_W, ROW, dpi);
+    move_control(hwnd, ID_CHECK_UPDATE, CTL, 572, 148, ROW, dpi);
+    move_control(hwnd, 708, CTL + 164, 572, 360, 60, dpi);
+    // Footer band (both views).
+    move_control(hwnd, ID_CANCEL, 428, 664, 128, ROW, dpi);
+    move_control(hwnd, ID_SAVE, 568, 664, 172, ROW, dpi);
 }
 
 fn update_scrollbars(hwnd: HWND, dpi: u32) {
@@ -575,7 +614,7 @@ fn update_scrollbars(hwnd: HWND, dpi: u32) {
         } else {
             0
         };
-    let width = scale(924, dpi);
+    let width = scale(CONTENT_RIGHT + crate::theme::PAGE_MARGIN, dpi);
     let height = scale(CONTENT_HEIGHT, dpi);
     let mut horizontal = width > full_width;
     let mut vertical = height > full_height;

@@ -207,3 +207,17 @@ pub const FONT_BODY_PX: i32 = 14;
 pub const FONT_SECTION_PX: i32 = 12;
 pub const FONT_WEIGHT_TITLE: i32 = 600;
 pub const FONT_WEIGHT_SECTION: i32 = 600;
+
+// ---------------------------------------------------------------------------
+// Metrics — Fluent layout grid, all values in 96-DPI pixels.
+// ---------------------------------------------------------------------------
+/// Corner radius for cards and panels.
+pub const RADIUS_CARD: i32 = 8;
+/// Base spacing grid.
+pub const GRID: i32 = 4;
+/// Standard control height (buttons, inputs).
+pub const CONTROL_HEIGHT: i32 = 32;
+/// Page margin around window content.
+pub const PAGE_MARGIN: i32 = 24;
+/// Inner padding inside a card.
+pub const CARD_PADDING: i32 = 16;

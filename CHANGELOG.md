@@ -58,6 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added `src/theme.rs`, the single source of Fluent design tokens: light/dark palettes, the current user's system accent color (with Fluent fallbacks), theme detection via `AppsUseLightTheme`, on-accent readable text, and a 14/12/20 px Segoe UI type scale.
 - Settings colors no longer use hardcoded warm/indigo constants; every paint resolves through the token module. Fonts moved from point math to the shared pixel scale (body 15 px -> 14 px, title 27 px -> 20 px).
+- Faz 1: Settings shrinks from 960x820 to 800x600 with a 144 px sidebar; margins, card padding, control heights, spacing grid and card radii all come from the new `src/theme.rs` metrics block (24/16/32/4/8). Both views keep every control, with vertical scrolling covering the footer.
 
 ### Verification — 2026-09-22
 
