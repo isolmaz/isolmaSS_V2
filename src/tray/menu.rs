@@ -33,36 +33,36 @@ unsafe extern "system" fn procedure(
             // Tokens are read per paint: the palette follows a live theme
             // flip without caching anything that could go stale.
             let t = crate::theme::tokens();
-            crate::drawing::rounded(dc, bounds, 16, t.card, t.stroke);
+            crate::drawing::rounded(dc, bounds, 10, t.card, t.stroke);
             if !pointer.is_null() {
                 let state = unsafe { &*pointer };
                 let s = |value| value * state.dpi as i32 / 96;
                 crate::drawing::label(
                     dc,
-                    Rect::new(s(20), s(12), client.right - s(20), s(42)),
+                    Rect::new(s(14), s(8), client.right - s(14), s(28)),
                     "isolmaSS",
-                    s(20),
+                    s(15),
                     t.text,
                     false,
                 );
                 crate::drawing::label(
                     dc,
-                    Rect::new(s(20), s(40), client.right - s(20), s(62)),
+                    Rect::new(s(14), s(28), client.right - s(14), s(46)),
                     "Capture. Annotate. Done.",
-                    s(12),
+                    s(11),
                     t.text_secondary,
                     false,
                 );
                 crate::drawing::label(
                     dc,
                     Rect::new(
-                        s(20),
-                        state.recent_top - s(28),
-                        client.right - s(20),
+                        s(14),
+                        state.recent_top - s(20),
+                        client.right - s(14),
                         state.recent_top,
                     ),
                     "RECENT CAPTURES",
-                    s(11),
+                    s(10),
                     t.text_secondary,
                     false,
                 );
@@ -70,13 +70,13 @@ unsafe extern "system" fn procedure(
                     crate::drawing::label(
                         dc,
                         Rect::new(
-                            s(20),
+                            s(14),
                             state.recent_top,
-                            client.right - s(20),
-                            state.recent_top + s(38),
+                            client.right - s(14),
+                            state.recent_top + s(26),
                         ),
                         "Your next screenshot will appear here",
-                        s(12),
+                        s(11),
                         t.text_secondary,
                         false,
                     );
@@ -84,13 +84,13 @@ unsafe extern "system" fn procedure(
                 crate::drawing::label(
                     dc,
                     Rect::new(
-                        s(20),
-                        client.bottom - s(28),
-                        client.right - s(20),
-                        client.bottom - s(4),
+                        s(14),
+                        client.bottom - s(20),
+                        client.right - s(14),
+                        client.bottom - s(2),
                     ),
                     concat!("Version ", env!("CARGO_PKG_VERSION"), " · MIT"),
-                    s(11),
+                    s(10),
                     t.text_secondary,
                     false,
                 );
@@ -127,11 +127,11 @@ unsafe extern "system" fn procedure(
                 crate::drawing::rounded(
                     item.hDC,
                     bounds.inflate(-1, -1),
-                    12,
+                    8,
                     fill,
                     if focused { t.accent } else { fill },
                 );
-                let padding = 14 * state.dpi as i32 / 96;
+                let padding = 10 * state.dpi as i32 / 96;
                 crate::drawing::label(
                     item.hDC,
                     Rect::new(
@@ -141,7 +141,7 @@ unsafe extern "system" fn procedure(
                         bounds.bottom,
                     ),
                     label,
-                    14 * state.dpi as i32 / 96,
+                    12 * state.dpi as i32 / 96,
                     if primary { t.accent_text } else { t.text },
                     false,
                 );
@@ -233,12 +233,12 @@ pub(super) fn show(
         );
     }
     // Compact the palette only when the monitor cannot accommodate its full logical height.
-    let logical_height = 70 + 4 * 44 + 34 + recent.len().max(1) as i32 * 38 + 50 + 28;
+    let logical_height = 52 + 4 * 30 + 24 + recent.len().max(1) as i32 * 26 + 36 + 20;
     dpi = dpi
         .min(((info.rcWork.bottom - info.rcWork.top - 16).max(1) * 96 / logical_height) as u32)
         .max(48);
     let s = |value| value * dpi as i32 / 96;
-    let width = s(330).min((info.rcWork.right - info.rcWork.left - 16).max(1));
+    let width = s(260).min((info.rcWork.right - info.rcWork.left - 16).max(1));
     let height = s(logical_height);
     let left = (point.x - width).clamp(
         info.rcWork.left + 8,
@@ -273,7 +273,7 @@ pub(super) fn show(
         rows,
         selected: None,
         dpi,
-        recent_top: s(70 + 4 * 44 + 34),
+        recent_top: s(52 + 4 * 30 + 24),
     });
     let hwnd = unsafe {
         CreateWindowExW(
@@ -299,13 +299,13 @@ pub(super) fn show(
             state.as_mut() as *mut MenuState as isize,
         );
     }
-    let mut y = s(70);
+    let mut y = s(52);
     for (index, (label, _)) in state.rows.iter().enumerate() {
         if index == 4 {
             y = state.recent_top;
         }
         if index == state.rows.len() - 1 {
-            y = height - s(78);
+            y = height - s(56);
         }
         let label: Vec<u16> = label.encode_utf16().chain(Some(0)).collect();
         unsafe {
@@ -314,17 +314,17 @@ pub(super) fn show(
                 w!("BUTTON"),
                 PCWSTR(label.as_ptr()),
                 WS_VISIBLE | WS_CHILD | WS_TABSTOP | WINDOW_STYLE(BS_OWNERDRAW as u32),
-                s(10),
+                s(8),
                 y,
-                width - s(20),
-                s(if index < 4 { 40 } else { 36 }),
+                width - s(16),
+                s(if index < 4 { 28 } else { 24 }),
                 hwnd,
                 HMENU((100 + index) as *mut _),
                 None,
                 None,
             )?;
         }
-        y += s(if index < 4 { 44 } else { 38 });
+        y += s(if index < 4 { 30 } else { 26 });
     }
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOW);

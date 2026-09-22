@@ -2,7 +2,7 @@
 
 A small, native Windows screenshot editor written in Rust. Capture a region or a window, annotate it, then copy or save it. Screenshots stay on your computer; the optional update check contacts GitHub.
 
-Version **0.3.0** introduces a modern light interface across Settings, the editor toolbar, the tray command menu, and application dialogs. A single Windows 11 Fluent token module (`src/theme.rs`) drives the palette (the current user's system accent color, light/dark sets) and the Segoe UI type scale (14 px body, 12 px section labels, 20 px titles); labeled Save/Copy actions remain. No web runtime or new external package was added.
+Version **0.3.0** introduces a compact, modern interface across Settings, the editor toolbar, the tray command menu, and application dialogs. A single Windows 11 Fluent token module (`src/theme.rs`) drives the palette (the current user's system accent color, light/dark sets) and the Segoe UI Variable type scale (12 px body, 11 px section labels, 15 px titles) with compact 26 px controls; labeled Save/Copy actions remain. No web runtime or new external package was added.
 
 ## Capture and edit
 
@@ -12,7 +12,7 @@ Version **0.3.0** introduces a modern light interface across Settings, the edito
 4. Add rectangles, arrows, pen strokes, text, blur, or opaque redaction. Use **Select** to edit existing annotations.
 5. Choose **Copy** or **Save**. The exported image excludes the toolbar, selection frame, handles, caret, magnifier, and unfinished drawing previews.
 
-The editor toolbar uses the selected monitor's work area and DPI. Buttons are 36 px tall with Fluent 4/8 px corner radii and Segoe Fluent Icons glyphs (shared MDL2 codepoints, so older Windows still renders them). On short or narrow work areas it switches to a grid so all commands remain reachable. Full-frame presentation is retained for compatibility with applications that hook GDI, including RTSS.
+The editor toolbar uses the selected monitor's work area and DPI. Buttons are 28 px tall with Fluent 4/6 px corner radii and Segoe Fluent Icons glyphs (shared MDL2 codepoints, so older Windows still renders them). On short or narrow work areas it switches to a grid so all commands remain reachable. Full-frame presentation is retained for compatibility with applications that hook GDI, including RTSS.
 
 **Redact** covers pixels with an opaque fill, including annotations added underneath it later. Blur is a visual mosaic effect and should not be used to remove confidential information.
 
@@ -43,13 +43,13 @@ A non-PrintScreen shortcut that is unavailable falls back to Ctrl+Shift+S with a
 
 ## Settings and tray menu
 
-Settings has **General** and **Editor and system** views. It opens at a compact 800 x 600 (96-DPI base) using the shared Fluent metrics, uses the Windows 11 Mica backdrop with a dark title bar on supported systems (build 22621+), and follows the system light/dark theme live. Unsaved choices survive navigation, and the window resizes, fits the monitor, scrolls when needed, and brings keyboard focus into view. Native buttons, radio choices and checkboxes retain keyboard/accessibility semantics beneath the custom drawing.
+Settings has **General** and **Editor** views. It opens at a compact 660 x 580 (96-DPI base) with a 108 px navigation rail, a pinned header and footer, and a scrollable settings column that clips its own contents, so scrolled cards and their controls move together and can never draw over the navigation, header or Save/Cancel band. Unsaved choices survive navigation. The window enforces a minimum size, keeps the Windows 11 Mica window backdrop with a dark title bar on supported systems (build 22621+), paints its page opaquely, follows the system light/dark theme live, and brings keyboard focus into view. Native buttons, radio choices and checkboxes retain keyboard/accessibility semantics beneath the custom drawing.
 
 Settings controls include the capture shortcut and delay, PNG/JPEG and JPEG quality, destination folder, annotation defaults, window snapping, whether the editor closes after an action, startup registration, notifications, and update preferences. PNG disables JPEG quality controls. Save failures keep the window open and show an error. Startup registration is restored to its exact previous value if saving settings fails.
 
 `--settings` routes to the running daemon. If none exists, it starts the daemon and opens Settings. A request received during editing waits for the current session to finish. Saved hotkey and update changes are applied to the daemon; editor tool/color/stroke changes are merged into the latest configuration once at the end of a session.
 
-The tray command menu offers Capture now, Settings, Open screenshot folder, Check for updates, five recent captures, and Quit. Its palette uses the shared Fluent tokens and follows the system light/dark theme live while open. Recent files are cached; directory refresh runs in the background at most every 30 seconds. A refresh scans for at most two seconds between filesystem calls, so the list is best-effort in large or slow folders. Successful saves update it immediately. Quit and update installation wait for an active editing/settings session to finish. Control commands are deduplicated in a queue bounded at 16 entries, so a command issued during a nested dialog is delivered right after that dialog returns; if the queue fills, the dropped command is recorded in diagnostics.
+The tray command menu offers Capture now, Settings, Open screenshot folder, Check for updates, five recent captures, and Quit in a compact 260 px palette with 28 px rows. Its palette uses the shared Fluent tokens and follows the system light/dark theme live while open. Recent files are cached; directory refresh runs in the background at most every 30 seconds. A refresh scans for at most two seconds between filesystem calls, so the list is best-effort in large or slow folders. Successful saves update it immediately. Quit and update installation wait for an active editing/settings session to finish. Control commands are deduplicated in a queue bounded at 16 entries, so a command issued during a nested dialog is delivered right after that dialog returns; if the queue fills, the dropped command is recorded in diagnostics.
 
 ## Files, configuration and privacy
 

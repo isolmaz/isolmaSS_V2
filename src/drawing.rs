@@ -121,7 +121,7 @@ fn with_object<T>(
 }
 
 pub fn with_font<T>(hdc: HDC, height: i32, weight: i32, action: impl FnOnce() -> T) -> T {
-    with_font_face(hdc, "Segoe UI", height, weight, action)
+    with_font_face(hdc, crate::theme::ui_face(), height, weight, action)
 }
 
 /// Like [`with_font`], but for an arbitrary typeface — e.g.

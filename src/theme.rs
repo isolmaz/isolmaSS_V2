@@ -204,27 +204,99 @@ pub fn tokens_for(theme: Theme) -> Tokens {
 }
 
 // ---------------------------------------------------------------------------
-// Typography — Segoe UI pixel sizes and weights (GDI takes pixels here).
+// Typography — Segoe UI Variable pixel sizes and weights (GDI takes pixels).
+// The compact scale keeps a 15 px page title over 12 px body text, so every
+// surface stays dense without losing the Fluent hierarchy.
 // ---------------------------------------------------------------------------
-pub const FONT_TITLE_PX: i32 = 20;
-pub const FONT_BODY_PX: i32 = 14;
-pub const FONT_SECTION_PX: i32 = 12;
+pub const FONT_TITLE_PX: i32 = 15;
+pub const FONT_BODY_PX: i32 = 12;
+pub const FONT_SECTION_PX: i32 = 11;
 pub const FONT_WEIGHT_TITLE: i32 = 600;
 pub const FONT_WEIGHT_SECTION: i32 = 600;
 
+/// The modern Windows 11 UI face, with a Windows 10 fallback.
+///
+/// GDI silently substitutes a different face when the requested one is not
+/// installed, so the choice is probed once and cached: asking for
+/// "Segoe UI Variable Text" on Windows 10 would otherwise fall back to an
+/// arbitrary default instead of the classic Segoe UI.
+pub fn ui_face() -> &'static str {
+    use std::sync::LazyLock;
+    static FACE: LazyLock<&'static str> = LazyLock::new(|| {
+        const MODERN: &str = "Segoe UI Variable Text";
+        const CLASSIC: &str = "Segoe UI";
+        if face_installed(MODERN) {
+            MODERN
+        } else {
+            CLASSIC
+        }
+    });
+    *FACE
+}
+
+/// True when `face` resolves to itself on this system. GDI returns the
+/// substituted face name, which is the only reliable installation probe.
+fn face_installed(face: &str) -> bool {
+    use windows::Win32::Graphics::Gdi::{
+        CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateCompatibleDC, CreateFontW, DEFAULT_CHARSET,
+        DEFAULT_PITCH, DeleteDC, DeleteObject, FW_NORMAL, GetTextFaceW, HGDIOBJ,
+        OUT_DEFAULT_PRECIS, SelectObject,
+    };
+    let name: Vec<u16> = face.encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        let dc = CreateCompatibleDC(None);
+        if dc.is_invalid() {
+            return false;
+        }
+        let font = CreateFontW(
+            -12,
+            0,
+            0,
+            0,
+            FW_NORMAL.0 as i32,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET.0 as u32,
+            OUT_DEFAULT_PRECIS.0 as u32,
+            CLIP_DEFAULT_PRECIS.0 as u32,
+            CLEARTYPE_QUALITY.0 as u32,
+            DEFAULT_PITCH.0 as u32,
+            windows::core::PCWSTR(name.as_ptr()),
+        );
+        if font.is_invalid() {
+            let _ = DeleteDC(dc);
+            return false;
+        }
+        let previous = SelectObject(dc, HGDIOBJ(font.0));
+        let mut buffer = [0u16; 64];
+        let length = GetTextFaceW(dc, Some(&mut buffer));
+        if !previous.is_invalid() {
+            SelectObject(dc, previous);
+        }
+        let _ = DeleteObject(HGDIOBJ(font.0));
+        let _ = DeleteDC(dc);
+        if length <= 1 {
+            return false;
+        }
+        let selected = String::from_utf16_lossy(&buffer[..(length as usize - 1).min(buffer.len())]);
+        selected.eq_ignore_ascii_case(face)
+    }
+}
+
 // ---------------------------------------------------------------------------
-// Metrics — Fluent layout grid, all values in 96-DPI pixels.
+// Metrics — compact Fluent layout grid, all values in 96-DPI pixels.
 // ---------------------------------------------------------------------------
 /// Corner radius for cards and panels.
-pub const RADIUS_CARD: i32 = 8;
+pub const RADIUS_CARD: i32 = 6;
 /// Base spacing grid.
 pub const GRID: i32 = 4;
-/// Standard control height (buttons, inputs).
-pub const CONTROL_HEIGHT: i32 = 32;
+/// Standard compact control height (buttons, inputs, chips).
+pub const CONTROL_HEIGHT: i32 = 26;
 /// Page margin around window content.
-pub const PAGE_MARGIN: i32 = 24;
+pub const PAGE_MARGIN: i32 = 16;
 /// Inner padding inside a card.
-pub const CARD_PADDING: i32 = 16;
+pub const CARD_PADDING: i32 = 12;
 
 // ---------------------------------------------------------------------------
 // Cache control — live theme flips and accent broadcasts.

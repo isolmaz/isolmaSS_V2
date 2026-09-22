@@ -9,19 +9,19 @@ impl OverlayState {
         let scale = |value: i32| (value * self.dpi as i32 / 96).max(1);
         let tokens = crate::theme::tokens();
         let label = format!("{} × {} px", selection.width(), selection.height());
-        let label_width = scale(144).min(viewport.width().max(1));
-        let label_height = scale(28);
+        let label_width = scale(104).min(viewport.width().max(1));
+        let label_height = scale(20);
         let x = selection.left.clamp(
             viewport.left,
             (viewport.right - label_width).max(viewport.left),
         );
-        let y = (selection.top - label_height - scale(6)).clamp(
+        let y = (selection.top - label_height - scale(4)).clamp(
             viewport.top,
             (viewport.bottom - label_height).max(viewport.top),
         );
         let bounds = Rect::new(x, y, x + label_width, y + label_height);
-        crate::drawing::rounded(self.mem_dc, bounds, scale(8), tokens.card, tokens.stroke);
-        crate::drawing::label(self.mem_dc, bounds, &label, scale(12), tokens.text, true);
+        crate::drawing::rounded(self.mem_dc, bounds, scale(6), tokens.card, tokens.stroke);
+        crate::drawing::label(self.mem_dc, bounds, &label, scale(11), tokens.text, true);
         if self.mode != OverlayMode::DraggingSelection {
             return;
         }
@@ -38,24 +38,24 @@ impl OverlayState {
                     .copy_from_slice(&self.capture.original[source..source + 4]);
             }
         }
-        let size = scale(110);
-        let left = (self.pointer.0 + scale(24)).clamp(
+        let size = scale(76);
+        let left = (self.pointer.0 + scale(16)).clamp(
             viewport.left,
-            (viewport.right - size - scale(12)).max(viewport.left),
+            (viewport.right - size - scale(8)).max(viewport.left),
         );
-        let top = (self.pointer.1 + scale(24)).clamp(
+        let top = (self.pointer.1 + scale(16)).clamp(
             viewport.top,
-            (viewport.bottom - size - scale(38)).max(viewport.top),
+            (viewport.bottom - size - scale(26)).max(viewport.top),
         );
         crate::drawing::rounded(
             self.mem_dc,
             Rect::new(
-                left - scale(4),
-                top - scale(4),
-                left + size + scale(4),
-                top + size + scale(30),
+                left - scale(3),
+                top - scale(3),
+                left + size + scale(3),
+                top + size + scale(22),
             ),
-            scale(10),
+            scale(8),
             tokens.card,
             tokens.stroke,
         );
@@ -120,9 +120,14 @@ impl OverlayState {
         });
         crate::drawing::label(
             self.mem_dc,
-            Rect::new(left, top + size, left + size, top + size + scale(26)),
+            Rect::new(
+                left - scale(3),
+                top + size,
+                left + size + scale(3),
+                top + size + scale(20),
+            ),
             "Pixel precision",
-            scale(11),
+            scale(10),
             tokens.text_secondary,
             true,
         );

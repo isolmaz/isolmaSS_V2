@@ -42,9 +42,6 @@ pub struct SettingsWindowState {
     heading_font: windows::Win32::Graphics::Gdi::HFONT,
     background_brush: HBRUSH,
     card_brush: HBRUSH,
-    /// True while the Mica backdrop owns the page background: the client
-    /// area must stay unpainted so the backdrop shows through.
-    mica_active: bool,
 }
 
 impl SettingsWindowState {
@@ -105,19 +102,23 @@ const ID_DELAY_FIRST: i32 = 500;
 const ID_FORMAT_PNG: i32 = 600;
 const ID_FORMAT_JPEG: i32 = 601;
 const ID_QUALITY_FIRST: i32 = 610;
-const SETTINGS_WIDTH: i32 = 800;
-const SETTINGS_HEIGHT: i32 = 600;
-/// Left edge of the content column: page margin + sidebar band + sidebar gap.
-const CONTENT_LEFT: i32 = 184;
-/// Right edge of the content column — the window keeps the same 60 px right
-/// band the 960-wide original had (960 - 900), so the horizontal scroll extent
-/// (`CONTENT_RIGHT` + page margin = 764) still fits the client width even when
-/// the vertical scrollbar is visible.
-const CONTENT_RIGHT: i32 = 740;
-/// Scrollable content height: footer band bottom (664 + 32) plus the bottom
-/// page margin — the same footer + bottom-air relationship the old
-/// `754 = 740 + 14` had, with the margin snapped to `theme::GRID`.
-const CONTENT_HEIGHT: i32 = 712;
+const SETTINGS_WIDTH: i32 = 660;
+const SETTINGS_HEIGHT: i32 = 580;
+/// Smallest window the layout accepts before it has to scroll.
+const SETTINGS_MIN_WIDTH: i32 = 520;
+const SETTINGS_MIN_HEIGHT: i32 = 430;
+/// Sidebar band width (brand, navigation, version block).
+const SIDEBAR_WIDTH: i32 = 108;
+/// Left edge of the content column: page margin + sidebar band + gap.
+const CONTENT_LEFT: i32 = 140;
+/// Card column width inside the scroll container.
+const CONTENT_WIDTH: i32 = 480;
+/// Scroll extent of the tallest view, in scroll-container design pixels.
+const CONTENT_HEIGHT: i32 = 416;
+/// Id of the scroll container child window that owns the settings cards.
+const ID_SCROLL_CONTAINER: i32 = 900;
+/// The scroll container is a real cluster: pages are painted at its origin.
+const SCROLL_CLASS_NAME: PCWSTR = w!("isolmaSS_SettingsScrollClass");
 fn color_background() -> COLORREF {
     crate::theme::tokens().page
 }
@@ -222,7 +223,7 @@ fn move_control(hwnd: HWND, id: i32, x: i32, y: i32, width: i32, height: i32, dp
 }
 
 fn create_font_px(dpi: u32, pixels: i32, weight: i32) -> windows::Win32::Graphics::Gdi::HFONT {
-    let face = wide_string("Segoe UI");
+    let face = wide_string(crate::theme::ui_face());
     let pixel_height = pixels * dpi as i32 / 96;
     unsafe {
         windows::Win32::Graphics::Gdi::CreateFontW(
@@ -270,8 +271,7 @@ fn create_heading_font(dpi: u32) -> windows::Win32::Graphics::Gdi::HFONT {
 
 fn set_controls_font(hwnd: HWND, font: windows::Win32::Graphics::Gdi::HFONT) {
     for id in 100..=900 {
-        if let Ok(child) = unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgItem(hwnd, id) }
-        {
+        if let Some(child) = control(hwnd, id) {
             unsafe {
                 windows::Win32::UI::WindowsAndMessaging::SendMessageW(
                     child,
@@ -285,7 +285,7 @@ fn set_controls_font(hwnd: HWND, font: windows::Win32::Graphics::Gdi::HFONT) {
 }
 
 fn set_control_font(hwnd: HWND, id: i32, font: windows::Win32::Graphics::Gdi::HFONT) {
-    if let Ok(control) = unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgItem(hwnd, id) } {
+    if let Some(control) = control(hwnd, id) {
         unsafe {
             windows::Win32::UI::WindowsAndMessaging::SendMessageW(
                 control,
@@ -297,43 +297,57 @@ fn set_control_font(hwnd: HWND, id: i32, font: windows::Win32::Graphics::Gdi::HF
     }
 }
 
+/// Card rectangles in scroll-container design pixels: x runs from the card
+/// column's left edge, y from the top of the scrollable content. Every card
+/// carries `theme::CARD_PADDING` (12) of inner padding and a 16 px section
+/// label, so the row rhythm below is 12 / 16 / 6 / 26.
 fn card_rects(view: SettingsView) -> &'static [(i32, i32, i32, i32)] {
-    // Every card sits between CONTENT_LEFT and CONTENT_RIGHT; tops/bottoms are
-    // GRID-snapped and carry `theme::CARD_PADDING` (16) of inner padding.
+    const W: i32 = CONTENT_WIDTH;
     match view {
-        SettingsView::Simple => &[
-            (CONTENT_LEFT, 100, CONTENT_RIGHT, 252),
-            (CONTENT_LEFT, 268, CONTENT_RIGHT, 460),
-            (CONTENT_LEFT, 476, CONTENT_RIGHT, 612),
-        ],
-        SettingsView::Advanced => &[
-            (CONTENT_LEFT, 100, CONTENT_RIGHT, 276),
-            (CONTENT_LEFT, 292, CONTENT_RIGHT, 428),
-            (CONTENT_LEFT, 444, CONTENT_RIGHT, 648),
-        ],
+        SettingsView::Simple => &[(0, 0, W, 104), (0, 116, W, 252), (0, 264, W, 368)],
+        SettingsView::Advanced => &[(0, 0, W, 104), (0, 116, W, 220), (0, 232, W, 404)],
     }
 }
 
+/// Paints the settings window's own surface: the page behind the sidebar,
+/// the header and the footer. The cards belong to the scroll container.
 fn paint_settings_surface(hwnd: HWND, state: &SettingsWindowState, hdc: HDC) {
     let mut client = RECT::default();
     unsafe {
         let _ = GetClientRect(hwnd, &mut client);
-        // Mica: the page itself stays transparent so the backdrop shows
-        // through; cards and controls still paint opaquely.
-        if !state.mica_active {
-            let _ = FillRect(hdc, &client, state.background_brush);
-        }
+        let _ = FillRect(hdc, &client, state.background_brush);
     }
+}
 
+/// The state of the settings window that owns `container`.
+///
+/// The container is a plain child of this window and never outlives it, so the
+/// window data pointer is valid for every container message.
+fn scroll_parent_state(container: HWND) -> Option<&'static SettingsWindowState> {
+    let parent = unsafe { windows::Win32::UI::WindowsAndMessaging::GetParent(container) }.ok()?;
+    let pointer = unsafe { GetWindowLongPtrW(parent, GWLP_USERDATA) } as *const SettingsWindowState;
+    unsafe { pointer.as_ref() }
+}
+
+/// Paints the scroll container: the page plus the cards of the active view,
+/// shifted by the container's own scroll offset so the child controls it also
+/// repositions stay aligned with their card.
+fn paint_scroll_surface(container: HWND, hdc: HDC) {
+    let Some(state) = scroll_parent_state(container) else {
+        return;
+    };
+    let mut client = RECT::default();
     unsafe {
+        let _ = GetClientRect(container, &mut client);
+        let _ = FillRect(hdc, &client, state.background_brush);
         let _ = windows::Win32::Graphics::Gdi::SetViewportOrgEx(
             hdc,
             -windows::Win32::UI::WindowsAndMessaging::GetScrollPos(
-                hwnd,
+                container,
                 windows::Win32::UI::WindowsAndMessaging::SB_HORZ,
             ),
             -windows::Win32::UI::WindowsAndMessaging::GetScrollPos(
-                hwnd,
+                container,
                 windows::Win32::UI::WindowsAndMessaging::SB_VERT,
             ),
             None,
@@ -362,6 +376,110 @@ fn paint_settings_surface(hwnd: HWND, state: &SettingsWindowState, hdc: HDC) {
     }
 }
 
+/// Registers the scroll container class once per process.
+fn register_scroll_class() -> Result<()> {
+    static REGISTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if REGISTERED.load(std::sync::atomic::Ordering::Acquire) {
+        return Ok(());
+    }
+    let class = WNDCLASSEXW {
+        cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
+        style: windows::Win32::UI::WindowsAndMessaging::CS_HREDRAW
+            | windows::Win32::UI::WindowsAndMessaging::CS_VREDRAW,
+        lpfnWndProc: Some(scroll_wnd_proc),
+        hInstance: HINSTANCE::default(),
+        ..Default::default()
+    };
+    let class = WNDCLASSEXW {
+        lpszClassName: SCROLL_CLASS_NAME,
+        ..class
+    };
+    let atom = unsafe { windows::Win32::UI::WindowsAndMessaging::RegisterClassExW(&class) };
+    if atom == 0
+        && unsafe { GetLastError() } != windows::Win32::Foundation::ERROR_CLASS_ALREADY_EXISTS
+    {
+        return Err(windows::core::Error::from_win32());
+    }
+    REGISTERED.store(true, std::sync::atomic::Ordering::Release);
+    Ok(())
+}
+
+/// Window procedure for the scroll container.
+///
+/// The container owns the vertical/horizontal bars, paints the cards and clips
+/// its controls to its own rectangle, so scrolled-out content can never draw
+/// over the pinned header, sidebar or footer. Controls keep reporting to the
+/// settings window: notifications are forwarded unchanged.
+unsafe extern "system" fn scroll_wnd_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    use windows::Win32::UI::WindowsAndMessaging::*;
+    match message {
+        WM_PAINT => {
+            let mut paint = PAINTSTRUCT::default();
+            let hdc = unsafe { BeginPaint(hwnd, &mut paint) };
+            paint_scroll_surface(hwnd, hdc);
+            unsafe {
+                let _ = EndPaint(hwnd, &paint);
+            }
+            LRESULT(0)
+        }
+        WM_ERASEBKGND => {
+            if let Some(state) = scroll_parent_state(hwnd) {
+                let mut client = RECT::default();
+                unsafe {
+                    let _ = GetClientRect(hwnd, &mut client);
+                    let _ = FillRect(HDC(wparam.0 as *mut _), &client, state.background_brush);
+                }
+            }
+            LRESULT(1)
+        }
+        WM_SIZE => {
+            // The container is stretched by its parent; re-measure the content
+            // against the new client area so the bars stay accurate.
+            if let Some(state) = scroll_parent_state(hwnd) {
+                update_container_scrollbars(hwnd, state.dpi);
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEWHEEL => {
+            scroll_container_by(hwnd, false, -((wparam.0 >> 16) as u16 as i16 as i32) / 2);
+            LRESULT(0)
+        }
+        WM_VSCROLL | WM_HSCROLL => {
+            let horizontal = message == WM_HSCROLL;
+            let bar = if horizontal { SB_HORZ } else { SB_VERT };
+            let mut info = SCROLLINFO {
+                cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
+                fMask: SIF_ALL,
+                ..Default::default()
+            };
+            unsafe {
+                let _ = GetScrollInfo(hwnd, bar, &mut info);
+            }
+            let delta = match wparam.0 as u16 as i32 {
+                0 => -40,
+                1 => 40,
+                2 => -(info.nPage as i32),
+                3 => info.nPage as i32,
+                4 | 5 => info.nTrackPos - info.nPos,
+                _ => 0,
+            };
+            scroll_container_by(hwnd, horizontal, delta);
+            LRESULT(0)
+        }
+        WM_COMMAND | WM_NOTIFY | WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
+            let parent = unsafe { windows::Win32::UI::WindowsAndMessaging::GetParent(hwnd) }
+                .unwrap_or_default();
+            LRESULT(unsafe { SendMessageW(parent, message, wparam, lparam) }.0)
+        }
+        _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
+    }
+}
+
 fn draw_settings_button(
     draw: &windows::Win32::UI::Controls::NMCUSTOMDRAW,
     state: &SettingsWindowState,
@@ -376,9 +494,18 @@ fn draw_settings_button(
         == BST_CHECKED.0 as isize;
     let primary = id == ID_SAVE;
     let toggle = (ID_WINDOW_SNAP..=ID_AUTO_INSTALL).contains(&id);
+    // Color presets are swatch circles: the square chip stays invisible so the
+    // circle carries the state, and a ring marks the selected swatch.
+    let swatch = (ID_COLOR_FIRST..ID_COLOR_FIRST + 8).contains(&id);
     let disabled = draw.uItemState.contains(CDIS_DISABLED);
     let hot = draw.uItemState.contains(CDIS_HOT) || draw.uItemState.contains(CDIS_SELECTED);
-    let fill = if primary {
+    let fill = if swatch {
+        if hot {
+            color_control_hover()
+        } else {
+            color_card()
+        }
+    } else if primary {
         color_accent()
     } else if checked && !toggle {
         color_tint()
@@ -389,7 +516,9 @@ fn draw_settings_button(
     } else {
         color_control_fill()
     };
-    let border = if draw.uItemState.contains(CDIS_FOCUS) {
+    let border = if swatch {
+        fill
+    } else if draw.uItemState.contains(CDIS_FOCUS) {
         if primary {
             // An accent ring would blend into an accent-filled control;
             // ring with the on-accent color so focus stays visible.
@@ -433,54 +562,113 @@ fn draw_settings_button(
     let mut label = [0u16; 256];
     let length = unsafe { GetWindowTextW(draw.hdr.hwndFrom, &mut label) };
     let mut text_rect = rect;
-    text_rect.left += scale(12, dpi);
-    text_rect.right -= scale(12, dpi);
-    if (ID_COLOR_FIRST..ID_COLOR_FIRST + 8).contains(&id) {
-        let color =
-            crate::annotation::bgra_to_colorref(PRESET_COLORS[(id - ID_COLOR_FIRST) as usize]);
-        let x = rect.left + scale(12, dpi);
-        let y = (rect.top + rect.bottom - scale(16, dpi)) / 2;
+    text_rect.left += scale(10, dpi);
+    text_rect.right -= scale(10, dpi);
+    if swatch {
+        let source = PRESET_COLORS[(id - ID_COLOR_FIRST) as usize];
+        let color = crate::annotation::bgra_to_colorref(source);
+        let diameter = scale(16, dpi);
+        let x = (rect.left + rect.right - diameter) / 2;
+        let y = (rect.top + rect.bottom - diameter) / 2;
+        if checked {
+            let ring = scale(5, dpi);
+            crate::drawing::with_brush(hdc, color_accent(), || {
+                crate::drawing::with_pen(
+                    hdc,
+                    PS_SOLID,
+                    scale(1, dpi).max(1),
+                    color_accent(),
+                    || unsafe {
+                        let _ = Ellipse(
+                            hdc,
+                            x - ring,
+                            y - ring,
+                            x + diameter + ring,
+                            y + diameter + ring,
+                        );
+                    },
+                )
+            });
+        }
         crate::drawing::with_brush(hdc, color, || {
-            crate::drawing::with_pen(hdc, PS_SOLID, 1, color_border(), || unsafe {
-                let _ = Ellipse(hdc, x, y, x + scale(16, dpi), y + scale(16, dpi));
-            })
+            crate::drawing::with_pen(
+                hdc,
+                PS_SOLID,
+                scale(1, dpi).max(1),
+                color_border(),
+                || unsafe {
+                    let _ = Ellipse(hdc, x, y, x + diameter, y + diameter);
+                },
+            )
         });
-        text_rect.left += scale(22, dpi);
+        if checked {
+            // Ink against the swatch color itself, so this pair stays
+            // theme-independent like the toolbar swatches.
+            let luma = source[0] as u32 + source[1] as u32 + source[2] as u32;
+            let check = if luma > 450 {
+                COLORREF(0x2a211b)
+            } else {
+                COLORREF(0xffffff)
+            };
+            crate::drawing::icon(
+                hdc,
+                crate::capture::Rect::new(x, y, x + diameter, y + diameter),
+                0xe73e,
+                scale(11, dpi),
+                check,
+                true,
+            );
+        }
+        return;
     }
     if toggle {
-        let x = rect.right - scale(48, dpi);
-        let y = (rect.top + rect.bottom - scale(22, dpi)) / 2;
-        let color = if checked {
+        // Compact Fluent switch: 32 x 18 track with a 12 px thumb.
+        let track_width = scale(32, dpi);
+        let track_height = scale(18, dpi);
+        let x = rect.right - track_width - scale(10, dpi);
+        let y = (rect.top + rect.bottom - track_height) / 2;
+        let track = if checked {
             color_accent()
         } else {
             color_control_fill()
         };
-        crate::drawing::with_brush(hdc, color, || {
-            crate::drawing::with_pen(hdc, PS_SOLID, 1, color, || unsafe {
-                let _ = RoundRect(
-                    hdc,
-                    x,
-                    y,
-                    x + scale(40, dpi),
-                    y + scale(22, dpi),
-                    scale(22, dpi),
-                    scale(22, dpi),
-                );
-            })
+        crate::drawing::with_brush(hdc, track, || {
+            crate::drawing::with_pen(
+                hdc,
+                PS_SOLID,
+                scale(1, dpi).max(1),
+                if checked {
+                    color_accent()
+                } else {
+                    color_border()
+                },
+                || unsafe {
+                    let _ = RoundRect(
+                        hdc,
+                        x,
+                        y,
+                        x + track_width,
+                        y + track_height,
+                        track_height,
+                        track_height,
+                    );
+                },
+            )
         });
-        let knob = x + scale(if checked { 21 } else { 3 }, dpi);
-        crate::drawing::with_brush(hdc, color_card(), || {
-            crate::drawing::with_pen(hdc, PS_SOLID, 1, color_card(), || unsafe {
+        let thumb = x + scale(if checked { 17 } else { 3 }, dpi);
+        let thumb_color = if checked { color_card() } else { color_muted() };
+        crate::drawing::with_brush(hdc, thumb_color, || {
+            crate::drawing::with_pen(hdc, PS_SOLID, 1, thumb_color, || unsafe {
                 let _ = Ellipse(
                     hdc,
-                    knob,
+                    thumb,
                     y + scale(3, dpi),
-                    knob + scale(16, dpi),
-                    y + scale(19, dpi),
+                    thumb + scale(12, dpi),
+                    y + scale(15, dpi),
                 );
             })
         });
-        text_rect.right = x - scale(12, dpi);
+        text_rect.right = x - scale(10, dpi);
     }
     crate::drawing::with_font(
         hdc,
@@ -526,128 +714,215 @@ fn control_uses_card(id: i32) -> bool {
     )
 }
 
-fn layout_controls(hwnd: HWND, dpi: u32) {
-    use crate::theme::{CARD_PADDING, PAGE_MARGIN};
-    // Every coordinate below is 96-DPI design pixels snapped to theme::GRID (4).
-    const ROW: i32 = crate::theme::CONTROL_HEIGHT;
-    const MARGIN: i32 = PAGE_MARGIN;
-    const SIDE: i32 = 144; // sidebar band (was 180)
-    const GAP: i32 = crate::theme::GRID * 4; // sidebar -> content column
-    const LBL: i32 = 96; // property label column
-    const COL_W: i32 = CONTENT_RIGHT - CONTENT_LEFT;
-    const CTL: i32 = CONTENT_LEFT + CARD_PADDING; // first control x (200)
-    const VAL: i32 = CTL + LBL + GAP; // value/chip column x (312)
-    const CTL_W: i32 = CONTENT_RIGHT - CARD_PADDING - CTL;
-    // Sidebar: brand, subtitle, navigation, version block.
-    move_control(hwnd, 700, MARGIN, MARGIN, SIDE, 40, dpi);
-    move_control(hwnd, 709, MARGIN, 72, SIDE, 40, dpi);
-    move_control(hwnd, ID_VIEW_SIMPLE, MARGIN, 136, SIDE, ROW, dpi);
-    move_control(hwnd, ID_VIEW_ADVANCED, MARGIN, 176, SIDE, ROW, dpi);
-    move_control(hwnd, 718, MARGIN, 612, SIDE, 76, dpi);
-    // Content header (title band) shared by both views.
-    move_control(hwnd, 716, CONTENT_LEFT, MARGIN, COL_W, 40, dpi);
-    move_control(hwnd, 717, CONTENT_LEFT, 68, COL_W, 24, dpi);
-    // Capture card (General).
-    move_control(hwnd, 710, CTL, 116, CTL_W, 24, dpi);
-    move_control(hwnd, 701, CTL, 156, LBL, 24, dpi);
-    move_control(hwnd, ID_HOTKEY_PRINT, VAL, 148, 124, ROW, dpi);
-    move_control(hwnd, ID_HOTKEY_CTRL_SHIFT_S, VAL + 132, 148, 124, ROW, dpi);
-    move_control(hwnd, ID_HOTKEY_ALT_PRINT, VAL + 264, 148, 148, ROW, dpi);
-    move_control(hwnd, 705, CTL, 196, LBL, 40, dpi);
-    for i in 0..4 {
-        move_control(hwnd, ID_DELAY_FIRST + i, VAL + i * 104, 188, 96, ROW, dpi);
+/// Header band: page margin + title + subtitle + air below.
+const HEADER_BOTTOM: i32 = 68;
+/// Footer band: control row + page margin.
+const FOOTER_HEIGHT: i32 = 42;
+/// Air between the scroll container and the footer band.
+const FOOTER_GAP: i32 = 10;
+/// Property label column inside a card.
+const LABEL_WIDTH: i32 = 92;
+
+/// Design-space size of a window's client area (96-DPI pixels).
+fn client_design_size(hwnd: HWND, dpi: u32) -> (i32, i32) {
+    let mut client = RECT::default();
+    unsafe {
+        let _ = GetClientRect(hwnd, &mut client);
     }
-    // Saving card (General).
-    move_control(hwnd, 711, CTL, 284, CTL_W, 24, dpi);
-    move_control(hwnd, 702, CTL, 324, LBL, 24, dpi);
-    move_control(hwnd, ID_FOLDER_LABEL, VAL, 324, 276, 24, dpi);
-    move_control(hwnd, ID_BROWSE, 604, 316, 120, ROW, dpi);
-    move_control(hwnd, 706, CTL, 364, LBL, 24, dpi);
-    move_control(hwnd, ID_FORMAT_PNG, VAL, 356, 96, ROW, dpi);
-    move_control(hwnd, ID_FORMAT_JPEG, VAL + 104, 356, 96, ROW, dpi);
-    move_control(hwnd, 707, CTL, 404, LBL, 40, dpi);
-    for i in 0..3 {
-        move_control(
-            hwnd,
-            ID_QUALITY_FIRST + i,
-            VAL + i * 140,
-            396,
-            132,
-            ROW,
-            dpi,
-        );
-    }
-    // After capture card (General).
-    move_control(hwnd, 712, CTL, 492, CTL_W, 24, dpi);
-    move_control(hwnd, ID_WINDOW_SNAP, CTL, 524, CTL_W, ROW, dpi);
-    move_control(hwnd, ID_CLOSE_AFTER_ACTION, CTL, 564, CTL_W, ROW, dpi);
-    // Annotation defaults card (Editor and system).
-    move_control(hwnd, 713, CTL, 116, CTL_W, 24, dpi);
-    move_control(hwnd, 703, CTL, 156, LBL, 24, dpi);
-    for i in 0..8 {
-        move_control(
-            hwnd,
-            ID_COLOR_FIRST + i,
-            VAL + i % 4 * 104,
-            148 + i / 4 * 40,
-            96,
-            ROW,
-            dpi,
-        );
-    }
-    move_control(hwnd, 704, CTL, 236, LBL, 24, dpi);
-    for i in 0..3 {
-        move_control(
-            hwnd,
-            ID_THICKNESS_FIRST + i,
-            VAL + i * 140,
-            228,
-            132,
-            ROW,
-            dpi,
-        );
-    }
-    // Windows card (Editor and system).
-    move_control(hwnd, 714, CTL, 308, CTL_W, 24, dpi);
-    move_control(hwnd, ID_START_WITH_WINDOWS, CTL, 340, CTL_W, ROW, dpi);
-    move_control(hwnd, ID_NOTIFY_AFTER_SAVE, CTL, 380, CTL_W, ROW, dpi);
-    // Updates card (Editor and system).
-    move_control(hwnd, 715, CTL, 460, CTL_W, 24, dpi);
-    move_control(hwnd, ID_CHECK_UPDATES, CTL, 492, CTL_W, ROW, dpi);
-    move_control(hwnd, ID_AUTO_INSTALL, CTL, 532, CTL_W, ROW, dpi);
-    move_control(hwnd, ID_CHECK_UPDATE, CTL, 572, 148, ROW, dpi);
-    move_control(hwnd, 708, CTL + 164, 572, 360, 60, dpi);
-    // Footer band (both views).
-    move_control(hwnd, ID_CANCEL, 428, 664, 128, ROW, dpi);
-    move_control(hwnd, ID_SAVE, 568, 664, 172, ROW, dpi);
+    (
+        client.right * 96 / dpi as i32,
+        client.bottom * 96 / dpi as i32,
+    )
 }
 
-fn update_scrollbars(hwnd: HWND, dpi: u32) {
+/// Places the pinned chrome: sidebar, header and footer. None of it scrolls,
+/// so navigation and the Save/Cancel band stay put at every window size.
+fn layout_chrome(hwnd: HWND, dpi: u32) {
+    use crate::theme::{CONTROL_HEIGHT, PAGE_MARGIN};
+    let (width, height) = client_design_size(hwnd, dpi);
+    let row = CONTROL_HEIGHT;
+    let side = SIDEBAR_WIDTH;
+    let content_left = CONTENT_LEFT;
+    let content_right = (width - PAGE_MARGIN).max(content_left + 160);
+    // Sidebar: brand, subtitle, navigation, version block.
+    move_control(hwnd, 700, PAGE_MARGIN, PAGE_MARGIN, side, 20, dpi);
+    move_control(hwnd, 709, PAGE_MARGIN, PAGE_MARGIN + 24, side, 32, dpi);
+    move_control(
+        hwnd,
+        ID_VIEW_SIMPLE,
+        PAGE_MARGIN,
+        PAGE_MARGIN + 68,
+        side,
+        row,
+        dpi,
+    );
+    move_control(
+        hwnd,
+        ID_VIEW_ADVANCED,
+        PAGE_MARGIN,
+        PAGE_MARGIN + 68 + row + 6,
+        side,
+        row,
+        dpi,
+    );
+    move_control(
+        hwnd,
+        718,
+        PAGE_MARGIN,
+        height - PAGE_MARGIN - 32,
+        side,
+        32,
+        dpi,
+    );
+    // Header shared by both views.
+    move_control(
+        hwnd,
+        716,
+        content_left,
+        PAGE_MARGIN,
+        content_right - content_left,
+        20,
+        dpi,
+    );
+    move_control(
+        hwnd,
+        717,
+        content_left,
+        PAGE_MARGIN + 22,
+        content_right - content_left,
+        16,
+        dpi,
+    );
+    // Footer pinned to the bottom edge of the client area.
+    let footer_y = height - PAGE_MARGIN - row;
+    move_control(hwnd, ID_SAVE, content_right - 108, footer_y, 108, row, dpi);
+    move_control(
+        hwnd,
+        ID_CANCEL,
+        content_right - 108 - 8 - 84,
+        footer_y,
+        84,
+        row,
+        dpi,
+    );
+}
+
+/// Stretches the scroll container over the content column between the header
+/// and the footer band.
+fn position_container(hwnd: HWND, dpi: u32) {
+    let Ok(container) =
+        (unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgItem(hwnd, ID_SCROLL_CONTAINER) })
+    else {
+        return;
+    };
+    let (width, height) = client_design_size(hwnd, dpi);
+    let left = CONTENT_LEFT;
+    // The container runs to the client's right edge so its scroll bar sits
+    // flush with the frame and the 480 px card column still fits beside it.
+    let right = width.max(left + 160);
+    let top = HEADER_BOTTOM;
+    let bottom = (height - FOOTER_HEIGHT - FOOTER_GAP).max(top + crate::theme::CONTROL_HEIGHT);
+    unsafe {
+        let _ = windows::Win32::UI::WindowsAndMessaging::MoveWindow(
+            container,
+            scale(left, dpi),
+            scale(top, dpi),
+            scale(right - left, dpi),
+            scale(bottom - top, dpi),
+            true,
+        );
+    }
+}
+
+/// Lays out the controls inside the scroll container in container design
+/// pixels: x starts at the card column's left edge, y at the top of the
+/// scrollable content. `move_control` subtracts the container's scroll
+/// offset, so a control always sits on the card it belongs to.
+fn layout_content(container: HWND, dpi: u32) {
+    use crate::theme::{CARD_PADDING, CONTROL_HEIGHT};
+    let pad = CARD_PADDING; // 12
+    let row = CONTROL_HEIGHT; // 26
+    let section = 16; // section label line
+    let label = LABEL_WIDTH; // property label column
+    let chips = pad + label + 8; // first chip column
+    let right = CONTENT_WIDTH - pad;
+    let chip_area = right - chips;
+    let full = CONTENT_WIDTH - 2 * pad;
+    let place =
+        |id: i32, x: i32, y: i32, w: i32, h: i32| move_control(container, id, x, y, w, h, dpi);
+    let heading = |id: i32, top: i32| place(id, pad, top, full, section);
+    let row_label = |id: i32, top: i32| place(id, pad, top + (row - 16) / 2, label, 16);
+
+    // Capture card (General).
+    heading(710, 12);
+    row_label(701, 34);
+    place(ID_HOTKEY_PRINT, chips, 34, 92, row);
+    place(ID_HOTKEY_CTRL_SHIFT_S, chips + 98, 34, 96, row);
+    place(ID_HOTKEY_ALT_PRINT, chips + 200, 34, 112, row);
+    row_label(705, 66);
+    for index in 0..4 {
+        place(ID_DELAY_FIRST + index, chips + index * 78, 66, 72, row);
+    }
+    // Saving card (General).
+    heading(711, 128);
+    row_label(702, 150);
+    place(ID_FOLDER_LABEL, chips, 154, chip_area - 100, 18);
+    place(ID_BROWSE, right - 92, 150, 92, row);
+    row_label(706, 182);
+    place(ID_FORMAT_PNG, chips, 182, 72, row);
+    place(ID_FORMAT_JPEG, chips + 78, 182, 72, row);
+    row_label(707, 214);
+    for index in 0..3 {
+        place(ID_QUALITY_FIRST + index, chips + index * 78, 214, 72, row);
+    }
+    // After capture card (General).
+    heading(712, 276);
+    place(ID_WINDOW_SNAP, pad, 298, full, row);
+    place(ID_CLOSE_AFTER_ACTION, pad, 330, full, row);
+    // Annotation defaults card (Editor and system).
+    heading(713, 12);
+    row_label(703, 34);
+    for index in 0..8 {
+        // Swatch circles: 8 fit one row, so the color row stays a single line.
+        place(ID_COLOR_FIRST + index, chips + index * 44, 34, 44, row);
+    }
+    row_label(704, 66);
+    for index in 0..3 {
+        place(ID_THICKNESS_FIRST + index, chips + index * 78, 66, 72, row);
+    }
+    // Windows card (Editor and system).
+    heading(714, 128);
+    place(ID_START_WITH_WINDOWS, pad, 150, full, row);
+    place(ID_NOTIFY_AFTER_SAVE, pad, 182, full, row);
+    // Updates card (Editor and system).
+    heading(715, 244);
+    place(ID_CHECK_UPDATES, pad, 266, full, row);
+    place(ID_AUTO_INSTALL, pad, 298, full, row);
+    place(ID_CHECK_UPDATE, chips, 330, 132, row);
+    place(708, chips, 362, chip_area, 30);
+}
+
+/// Sizes the container's scroll bars against the content extent and refreshes
+/// its contents. Both bars are the container's own, so the window frame never
+/// shows a scroll bar over the pinned chrome.
+fn update_container_scrollbars(container: HWND, dpi: u32) {
     use windows::Win32::UI::WindowsAndMessaging::*;
     thread_local! { static UPDATING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
     if UPDATING.with(|flag| flag.replace(true)) {
         return;
     }
-    let mut client = RECT::default();
+    // Measure the window itself: `GetClientRect` already excludes any visible
+    // bar, while the WS_VSCROLL/WS_HSCROLL style bits stay set even when a bar
+    // is hidden, which would overstate the page by one bar for one pass.
+    let mut window = RECT::default();
     unsafe {
-        let _ = GetClientRect(hwnd, &mut client);
+        let _ = GetWindowRect(container, &mut window);
     }
-    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
+    let full_width = window.right - window.left;
+    let full_height = window.bottom - window.top;
     let bar_width = unsafe { GetSystemMetrics(SM_CXVSCROLL) };
     let bar_height = unsafe { GetSystemMetrics(SM_CYHSCROLL) };
-    let full_width = client.right
-        + if style & WS_VSCROLL.0 != 0 {
-            bar_width
-        } else {
-            0
-        };
-    let full_height = client.bottom
-        + if style & WS_HSCROLL.0 != 0 {
-            bar_height
-        } else {
-            0
-        };
-    let width = scale(CONTENT_RIGHT + crate::theme::PAGE_MARGIN, dpi);
+    let width = scale(CONTENT_WIDTH + crate::theme::GRID, dpi);
     let height = scale(CONTENT_HEIGHT, dpi);
     let mut horizontal = width > full_width;
     let mut vertical = height > full_height;
@@ -664,21 +939,23 @@ fn update_scrollbars(hwnd: HWND, dpi: u32) {
             nMin: 0,
             nMax: length - 1,
             nPage: page.max(1) as u32,
-            nPos: unsafe { GetScrollPos(hwnd, bar) }.clamp(0, (length - page).max(0)),
+            nPos: unsafe { GetScrollPos(container, bar) }.clamp(0, (length - page).max(0)),
             nTrackPos: 0,
         };
         unsafe {
-            SetScrollInfo(hwnd, bar, &info, true);
+            SetScrollInfo(container, bar, &info, true);
         }
     }
-    layout_controls(hwnd, dpi);
+    layout_content(container, dpi);
     unsafe {
-        let _ = InvalidateRect(hwnd, None, true);
+        let _ = InvalidateRect(container, None, true);
     }
     UPDATING.with(|flag| flag.set(false));
 }
 
-fn scroll_by(hwnd: HWND, horizontal: bool, delta: i32) {
+/// Scrolls the container and moves its controls by the same offset, so the
+/// cards and the controls on them can never drift apart.
+fn scroll_container_by(container: HWND, horizontal: bool, delta: i32) {
     use windows::Win32::UI::WindowsAndMessaging::*;
     let bar = if horizontal { SB_HORZ } else { SB_VERT };
     let mut info = SCROLLINFO {
@@ -687,57 +964,71 @@ fn scroll_by(hwnd: HWND, horizontal: bool, delta: i32) {
         ..Default::default()
     };
     unsafe {
-        let _ = GetScrollInfo(hwnd, bar, &mut info);
+        let _ = GetScrollInfo(container, bar, &mut info);
     }
     let position = (info.nPos + delta).clamp(0, (info.nMax - info.nPage as i32 + 1).max(0));
     unsafe {
-        SetScrollPos(hwnd, bar, position, true);
+        SetScrollPos(container, bar, position, true);
     }
-    let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd) }.max(96);
-    layout_controls(hwnd, dpi);
+    let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(container) }.max(96);
+    layout_content(container, dpi);
     unsafe {
-        let _ = InvalidateRect(hwnd, None, true);
+        let _ = InvalidateRect(container, None, true);
     }
 }
 
+/// Brings the focused control into view by scrolling its container. Chrome
+/// controls (sidebar, header, footer) never need scrolling.
 pub fn ensure_focus_visible(hwnd: HWND) {
-    use windows::Win32::UI::WindowsAndMessaging::IsChild;
+    use windows::Win32::UI::WindowsAndMessaging::{GetDlgItem, IsChild};
     let focus = unsafe { windows::Win32::UI::Input::KeyboardAndMouse::GetFocus() };
-    if !unsafe { IsChild(hwnd, focus).as_bool() } {
+    let Ok(container) = (unsafe { GetDlgItem(hwnd, ID_SCROLL_CONTAINER) }) else {
+        return;
+    };
+    if !unsafe { IsChild(container, focus).as_bool() } {
         return;
     }
     let mut rect = RECT::default();
     let mut client = RECT::default();
     unsafe {
         let _ = GetWindowRect(focus, &mut rect);
-        let _ = GetClientRect(hwnd, &mut client);
+        let _ = GetClientRect(container, &mut client);
     }
     let mut point = POINT {
         x: rect.left,
         y: rect.top,
     };
     unsafe {
-        let _ = windows::Win32::Graphics::Gdi::ScreenToClient(hwnd, &mut point);
+        let _ = windows::Win32::Graphics::Gdi::ScreenToClient(container, &mut point);
     }
     let bottom = point.y + rect.bottom - rect.top;
     let right = point.x + rect.right - rect.left;
     if point.y < 0 {
-        scroll_by(hwnd, false, point.y - 8);
+        scroll_container_by(container, false, point.y - 8);
     } else if bottom > client.bottom {
-        scroll_by(hwnd, false, bottom - client.bottom + 8);
+        scroll_container_by(container, false, bottom - client.bottom + 8);
     }
     if point.x < 0 {
-        scroll_by(hwnd, true, point.x - 8);
+        scroll_container_by(container, true, point.x - 8);
     } else if right > client.right {
-        scroll_by(hwnd, true, right - client.right + 8);
+        scroll_container_by(container, true, right - client.right + 8);
     }
+}
+
+/// Finds a settings control by id: content controls live inside the scroll
+/// container, chrome controls are direct children of the window.
+fn control(hwnd: HWND, id: i32) -> Option<HWND> {
+    use windows::Win32::UI::WindowsAndMessaging::GetDlgItem;
+    if let Ok(child) = unsafe { GetDlgItem(hwnd, id) } {
+        return Some(child);
+    }
+    let container = unsafe { GetDlgItem(hwnd, ID_SCROLL_CONTAINER) }.ok()?;
+    unsafe { GetDlgItem(container, id) }.ok()
 }
 
 fn show_controls(hwnd: HWND, ids: &[i32], show: bool) {
     for id in ids {
-        if let Ok(control) =
-            unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgItem(hwnd, *id) }
-        {
+        if let Some(control) = control(hwnd, *id) {
             unsafe {
                 let _ = ShowWindow(control, if show { SW_SHOW } else { SW_HIDE });
             }
@@ -810,22 +1101,25 @@ fn set_active_view(hwnd: HWND, view: SettingsView) {
 }
 
 fn set_check(hwnd: HWND, id: i32, checked: bool) {
-    unsafe {
-        let _ = windows::Win32::UI::Controls::CheckDlgButton(
-            hwnd,
-            id,
-            if checked {
-                windows::Win32::UI::Controls::BST_CHECKED
-            } else {
-                windows::Win32::UI::Controls::BST_UNCHECKED
-            },
-        );
+    if let Some(control) = control(hwnd, id) {
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::SendMessageW(
+                control,
+                windows::Win32::UI::WindowsAndMessaging::BM_SETCHECK,
+                WPARAM(if checked {
+                    windows::Win32::UI::Controls::BST_CHECKED.0 as usize
+                } else {
+                    windows::Win32::UI::Controls::BST_UNCHECKED.0 as usize
+                }),
+                LPARAM(0),
+            );
+        }
     }
 }
 
 fn check_radio(hwnd: HWND, first: i32, last: i32, selected: i32) {
-    unsafe {
-        let _ = windows::Win32::UI::Controls::CheckRadioButton(hwnd, first, last, selected);
+    for id in first..=last {
+        set_check(hwnd, id, id == selected);
     }
 }
 
@@ -849,7 +1143,7 @@ fn set_label_note(hwnd: HWND, id: i32, base: &str, note: Option<String>) {
         None => base.to_owned(),
     };
     let text = wide_string(&text);
-    if let Ok(child) = unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgItem(hwnd, id) } {
+    if let Some(child) = control(hwnd, id) {
         unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowTextW(
                 child,
@@ -861,9 +1155,7 @@ fn set_label_note(hwnd: HWND, id: i32, base: &str, note: Option<String>) {
 
 fn set_jpeg_quality_enabled(hwnd: HWND, enabled: bool) {
     for id in std::iter::once(707).chain(ID_QUALITY_FIRST..=ID_QUALITY_FIRST + 2) {
-        if let Ok(control) =
-            unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgItem(hwnd, id) }
-        {
+        if let Some(control) = control(hwnd, id) {
             unsafe {
                 let _ = EnableWindow(control, enabled);
             }
@@ -968,9 +1260,7 @@ fn initialize_control_values(hwnd: HWND, settings: &Settings) {
 
 fn update_folder_label(hwnd: HWND, path: &Path) {
     let label = wide_string(&path.display().to_string());
-    if let Ok(child) =
-        unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgItem(hwnd, ID_FOLDER_LABEL) }
-    {
+    if let Some(child) = control(hwnd, ID_FOLDER_LABEL) {
         unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowTextW(
                 child,
@@ -1007,15 +1297,36 @@ fn choose_folder(owner: HWND) -> Result<Option<PathBuf>> {
 
 fn create_settings_controls(hwnd: HWND) -> Result<()> {
     use windows::Win32::UI::WindowsAndMessaging::{
-        BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, BS_PUSHLIKE,
-        WS_GROUP, WS_TABSTOP,
+        BS_AUTOCHECKBOX, BS_AUTORADIOBUTTON, BS_DEFPUSHBUTTON, BS_PUSHBUTTON, BS_PUSHLIKE, HMENU,
+        WS_CHILD, WS_CLIPCHILDREN, WS_EX_CONTROLPARENT, WS_GROUP, WS_HSCROLL, WS_TABSTOP,
+        WS_VISIBLE, WS_VSCROLL,
     };
-    let label = |id, text| create_control(hwnd, w!("STATIC"), text, Default::default(), id);
+    // The scroll container clips its controls, so content that is scrolled out
+    // can never draw over the pinned sidebar, header or footer.
+    let content = unsafe {
+        CreateWindowExW(
+            WS_EX_CONTROLPARENT,
+            SCROLL_CLASS_NAME,
+            PCWSTR::null(),
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | WS_CLIPCHILDREN,
+            0,
+            0,
+            0,
+            0,
+            hwnd,
+            HMENU(ID_SCROLL_CONTAINER as *mut std::ffi::c_void),
+            HINSTANCE::default(),
+            None,
+        )?
+    };
+    let label =
+        |parent: HWND, id, text| create_control(parent, w!("STATIC"), text, Default::default(), id);
 
-    label(700, "isolmaSS")?;
-    label(716, "Capture settings")?;
-    label(717, "Choose how you capture, edit, and save.")?;
+    label(hwnd, 700, "isolmaSS")?;
+    label(hwnd, 716, "Capture settings")?;
+    label(hwnd, 717, "Choose how you capture, edit, and save.")?;
     label(
+        hwnd,
         718,
         concat!(
             "Version ",
@@ -1023,7 +1334,7 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
             "\nPrivate by design. MIT licensed."
         ),
     )?;
-    label(709, "Your capture studio.\nMade for Windows.")?;
+    label(hwnd, 709, "Your capture studio.\nMade for Windows.")?;
     create_button(
         hwnd,
         ID_VIEW_SIMPLE,
@@ -1033,37 +1344,37 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
     create_button(
         hwnd,
         ID_VIEW_ADVANCED,
-        "Editor and system",
+        "Editor",
         BS_AUTORADIOBUTTON | BS_PUSHLIKE | WS_TABSTOP.0 as i32,
     )?;
 
-    label(710, "Capture")?;
-    label(701, "Global hotkey")?;
+    label(content, 710, "Capture")?;
+    label(content, 701, "Global hotkey")?;
     create_button(
-        hwnd,
+        content,
         ID_HOTKEY_PRINT,
         "PrintScreen",
         BS_AUTORADIOBUTTON | WS_GROUP.0 as i32 | WS_TABSTOP.0 as i32,
     )?;
     create_button(
-        hwnd,
+        content,
         ID_HOTKEY_CTRL_SHIFT_S,
         "Ctrl+Shift+S",
         BS_AUTORADIOBUTTON | WS_TABSTOP.0 as i32,
     )?;
     create_button(
-        hwnd,
+        content,
         ID_HOTKEY_ALT_PRINT,
         "Alt+PrintScreen",
         BS_AUTORADIOBUTTON | WS_TABSTOP.0 as i32,
     )?;
-    label(705, "Capture delay")?;
+    label(content, 705, "Capture delay")?;
     for (index, name) in ["None", "1 second", "3 seconds", "5 seconds"]
         .into_iter()
         .enumerate()
     {
         create_button(
-            hwnd,
+            content,
             ID_DELAY_FIRST + index as i32,
             name,
             BS_AUTORADIOBUTTON
@@ -1076,39 +1387,39 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
         )?;
     }
 
-    label(711, "Saving")?;
-    label(702, "Save folder")?;
+    label(content, 711, "Saving")?;
+    label(content, 702, "Save folder")?;
     create_control(
-        hwnd,
+        content,
         w!("STATIC"),
         "",
         windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(0x0000_4000),
         ID_FOLDER_LABEL,
     )?;
     create_button(
-        hwnd,
+        content,
         ID_BROWSE,
         "Choose folder",
         BS_PUSHBUTTON | WS_TABSTOP.0 as i32,
     )?;
-    label(706, "Image format")?;
+    label(content, 706, "Image format")?;
     create_button(
-        hwnd,
+        content,
         ID_FORMAT_PNG,
         "PNG",
         BS_AUTORADIOBUTTON | WS_GROUP.0 as i32 | WS_TABSTOP.0 as i32,
     )?;
     create_button(
-        hwnd,
+        content,
         ID_FORMAT_JPEG,
         "JPEG",
         BS_AUTORADIOBUTTON | WS_TABSTOP.0 as i32,
     )?;
-    label(707, "JPEG quality")?;
+    label(content, 707, "JPEG quality")?;
     for (index, quality) in [80, 90, 100].into_iter().enumerate() {
         let label = quality.to_string();
         create_button(
-            hwnd,
+            content,
             ID_QUALITY_FIRST + index as i32,
             &label,
             BS_AUTORADIOBUTTON
@@ -1121,22 +1432,23 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
         )?;
     }
 
-    label(712, "After capture")?;
+    label(content, 712, "After capture")?;
     create_button(
-        hwnd,
+        content,
         ID_WINDOW_SNAP,
         "Snap to a window with one click",
         BS_AUTOCHECKBOX | WS_GROUP.0 as i32 | WS_TABSTOP.0 as i32,
     )?;
     create_button(
-        hwnd,
+        content,
         ID_CLOSE_AFTER_ACTION,
         "Close the editor after saving or copying",
         BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32,
     )?;
 
-    label(713, "Annotation defaults")?;
-    label(703, "Default color")?;
+    label(content, 713, "Annotation defaults")?;
+    label(content, 703, "Default color")?;
+    // The swatches render as circles; the window text stays for screen readers.
     for (index, name) in [
         "Red", "Orange", "Yellow", "Green", "Blue", "Purple", "White", "Black",
     ]
@@ -1144,7 +1456,7 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
     .enumerate()
     {
         create_button(
-            hwnd,
+            content,
             ID_COLOR_FIRST + index as i32,
             name,
             BS_AUTORADIOBUTTON
@@ -1156,11 +1468,11 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
                 | WS_TABSTOP.0 as i32,
         )?;
     }
-    label(704, "Line thickness")?;
+    label(content, 704, "Line thickness")?;
     for (index, value) in PRESET_THICKNESSES.iter().enumerate() {
         let label = format!("{value} px");
         create_button(
-            hwnd,
+            content,
             ID_THICKNESS_FIRST + index as i32,
             &label,
             BS_AUTORADIOBUTTON
@@ -1173,40 +1485,41 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
         )?;
     }
 
-    label(714, "Windows")?;
+    label(content, 714, "Windows")?;
     create_button(
-        hwnd,
+        content,
         ID_START_WITH_WINDOWS,
         "Start isolmaSS when I sign in to Windows",
         BS_AUTOCHECKBOX | WS_GROUP.0 as i32 | WS_TABSTOP.0 as i32,
     )?;
     create_button(
-        hwnd,
+        content,
         ID_NOTIFY_AFTER_SAVE,
         "Show a notification after saving",
         BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32,
     )?;
 
-    label(715, "Updates")?;
+    label(content, 715, "Updates")?;
     create_button(
-        hwnd,
+        content,
         ID_CHECK_UPDATES,
         "Check for updates automatically",
         BS_AUTOCHECKBOX | WS_GROUP.0 as i32 | WS_TABSTOP.0 as i32,
     )?;
     create_button(
-        hwnd,
+        content,
         ID_AUTO_INSTALL,
         "Automatically install verified signed updates",
         BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32,
     )?;
     create_button(
-        hwnd,
+        content,
         ID_CHECK_UPDATE,
         "Check for updates",
         BS_PUSHBUTTON | WS_TABSTOP.0 as i32,
     )?;
     label(
+        content,
         708,
         "Manual and automatic installs require HTTPS, a GitHub SHA-256 digest, and a valid Authenticode signature.",
     )?;
@@ -1310,36 +1623,40 @@ unsafe extern "system" fn settings_wnd_proc(
         }
         windows::Win32::UI::WindowsAndMessaging::WM_SIZE => {
             if !state_ptr.is_null() {
-                update_scrollbars(hwnd, unsafe { (*state_ptr).dpi });
+                let dpi = unsafe { (*state_ptr).dpi };
+                layout_chrome(hwnd, dpi);
+                position_container(hwnd, dpi);
+            }
+            LRESULT(0)
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_GETMINMAXINFO => {
+            // Keep the window at a size where the pinned chrome and a usable
+            // slice of the content column are always visible.
+            if lparam.0 != 0 {
+                let dpi = if state_ptr.is_null() {
+                    96
+                } else {
+                    unsafe { (*state_ptr).dpi }
+                };
+                let info = unsafe {
+                    &mut *(lparam.0 as *mut windows::Win32::UI::WindowsAndMessaging::MINMAXINFO)
+                };
+                info.ptMinTrackSize.x = scale(SETTINGS_MIN_WIDTH, dpi);
+                info.ptMinTrackSize.y = scale(SETTINGS_MIN_HEIGHT, dpi);
             }
             LRESULT(0)
         }
         windows::Win32::UI::WindowsAndMessaging::WM_MOUSEWHEEL => {
-            scroll_by(hwnd, false, -((wparam.0 >> 16) as u16 as i16 as i32) / 2);
-            LRESULT(0)
-        }
-        windows::Win32::UI::WindowsAndMessaging::WM_VSCROLL
-        | windows::Win32::UI::WindowsAndMessaging::WM_HSCROLL => {
-            use windows::Win32::UI::WindowsAndMessaging::*;
-            let horizontal = msg == WM_HSCROLL;
-            let bar = if horizontal { SB_HORZ } else { SB_VERT };
-            let mut info = SCROLLINFO {
-                cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
-                fMask: SIF_ALL,
-                ..Default::default()
-            };
-            unsafe {
-                let _ = GetScrollInfo(hwnd, bar, &mut info);
+            // Wheel over the chrome still scrolls the content column.
+            if let Ok(container) = unsafe {
+                windows::Win32::UI::WindowsAndMessaging::GetDlgItem(hwnd, ID_SCROLL_CONTAINER)
+            } {
+                scroll_container_by(
+                    container,
+                    false,
+                    -((wparam.0 >> 16) as u16 as i16 as i32) / 2,
+                );
             }
-            let delta = match wparam.0 as u16 as i32 {
-                0 => -40,
-                1 => 40,
-                2 => -(info.nPage as i32),
-                3 => info.nPage as i32,
-                4 | 5 => info.nTrackPos - info.nPos,
-                _ => 0,
-            };
-            scroll_by(hwnd, horizontal, delta);
             LRESULT(0)
         }
         windows::Win32::UI::WindowsAndMessaging::WM_NOTIFY => {
@@ -1371,15 +1688,12 @@ unsafe extern "system" fn settings_wnd_proc(
         WM_ERASEBKGND => {
             if !state_ptr.is_null() {
                 let state = unsafe { &*state_ptr };
-                // Always claim the erase so the class background brush never
-                // shows; with Mica active the client area is left untouched
-                // so the backdrop can show through.
-                if !state.mica_active {
-                    let mut client = RECT::default();
-                    unsafe {
-                        let _ = GetClientRect(hwnd, &mut client);
-                        let _ = FillRect(HDC(wparam.0 as *mut _), &client, state.background_brush);
-                    }
+                // Always paint the page: every scroll step must erase the
+                // previous frame, or cards and controls leave ghosts behind.
+                let mut client = RECT::default();
+                unsafe {
+                    let _ = GetClientRect(hwnd, &mut client);
+                    let _ = FillRect(HDC(wparam.0 as *mut _), &client, state.background_brush);
                 }
                 return LRESULT(1);
             }
@@ -1559,7 +1873,8 @@ unsafe extern "system" fn settings_wnd_proc(
                     set_control_font(hwnd, id, new_heading_font);
                 }
                 center_dialog(hwnd, None);
-                update_scrollbars(hwnd, state.dpi);
+                layout_chrome(hwnd, state.dpi);
+                position_container(hwnd, state.dpi);
                 for font in [old_font, old_title_font, old_heading_font] {
                     if !font.is_invalid() {
                         unsafe {
@@ -1731,8 +2046,7 @@ pub fn show_settings_dialog(current: &Settings, owner: Option<HWND>) -> Result<O
     }
     crate::diagnostics::record("settings", "Opening settings window");
     register_settings_class()?;
-    // Mica is only ever active when the build supports the backdrop attribute.
-    let mica = crate::theme::backdrop_supported();
+    register_scroll_class()?;
     let mut state = Box::new(SettingsWindowState {
         settings: current.clone(),
         saved: false,
@@ -1743,7 +2057,6 @@ pub fn show_settings_dialog(current: &Settings, owner: Option<HWND>) -> Result<O
         heading_font: Default::default(),
         background_brush: Default::default(),
         card_brush: Default::default(),
-        mica_active: mica,
     });
     // Initial brush creation from the current theme colors.
     state.refresh_brushes();
@@ -1757,8 +2070,6 @@ pub fn show_settings_dialog(current: &Settings, owner: Option<HWND>) -> Result<O
                 | windows::Win32::UI::WindowsAndMessaging::WS_SYSMENU
                 | windows::Win32::UI::WindowsAndMessaging::WS_THICKFRAME
                 | windows::Win32::UI::WindowsAndMessaging::WS_MAXIMIZEBOX
-                | windows::Win32::UI::WindowsAndMessaging::WS_VSCROLL
-                | windows::Win32::UI::WindowsAndMessaging::WS_HSCROLL
                 | windows::Win32::UI::WindowsAndMessaging::WS_CLIPCHILDREN,
             windows::Win32::UI::WindowsAndMessaging::CW_USEDEFAULT,
             windows::Win32::UI::WindowsAndMessaging::CW_USEDEFAULT,
@@ -1813,11 +2124,18 @@ pub fn show_settings_dialog(current: &Settings, owner: Option<HWND>) -> Result<O
     for id in 710..=715 {
         set_control_font(hwnd, id, state.heading_font);
     }
-    layout_controls(hwnd, state.dpi);
+    layout_chrome(hwnd, state.dpi);
+    position_container(hwnd, state.dpi);
     initialize_control_values(hwnd, &state.settings);
     set_active_view(hwnd, state.active_view);
     center_dialog(hwnd, owner);
-    update_scrollbars(hwnd, state.dpi);
+    layout_chrome(hwnd, state.dpi);
+    position_container(hwnd, state.dpi);
+    if let Ok(container) =
+        unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgItem(hwnd, ID_SCROLL_CONTAINER) }
+    {
+        update_container_scrollbars(container, state.dpi);
+    }
     unsafe {
         let _ = ShowWindow(hwnd, SW_SHOW);
     }

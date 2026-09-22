@@ -47,8 +47,14 @@ pub struct Toolbar {
 }
 
 impl Toolbar {
-    pub const TOOL_BUTTON: i32 = 36;
-    pub const ACTION_HEIGHT: i32 = 48;
+    pub const TOOL_BUTTON: i32 = 28;
+    pub const ACTION_HEIGHT: i32 = 34;
+    /// Air between the panels and the edge of the work area.
+    pub const OUTER_PAD: i32 = 6;
+    /// Air between the selection and the panels when they sit outside it.
+    pub const GAP: i32 = 6;
+    /// Air between the selection edge and the panels when they sit inside it.
+    pub const INNER_PAD: i32 = 8;
 
     /// Builds a Lightshot-style tool rail beside the selection and a compact
     /// action strip below it. Each panel flips to the opposite edge as needed.
@@ -66,10 +72,10 @@ impl Toolbar {
         dpi: u32,
     ) -> Self {
         let scale = |value: i32| value * dpi as i32 / 96;
-        let outer_pad = scale(8);
-        let gap = scale(8);
-        let inner_pad = scale(10);
-        let pad = scale(6);
+        let outer_pad = scale(Self::OUTER_PAD);
+        let gap = scale(Self::GAP);
+        let inner_pad = scale(Self::INNER_PAD);
+        let pad = scale(4);
         let tool_button = scale(Self::TOOL_BUTTON);
         let tool_items = [
             (ToolbarItem::Tool(ToolKind::Select), true),
@@ -85,15 +91,15 @@ impl Toolbar {
         let tool_width = tool_button + pad * 2;
         let tool_height = pad * 2
             + tool_items.len() as i32 * tool_button
-            + (tool_items.len() as i32 - 1) * scale(3);
+            + (tool_items.len() as i32 - 1) * scale(2);
 
-        let color_size = scale(24);
-        let color_step = scale(28);
-        let thickness_width = scale(28);
-        let thickness_step = scale(31);
-        let action_button = scale(36);
-        let action_step = scale(44);
-        let section_gap = scale(12);
+        let color_size = scale(18);
+        let color_step = scale(22);
+        let thickness_width = scale(22);
+        let thickness_step = scale(24);
+        let action_button = scale(28);
+        let action_step = scale(32);
+        let section_gap = scale(8);
         let colors_width = if show_color {
             PRESET_COLORS.len() as i32 * color_step - (color_step - color_size)
         } else {
@@ -110,7 +116,7 @@ impl Toolbar {
             + thicknesses_width
             + style_sections * section_gap
             + 4 * action_step
-            + scale(64)
+            + scale(48)
             - (action_step - action_button);
         let action_height = scale(Self::ACTION_HEIGHT);
         let safe = Rect::new(
@@ -249,7 +255,7 @@ impl Toolbar {
                 is_enabled: enabled,
                 is_checked,
             });
-            y -= tool_button + scale(3);
+            y -= tool_button + scale(2);
         }
         let item_y = action_bounds.top + (action_height - color_size) / 2;
         let mut x = action_bounds.left + pad;
@@ -287,7 +293,7 @@ impl Toolbar {
             let y = action_bounds.top + (action_height - action_button) / 2;
             let button_width = action_button
                 + if matches!(action, ToolbarAction::Save | ToolbarAction::Copy) {
-                    scale(32)
+                    scale(24)
                 } else {
                     0
                 };
@@ -297,12 +303,12 @@ impl Toolbar {
                 is_enabled: true,
                 is_checked: false,
             });
-            x += button_width + scale(4);
+            x += button_width + scale(3);
         }
         if tool_height + action_height > safe.height() || action_width > safe.width() {
             // A grid keeps every command reachable on short/high-DPI work areas.
             let count = (buttons.len() as i32).max(1);
-            let mut cell = scale(44).max(8);
+            let mut cell = scale(32).max(8);
             loop {
                 let cols = (safe.width() / cell).max(1);
                 let rows = (count + cols - 1) / cols;
@@ -339,7 +345,7 @@ impl Toolbar {
                 active_tool,
                 active_color,
                 active_thickness,
-                dpi: (cell * 96 / 44).max(24) as u32,
+                dpi: (cell * 96 / 32).max(24) as u32,
                 viewport,
             };
         }
@@ -447,7 +453,7 @@ impl Toolbar {
             );
             match button.item {
                 ToolbarItem::Color(color) => {
-                    let swatch = button.rect.inflate(-scale(3), -scale(3));
+                    let swatch = button.rect.inflate(-scale(2), -scale(2));
                     rounded(
                         hdc,
                         swatch,
@@ -467,7 +473,7 @@ impl Toolbar {
                         } else {
                             COLORREF(0xffffff)
                         };
-                        icon(hdc, swatch, 0xe73e, scale(13), check, true);
+                        icon(hdc, swatch, 0xe73e, scale(10), check, true);
                     }
                 }
                 ToolbarItem::Thickness(value) => {
@@ -477,11 +483,11 @@ impl Toolbar {
                             hdc,
                             &[
                                 POINT {
-                                    x: button.rect.left + scale(6),
+                                    x: button.rect.left + scale(4),
                                     y,
                                 },
                                 POINT {
-                                    x: button.rect.right - scale(6),
+                                    x: button.rect.right - scale(4),
                                     y,
                                 },
                             ],
@@ -521,14 +527,14 @@ impl Toolbar {
                         _ => None,
                     };
                     match codepoint {
-                        Some(codepoint) => icon(hdc, button.rect, codepoint, scale(18), ink, true),
+                        Some(codepoint) => icon(hdc, button.rect, codepoint, scale(14), ink, true),
                         None => {
                             let glyph = match item {
                                 ToolbarItem::Tool(ToolKind::Blur) => "▦",
                                 ToolbarItem::Tool(ToolKind::Redact) => "■",
                                 _ => "",
                             };
-                            label(hdc, button.rect, glyph, scale(21), ink, true);
+                            label(hdc, button.rect, glyph, scale(16), ink, true);
                         }
                     }
                 }
@@ -556,10 +562,10 @@ impl Toolbar {
                 ToolbarItem::Color(_) => "Annotation color".to_owned(),
                 ToolbarItem::Thickness(value) => format!("{value} px stroke"),
             };
-            let margin = scale(6);
-            let width = (crate::drawing::measure_text(&tip, scale(12)).0 + scale(24))
+            let margin = scale(4);
+            let width = (crate::drawing::measure_text(&tip, scale(11)).0 + scale(16))
                 .min((self.viewport.width() - margin * 2).max(1));
-            let height = scale(32);
+            let height = scale(24);
             let x = button.rect.left.clamp(
                 self.viewport.left + margin,
                 (self.viewport.right - width - margin).max(self.viewport.left + margin),
@@ -576,7 +582,7 @@ impl Toolbar {
                 tokens.card,
                 tokens.stroke,
             );
-            label(hdc, bounds, &tip, scale(12), tokens.text, true);
+            label(hdc, bounds, &tip, scale(11), tokens.text, true);
         }
     }
 }
@@ -752,8 +758,8 @@ mod tests {
         let selection = Rect::new(200, 100, 800, 600);
         let viewport = Rect::new(0, 0, 1920, 1040);
         let toolbar = layout(selection, viewport);
-        assert_eq!(toolbar.tool_bounds.left, selection.right + 8);
-        assert_eq!(toolbar.action_bounds.top, selection.bottom + 8);
+        assert_eq!(toolbar.tool_bounds.left, selection.right + Toolbar::GAP);
+        assert_eq!(toolbar.action_bounds.top, selection.bottom + Toolbar::GAP);
         assert_exact_l_corner(&toolbar);
         assert_in_viewport(toolbar.tool_bounds, viewport);
         assert_in_viewport(toolbar.action_bounds, viewport);
@@ -774,9 +780,18 @@ mod tests {
     fn full_monitor_selection_uses_padded_inside_bottom_right_l() {
         let viewport = Rect::new(0, 0, 1920, 1040);
         let toolbar = layout(viewport, viewport);
-        assert_eq!(toolbar.tool_bounds.right, viewport.right - 10);
-        assert_eq!(toolbar.action_bounds.right, viewport.right - 10);
-        assert_eq!(toolbar.action_bounds.bottom, viewport.bottom - 10);
+        assert_eq!(
+            toolbar.tool_bounds.right,
+            viewport.right - Toolbar::INNER_PAD
+        );
+        assert_eq!(
+            toolbar.action_bounds.right,
+            viewport.right - Toolbar::INNER_PAD
+        );
+        assert_eq!(
+            toolbar.action_bounds.bottom,
+            viewport.bottom - Toolbar::INNER_PAD
+        );
         assert_exact_l_corner(&toolbar);
         assert_in_viewport(toolbar.tool_bounds, viewport);
         assert_in_viewport(toolbar.action_bounds, viewport);

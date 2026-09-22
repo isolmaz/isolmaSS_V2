@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] — 0.3.0
+## [0.3.0] — 2026-09-22
 
 ### Added
 
@@ -43,6 +43,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Large capture-buffer release, pen point coalescing/caps and cached geometry, background recent-file refresh, and skipped closing-frame composition.
 - Selected release optimization 3 after 50 repeated and 50 process-cold captures per profile. Repeated p95 was 51.016 ms versus 71.575 ms for z in that comparison; the 30 ms target remains open. See ROADMAP.md for the subsequent confirmation, memory figures and unmeasured scopes.
 
+### Changed — compact interface pass
+
+- Compact Fluent density across every surface: body text 14 -> 12 px, section labels 12 -> 11 px, titles 20 -> 15 px, controls 32 -> 26 px, page margin 24 -> 16 px, card padding 16 -> 12 px, card radius 8 -> 6 px. The type scale now resolves the Windows 11 `Segoe UI Variable Text` face once through GDI and falls back to `Segoe UI` when it is not installed.
+- Settings window 800 x 600 -> 660 x 580 with a 108 px navigation rail and a 480 px card column; the navigation is shortened to **General** / **Editor**. The window enforces a 520 x 430 minimum track size, keeps Save/Cancel pinned to the bottom-right, and pins the brand, navigation and header.
+- Settings content now lives in a dedicated scroll-container child window (`isolmaSS_SettingsScrollClass`) that owns the scroll bars, paints the cards, clips its controls and forwards notifications to the window, so scrolled cards and their controls move together and can never overlap the pinned chrome.
+- Settings cards were re-laid out on a compact rhythm (12 px card padding, 16 px section line, 6 px row gap, 26 px rows): eight colour presets render as swatch circles in a single row (the window text stays for screen readers), switches are 32 x 18 with a 12 px thumb, and the updates note is fully readable in two lines.
+- Editor toolbar 36 -> 28 px tool buttons, 48 -> 34 px action strip, swatches 24 -> 18 px, action buttons 36 -> 28 px, panel air 8/8/10/6 -> 6/6/8/4 px, icons 18 -> 14 px, hover tooltips 32 -> 24 px at 11 px, grid fallback cell 44 -> 32 px. The padding contract is exposed as `Toolbar::OUTER_PAD`, `Toolbar::GAP` and `Toolbar::INNER_PAD`.
+- Overlay HUD: the dimension chip is 104 x 20 px at 11 px and the magnifier 76 px with a 10 px caption.
+- Tray command palette 330 -> 260 px wide with 28/24 px rows, a 15 px brand line and 12 px row labels.
+
+### Fixed — compact interface pass
+
+- Settings scrolling no longer leaves ghosts: the Mica-transparent paint path skipped both `WM_ERASEBKGND` and the page fill, so every scroll step accumulated the previous frame. The page is now always erased and repainted.
+- The scroll container never handled `WM_SIZE`, so a resized window kept a stale scroll range and `nPage` was clamped to `nMax + 1`, which disabled scrolling entirely. The container now re-measures its content on every resize.
+- Sidebar navigation no longer clips: the shortened **Editor** label fits the 108 px rail.
+- The scroll container now runs to the client's right edge and measures its own window rectangle instead of `GetClientRect` plus style bits, so the vertical bar sits flush with the frame and no spurious horizontal bar appears when the vertical bar shows (the card column previously came up ~9 px short once the vertical bar took its 17 px).
+
 ### Verification — 2026-09-05
 
 - Formatting, locked/offline check, warning-free Clippy, 21 unit tests including tray lifecycle, release build, full existing Windows smoke command and NSIS packaging passed.
@@ -74,6 +91,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Three corrected behaviors were re-exercised against the new release binary on a 3840x1080 dual-monitor desktop: a cancelled tiny/click selection prints `Overlay dismissed` instead of committing a 2x2 region; Escape during an active selection drag keeps the editor open and only cancels the drag (a later Escape then dismisses normally); an exclusively locked `settings.json` now fails with exit code 1 and an actionable `os error 32` read error while the file bytes stay unchanged (previously the same lock silently loaded defaults with exit 0).
 - The dependency advisory comparison was refreshed against RustSec snapshot `57ad4063bb49c1deb04b6fcee30cfbac6b508474` (fetched 2026-09-21, 1,238 crate records) using parsed TOML metadata and direct range comparison, without cargo-audit/cargo-deny. Only RUSTSEC-2022-0008 matched and no affected locked package was found; scope limitations are in SECURITY.md.
 - Remote CI has not been observed. Signed installation/rollback, the alternate-DPI visual pass, remote CI observation and the latency re-measure remain open release gates in ROADMAP.md.
+
+### Verification — compact interface pass (2026-09-22)
+
+- `cargo fmt --check`, `cargo check --locked`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo test --locked -- --test-threads=1` (**21 passed, 0 failed**) and `cargo build --release --locked` all passed on the final tree.
+- `target\release\isolmass.exe --smoke-test` passed end to end: behaviour slices A1-C6, the PE GUI-subsystem check, tray registration/deletion, settings defaults/round-trips/IO, and a fresh NSIS build reporting installer structure, version 0.3.0 and 428,093 bytes against the 3 MiB budget.
+- `package.bat` passed its gates (executable ≤ 2.5 MiB, installer ≤ 3 MiB, `ProductVersion`/`FileVersion` equality on both artifacts, SHA-256 written). Signing was skipped because no `SIGNTOOL_CERT_SHA1` is configured; the artifacts are unsigned development builds.
+- Runtime verification on the real desktop (3840 x 1080 virtual desktop, 96 DPI, light theme) used screen captures of the live windows: Settings at 660 x 580 and at the enforced 520 x 430 minimum; the container reported `nMax=415, nPage=254` at minimum size and `nPos` moved 0 -> 42 across page-down/line-up, with cards and their controls moving together, the navigation/header/footer pinned and no leftover pixels from the previous frame (the reported defect); the Editor view with its single-row swatch circles; the tray palette; a live selection with the 28 px toolbar; and the magnifier during an active drag.
+- Local unsigned artifacts for this pass: executable **914,432 bytes**, SHA-256 `6ce4c26bd61892345fe7457b543eda0a6ad5f3ba61d47303cd5c8d15876f05c7`; installer **428,093 bytes**, SHA-256 `a0fda8d77f0e93892990076723a97257279d8d2f9519e9b3f23258b25f32eefd`. Both embed version 0.3.0.
+- Keyboard traversal was checked through the dialog manager's own order: `GetNextDlgTabItem` from the window returns **10 stops per view** and descends into the container (`General`: hotkey 200, delay 500, folder 102, JPEG 601, quality 611, snap 400, close-after 401, nav 105, Save 100, Cancel 101; `Editor`: colour 300, thickness 320, startup 402, notify 403, auto-check 404, auto-install 405, manual check 103, nav 106, Save 100, Cancel 101). Hidden view controls are skipped and radio groups expose only their checked member, so `WS_EX_CONTROLPARENT` traversal works after the re-parent.
+- Not exercised in this pass: dark-theme visuals (flipping the OS theme was avoided), DPI other than 96, IME/text entry and the RTSS/no-trails scenario.
 
 ## 0.2.0 working-tree history — 2026-09-04
 
