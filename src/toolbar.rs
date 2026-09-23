@@ -20,6 +20,7 @@ pub enum ToolbarAction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolbarItem {
     Tool(ToolKind),
+    MoreTools,
     Action(ToolbarAction),
     Color([u8; 4]),
     ColorPicker,
@@ -41,10 +42,10 @@ pub struct Toolbar {
     pub action_bounds: Rect,
     pub buttons: Vec<ToolbarButton>,
     pub hovered_item: Option<ToolbarItem>,
-    pub active_tool: ToolKind,
     pub active_color: [u8; 4],
     pub active_thickness: i32,
     pub dpi: u32,
+    expanded: bool,
     viewport: Rect,
 }
 
@@ -66,7 +67,9 @@ impl Toolbar {
         viewport: Rect,
         active_tool: ToolKind,
         active_color: [u8; 4],
+        custom_color: [u8; 4],
         active_thickness: i32,
+        expanded: bool,
         show_color: bool,
         show_thickness: bool,
         can_undo: bool,
@@ -84,6 +87,7 @@ impl Toolbar {
             (ToolbarItem::Tool(ToolKind::Rectangle), true),
             (ToolbarItem::Tool(ToolKind::Arrow), true),
             (ToolbarItem::Tool(ToolKind::Pen), true),
+            (ToolbarItem::MoreTools, true),
             (ToolbarItem::Tool(ToolKind::Highlight), true),
             (ToolbarItem::Tool(ToolKind::Text), true),
             (ToolbarItem::Tool(ToolKind::Step), true),
@@ -92,11 +96,22 @@ impl Toolbar {
             (ToolbarItem::Action(ToolbarAction::Undo), can_undo),
             (ToolbarItem::Action(ToolbarAction::Redo), can_redo),
         ];
+        let secondary = |item: ToolbarItem| {
+            matches!(
+                item,
+                ToolbarItem::Tool(
+                    ToolKind::Highlight
+                        | ToolKind::Text
+                        | ToolKind::Step
+                        | ToolKind::Blur
+                        | ToolKind::Redact
+                )
+            )
+        };
+        let visible_count = tool_items.len() as i32 - if expanded { 0 } else { 5 };
         let tool_width = tool_button + pad * 2;
-        let tool_height = pad * 2
-            + tool_items.len() as i32 * tool_button
-            + (tool_items.len() as i32 - 1) * scale(2)
-            + scale(12);
+        let tool_height =
+            pad * 2 + visible_count * tool_button + (visible_count - 1) * scale(2) + scale(12);
 
         let color_size = scale(18);
         let color_step = scale(22);
@@ -106,7 +121,7 @@ impl Toolbar {
         let action_step = scale(32);
         let section_gap = scale(8);
         let colors_width = if show_color {
-            PRESET_COLORS.len() as i32 * color_step - (color_step - color_size) + scale(30)
+            4 * color_step - (color_step - color_size) + scale(30)
         } else {
             0
         };
@@ -240,15 +255,26 @@ impl Toolbar {
             make_l(true, true, safe.right, safe.bottom - action_height)
         });
 
+        let quick_colors = [
+            PRESET_COLORS[0],
+            PRESET_COLORS[3],
+            PRESET_COLORS[4],
+            custom_color,
+        ];
         let mut buttons = Vec::with_capacity(
-            tool_items.len()
-                + usize::from(show_color) * (PRESET_COLORS.len() + 1)
+            visible_count as usize
+                + usize::from(show_color) * (quick_colors.len() + 1)
                 + usize::from(show_thickness) * 2
                 + 4,
         );
         let mut y = tool_bounds.bottom - pad - tool_button;
-        for (item, enabled) in tool_items {
-            let is_checked = matches!(item, ToolbarItem::Tool(tool) if tool == active_tool);
+        for (item, enabled) in tool_items
+            .into_iter()
+            .filter(|(item, _)| expanded || !secondary(*item))
+        {
+            let is_checked = matches!(item, ToolbarItem::Tool(tool) if tool == active_tool)
+                || matches!(item, ToolbarItem::MoreTools)
+                    && (expanded || secondary(ToolbarItem::Tool(active_tool)));
             buttons.push(ToolbarButton {
                 item,
                 rect: Rect::new(
@@ -264,7 +290,7 @@ impl Toolbar {
                 + scale(2)
                 + if matches!(
                     item,
-                    ToolbarItem::Tool(ToolKind::Highlight | ToolKind::Redact)
+                    ToolbarItem::MoreTools | ToolbarItem::Action(ToolbarAction::Undo)
                 ) {
                     scale(6)
                 } else {
@@ -274,7 +300,7 @@ impl Toolbar {
         let item_y = action_bounds.top + (action_height - color_size) / 2;
         let mut x = action_bounds.left + pad;
         if show_color {
-            for color in PRESET_COLORS {
+            for color in quick_colors {
                 buttons.push(ToolbarButton {
                     item: ToolbarItem::Color(color),
                     rect: Rect::new(x, item_y, x + color_size, item_y + color_size),
@@ -293,7 +319,7 @@ impl Toolbar {
                     item_y + color_size + scale(4),
                 ),
                 is_enabled: true,
-                is_checked: !PRESET_COLORS.contains(&active_color),
+                is_checked: active_color == custom_color,
             });
             x += scale(26) + section_gap;
         }
@@ -372,10 +398,10 @@ impl Toolbar {
                 action_bounds: bounds,
                 buttons,
                 hovered_item: None,
-                active_tool,
                 active_color,
                 active_thickness,
                 dpi: (cell * 96 / 32).max(24) as u32,
+                expanded,
                 viewport,
             };
         }
@@ -384,10 +410,10 @@ impl Toolbar {
             action_bounds,
             buttons,
             hovered_item: None,
-            active_tool,
             active_color,
             active_thickness,
             dpi,
+            expanded,
             viewport,
         }
     }
@@ -464,8 +490,8 @@ impl Toolbar {
         }
         for button in &self.buttons {
             let hovered = self.hovered_item == Some(button.item) && button.is_enabled;
-            let selected =
-                matches!(button.item, ToolbarItem::Tool(tool) if tool == self.active_tool);
+            let selected = button.is_checked
+                && matches!(button.item, ToolbarItem::Tool(_) | ToolbarItem::MoreTools);
             let primary = button.item == ToolbarItem::Action(ToolbarAction::Copy);
             let fill = if primary {
                 accent
@@ -575,6 +601,16 @@ impl Toolbar {
                 ToolbarItem::Tool(tool) => {
                     draw_tool_icon(hdc, button.rect, tool, ink, card, self.dpi)
                 }
+                ToolbarItem::MoreTools => {
+                    icon(
+                        hdc,
+                        button.rect,
+                        if self.expanded { 0xe70d } else { 0xe70e },
+                        scale(16),
+                        ink,
+                        true,
+                    );
+                }
                 ToolbarItem::Action(action) => {
                     let codepoint = match action {
                         ToolbarAction::Undo => 0xe7a7,
@@ -601,6 +637,12 @@ impl Toolbar {
                 ToolbarItem::Tool(ToolKind::Text) => "Text · T".to_owned(),
                 ToolbarItem::Tool(ToolKind::Blur) => "Blur · B (not secure redaction)".to_owned(),
                 ToolbarItem::Tool(ToolKind::Redact) => "Karart · M (opaque)".to_owned(),
+                ToolbarItem::MoreTools => if self.expanded {
+                    "Hide extra tools"
+                } else {
+                    "More tools"
+                }
+                .to_owned(),
                 ToolbarItem::Action(ToolbarAction::Undo) => "Undo · Ctrl+Z".to_owned(),
                 ToolbarItem::Action(ToolbarAction::Redo) => "Redo · Ctrl+Y".to_owned(),
                 ToolbarItem::Action(ToolbarAction::Save) => {
@@ -609,10 +651,10 @@ impl Toolbar {
                 ToolbarItem::Action(ToolbarAction::Copy) => "Copy · Ctrl+C".to_owned(),
                 ToolbarItem::Action(ToolbarAction::Settings) => "Settings · Ctrl+,".to_owned(),
                 ToolbarItem::Action(ToolbarAction::Cancel) => "Cancel · Esc".to_owned(),
-                ToolbarItem::Color(_) => "Annotation color".to_owned(),
+                ToolbarItem::Color(_) => "Drawing color".to_owned(),
                 ToolbarItem::ColorPicker => "More colors...".to_owned(),
                 ToolbarItem::ThicknessSlider => {
-                    format!("Drag to adjust stroke · {} px", self.active_thickness)
+                    format!("Drag or scroll for stroke · {} px", self.active_thickness)
                 }
                 ToolbarItem::ThicknessValue => "Type 1–64 px · Enter to apply".to_owned(),
             };
@@ -650,19 +692,10 @@ fn draw_tool_icon(
     surface: COLORREF,
     dpi: u32,
 ) {
-    use crate::drawing::{icon, label, rounded, with_pen};
+    use crate::drawing::{label, rounded, with_pen};
     let unit = |value: i32| (value * dpi as i32 / 96).max(1);
     let cx = (rect.left + rect.right) / 2;
     let cy = (rect.top + rect.bottom) / 2;
-    let s = unit(1);
-    if tool == ToolKind::Pen {
-        icon(hdc, rect, 0xe70f, unit(15), ink, true);
-        return;
-    }
-    if tool == ToolKind::Text {
-        label(hdc, rect, "T", unit(15), ink, true);
-        return;
-    }
     if tool == ToolKind::Step {
         rounded(
             hdc,
@@ -674,29 +707,9 @@ fn draw_tool_icon(
         label(hdc, rect, "1", unit(12), surface, true);
         return;
     }
-    if tool == ToolKind::Highlight {
-        rounded(
-            hdc,
-            Rect::new(cx - unit(9), cy - unit(2), cx + unit(10), cy + unit(4)),
-            unit(2),
-            ink,
-            ink,
-        );
-        return;
-    }
-    if tool == ToolKind::Redact {
-        rounded(
-            hdc,
-            Rect::new(cx - unit(9), cy - unit(5), cx + unit(10), cy + unit(6)),
-            unit(1),
-            ink,
-            ink,
-        );
-        return;
-    }
     let point = |x: i32, y: i32| POINT {
-        x: cx + x * s,
-        y: cy + y * s,
+        x: cx + x * dpi as i32 / 96,
+        y: cy + y * dpi as i32 / 96,
     };
     with_pen(hdc, PS_SOLID, unit(2), ink, || unsafe {
         match tool {
@@ -726,6 +739,46 @@ fn draw_tool_icon(
                         point(-9, -7),
                     ],
                 );
+            }
+            ToolKind::Pen => {
+                let _ = Polyline(
+                    hdc,
+                    &[
+                        point(-8, 7),
+                        point(-6, 2),
+                        point(5, -9),
+                        point(9, -5),
+                        point(-2, 6),
+                        point(-8, 7),
+                    ],
+                );
+                let _ = Polyline(hdc, &[point(3, -7), point(7, -3)]);
+            }
+            ToolKind::Text => {
+                let _ = Polyline(hdc, &[point(-8, -8), point(8, -8)]);
+                let _ = Polyline(hdc, &[point(0, -8), point(0, 8)]);
+                let _ = Polyline(hdc, &[point(-4, 8), point(4, 8)]);
+            }
+            ToolKind::Highlight => {
+                let _ = Polyline(
+                    hdc,
+                    &[point(-7, 5), point(5, -7), point(8, -4), point(-4, 8)],
+                );
+                let _ = Polyline(hdc, &[point(-9, 9), point(9, 9)]);
+            }
+            ToolKind::Redact => {
+                let _ = Polyline(
+                    hdc,
+                    &[
+                        point(-9, -6),
+                        point(9, -6),
+                        point(9, 6),
+                        point(-9, 6),
+                        point(-9, -6),
+                    ],
+                );
+                let _ = Polyline(hdc, &[point(-7, 3), point(7, 3)]);
+                let _ = Polyline(hdc, &[point(-7, -2), point(7, -2)]);
             }
             ToolKind::Arrow => {
                 let _ = Polyline(hdc, &[point(-9, 7), point(7, -5), point(0, -5)]);
@@ -781,8 +834,14 @@ pub fn show_command_menu(
     }
     fn group(item: ToolbarItem) -> &'static str {
         match item {
-            ToolbarItem::Tool(ToolKind::Step | ToolKind::Blur | ToolKind::Redact) => "More tools",
-            ToolbarItem::Tool(_) => "Tools",
+            ToolbarItem::Tool(
+                ToolKind::Highlight
+                | ToolKind::Text
+                | ToolKind::Step
+                | ToolKind::Blur
+                | ToolKind::Redact,
+            ) => "More tools",
+            ToolbarItem::Tool(_) | ToolbarItem::MoreTools => "Tools",
             ToolbarItem::Action(ToolbarAction::Undo | ToolbarAction::Redo) => "History",
             ToolbarItem::Color(_) | ToolbarItem::ColorPicker => "Color",
             ToolbarItem::ThicknessSlider | ToolbarItem::ThicknessValue => "Line width",
@@ -800,6 +859,7 @@ pub fn show_command_menu(
             ToolbarItem::Tool(ToolKind::Text) => "Text".to_owned(),
             ToolbarItem::Tool(ToolKind::Blur) => "Blur (not secure redaction)".to_owned(),
             ToolbarItem::Tool(ToolKind::Redact) => "Karart (opaque)".to_owned(),
+            ToolbarItem::MoreTools => "Show or hide extra tools".to_owned(),
             ToolbarItem::Action(ToolbarAction::Undo) => "Undo".to_owned(),
             ToolbarItem::Action(ToolbarAction::Redo) => "Redo".to_owned(),
             ToolbarItem::Action(ToolbarAction::Save) => "Save screenshot".to_owned(),
@@ -880,7 +940,9 @@ mod tests {
             viewport,
             ToolKind::Rectangle,
             PRESET_COLORS[0],
+            PRESET_COLORS[5],
             3,
+            false,
             true,
             true,
             true,
@@ -994,7 +1056,9 @@ mod tests {
                 viewport,
                 ToolKind::Text,
                 PRESET_COLORS[0],
+                PRESET_COLORS[5],
                 2,
+                false,
                 true,
                 true,
                 true,

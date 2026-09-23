@@ -709,9 +709,9 @@ fn draw_settings_button(
         return;
     }
     if toggle {
-        // Compact Fluent switch: 32 x 18 track with a 12 px thumb.
-        let track_width = scale(32, dpi);
-        let track_height = scale(18, dpi);
+        // A larger, DPI-scaled track and thumb retain a clear outline at 100–200%.
+        let track_width = scale(44, dpi);
+        let track_height = scale(24, dpi);
         let x = rect.right - track_width - scale(10, dpi);
         let y = (rect.top + rect.bottom - track_height) / 2;
         let track = if checked {
@@ -742,16 +742,22 @@ fn draw_settings_button(
                 },
             )
         });
-        let thumb = x + scale(if checked { 17 } else { 3 }, dpi);
+        let thumb_size = scale(18, dpi);
+        let thumb = if checked {
+            x + track_width - thumb_size - scale(3, dpi)
+        } else {
+            x + scale(3, dpi)
+        };
+        let thumb_top = y + (track_height - thumb_size) / 2;
         let thumb_color = if checked { color_card() } else { color_muted() };
         crate::drawing::with_brush(hdc, thumb_color, || {
             crate::drawing::with_pen(hdc, PS_SOLID, 1, thumb_color, || unsafe {
                 let _ = Ellipse(
                     hdc,
                     thumb,
-                    y + scale(3, dpi),
-                    thumb + scale(12, dpi),
-                    y + scale(15, dpi),
+                    thumb_top,
+                    thumb + thumb_size,
+                    thumb_top + thumb_size,
                 );
             })
         });
@@ -1463,7 +1469,7 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
 
     label(hwnd, 700, "isolmaSS")?;
     label(hwnd, 716, "Preferences")?;
-    label(hwnd, 717, "Capture, annotate, save and update.")?;
+    label(hwnd, 717, "Capture, draw, save and update.")?;
     label(
         hwnd,
         718,
@@ -1579,7 +1585,7 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
         BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32,
     )?;
 
-    label(content, 713, "Annotation defaults")?;
+    label(content, 713, "Drawing")?;
     label(content, 703, "Default color")?;
     // The swatches render as circles; the window text stays for screen readers.
     for (index, name) in [
@@ -1718,7 +1724,10 @@ fn apply_button_action(hwnd: HWND, state: &mut SettingsWindowState, id: i32) {
             state.settings.default_color = PRESET_COLORS[(id - ID_COLOR_FIRST) as usize];
         }
         ID_COLOR_CUSTOM => match crate::ui::choose_color(hwnd, state.settings.default_color) {
-            Ok(Some(color)) => state.settings.default_color = color,
+            Ok(Some(color)) => {
+                state.settings.default_color = color;
+                state.settings.last_custom_color = color;
+            }
             Ok(None) => {}
             Err(error) => crate::ui::error(hwnd, "Color picker failed", &error.to_string()),
         },
@@ -1945,7 +1954,8 @@ unsafe extern "system" fn settings_wnd_proc(
                         }
                         if id != ID_THICKNESS_SLIDER
                             && (crate::theme::theme() == crate::theme::Theme::Dark
-                                || (ID_COLOR_FIRST..ID_COLOR_FIRST + 8).contains(&id))
+                                || (ID_COLOR_FIRST..ID_COLOR_FIRST + 8).contains(&id)
+                                || (ID_WINDOW_SNAP..=ID_CHECK_UPDATES).contains(&id))
                         {
                             draw_settings_button(draw, unsafe { &*state_ptr });
                             return LRESULT(CDRF_SKIPDEFAULT as isize);

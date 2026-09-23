@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 use windows::Win32::Foundation::{COLORREF, POINT};
 use windows::Win32::Graphics::Gdi::{
     CreatePen, CreateSolidBrush, DeleteObject, GetStockObject, HBRUSH, HDC, HGDIOBJ, HPEN,
-    NULL_BRUSH, PS_DOT, PS_SOLID, Polygon, Polyline, Rectangle as GdiRectangle, SelectObject,
+    NULL_BRUSH, NULL_PEN, PS_DOT, PS_SOLID, Polygon, Polyline, Rectangle as GdiRectangle,
+    SelectObject,
 };
 
 /// Available annotation tools.
@@ -702,8 +703,8 @@ impl AnnotationObject {
 
                 let u = (dx / len, dy / len);
                 let perp = (-u.1, u.0);
-                let head_len = (*thickness as f64 * 4.5).clamp(16.0, 36.0).min(len * 0.5);
-                let head_width = head_len * 0.65;
+                let head_len = (*thickness as f64 * 2.5).clamp(16.0, 96.0).min(len * 0.5);
+                let head_width = head_len * 0.5 + *thickness as f64 * 0.25;
 
                 let base = (end.0 as f64 - u.0 * head_len, end.1 as f64 - u.1 * head_len);
                 let p_left = (base.0 + perp.0 * head_width, base.1 + perp.1 * head_width);
@@ -736,6 +737,11 @@ impl AnnotationObject {
                     old: old_brush,
                     brush: Some(brush),
                 };
+                // Reusing the wide shaft pen to outline the triangle inflates every
+                // edge by half the stroke width and deforms the head as width changes.
+                unsafe {
+                    SelectObject(hdc, GetStockObject(NULL_PEN));
+                }
 
                 let arrow_points = [
                     POINT { x: end.0, y: end.1 },

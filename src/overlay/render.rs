@@ -5,22 +5,26 @@ impl OverlayState {
         let Some(selection) = self.committed_selection else {
             return;
         };
-        let viewport = selection_work_viewport(&self.capture, selection);
         let scale = |value: i32| (value * self.dpi as i32 / 96).max(1);
         let tokens = crate::theme::tokens();
         let label = format!("{} × {} px", selection.width(), selection.height());
-        let label_width = scale(104).min(viewport.width().max(1));
-        let label_height = scale(20);
-        let x = selection.left.clamp(
-            viewport.left,
-            (viewport.right - label_width).max(viewport.left),
+        let bounds = capture_hud_bounds(&self.capture, selection, self.dpi);
+        let hovered = bounds.contains(self.pointer.0, self.pointer.1);
+        crate::drawing::rounded(
+            self.mem_dc,
+            bounds,
+            scale(6),
+            if hovered {
+                tokens.accent_tint
+            } else {
+                tokens.card
+            },
+            if hovered {
+                tokens.accent
+            } else {
+                tokens.stroke
+            },
         );
-        let y = (selection.top - label_height - scale(4)).clamp(
-            viewport.top,
-            (viewport.bottom - label_height).max(viewport.top),
-        );
-        let bounds = Rect::new(x, y, x + label_width, y + label_height);
-        crate::drawing::rounded(self.mem_dc, bounds, scale(6), tokens.card, tokens.stroke);
         crate::drawing::label(self.mem_dc, bounds, &label, scale(11), tokens.text, true);
     }
 
@@ -338,7 +342,9 @@ impl OverlayState {
                         viewport,
                         self.active_tool,
                         toolbar_color,
+                        self.settings.last_custom_color,
                         toolbar_thickness,
+                        self.tools_expanded,
                         show_color,
                         show_thickness,
                         can_undo,

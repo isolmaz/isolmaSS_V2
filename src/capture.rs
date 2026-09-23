@@ -31,6 +31,10 @@ pub enum SelectionHitZone {
     TopRightCorner,
     BottomLeftCorner,
     BottomRightCorner,
+    TopEdge,
+    RightEdge,
+    BottomEdge,
+    LeftEdge,
     BorderEdge,
     Interior,
     None,
@@ -179,7 +183,21 @@ impl Rect {
             return SelectionHitZone::BottomRightCorner;
         }
 
-        // 2. 4 Border edge bands (centered on each border line, thickness = 2 * band, excluding corners)
+        // Midpoint grips change one dimension; the remaining border still moves.
+        let middle_x = self.left + self.width() / 2;
+        let middle_y = self.top + self.height() / 2;
+        for (zone, cx, cy) in [
+            (SelectionHitZone::TopEdge, middle_x, self.top),
+            (SelectionHitZone::RightEdge, self.right, middle_y),
+            (SelectionHitZone::BottomEdge, middle_x, self.bottom),
+            (SelectionHitZone::LeftEdge, self.left, middle_y),
+        ] {
+            if (x - cx).abs() <= half_h && (y - cy).abs() <= half_h {
+                return zone;
+            }
+        }
+
+        // Remaining border bands move the selection.
         let outer = self.inflate(band, band);
         let inner = self.inflate(-band, -band);
 
@@ -628,7 +646,7 @@ impl CaptureBuffer {
         }
     }
 
-    /// Draws a dual-tone high-contrast selection border and 4 corner resize handles.
+    /// Draws a dual-tone high-contrast selection border and eight resize handles.
     /// Outer border: 1px black outline.
     /// Main border: 2px accent outline.
     /// Corner handles: 8x8 px squares with white fill and 1px black border.
@@ -654,16 +672,22 @@ impl CaptureBuffer {
         // Inner 2px accent border
         Self::draw_border(target, width, height, rect, accent_bgra, 2);
 
-        // 2. Four 8x8 corner resize handles
+        // Four corners and four edge midpoints share the hit-test geometry.
         let half_h = 4;
-        let corners = [
+        let middle_x = rect.left + rect.width() / 2;
+        let middle_y = rect.top + rect.height() / 2;
+        let handles = [
             (rect.left, rect.top),
             (rect.right, rect.top),
             (rect.left, rect.bottom),
             (rect.right, rect.bottom),
+            (middle_x, rect.top),
+            (rect.right, middle_y),
+            (middle_x, rect.bottom),
+            (rect.left, middle_y),
         ];
 
-        for (cx, cy) in corners {
+        for (cx, cy) in handles {
             let handle_rect = Rect::new(cx - half_h, cy - half_h, cx + half_h, cy + half_h);
             Self::fill_rect(target, width, height, &handle_rect, handle_fill);
             Self::draw_border(target, width, height, &handle_rect, dark_border, 1);
@@ -697,29 +721,16 @@ mod tests {
             SelectionHitZone::BottomRightCorner
         );
 
-        // Border edge band (excluding corners, e.g. midpoint of top border, +/- 4px)
+        for (point, zone) in [
+            ((200, 100), SelectionHitZone::TopEdge),
+            ((300, 150), SelectionHitZone::RightEdge),
+            ((200, 200), SelectionHitZone::BottomEdge),
+            ((100, 150), SelectionHitZone::LeftEdge),
+        ] {
+            assert_eq!(sel.hit_test_selection(point, 4, 8), zone);
+        }
         assert_eq!(
-            sel.hit_test_selection((200, 100), 4, 8),
-            SelectionHitZone::BorderEdge
-        );
-        assert_eq!(
-            sel.hit_test_selection((200, 98), 4, 8),
-            SelectionHitZone::BorderEdge
-        );
-        assert_eq!(
-            sel.hit_test_selection((200, 102), 4, 8),
-            SelectionHitZone::BorderEdge
-        );
-        assert_eq!(
-            sel.hit_test_selection((100, 150), 4, 8),
-            SelectionHitZone::BorderEdge
-        );
-        assert_eq!(
-            sel.hit_test_selection((300, 150), 4, 8),
-            SelectionHitZone::BorderEdge
-        );
-        assert_eq!(
-            sel.hit_test_selection((200, 200), 4, 8),
+            sel.hit_test_selection((160, 100), 4, 8),
             SelectionHitZone::BorderEdge
         );
 

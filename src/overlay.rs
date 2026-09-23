@@ -31,12 +31,12 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_DBLCLKS, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetCursorPos,
     GetWindowLongPtrW, IDC_ARROW, IDC_CROSS, IDC_HAND, IDC_IBEAM, IDC_SIZEALL, IDC_SIZENESW,
-    IDC_SIZENWSE, KillTimer, LWA_ALPHA, LoadCursorW, MA_ACTIVATE, RegisterClassExW, SW_SHOW,
-    SetCursor, SetForegroundWindow, SetLayeredWindowAttributes, SetTimer, SetWindowLongPtrW,
-    ShowWindow, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE, WM_MOUSEMOVE, WM_PAINT,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER, WNDCLASSEXW, WS_EX_LAYERED,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    IDC_SIZENS, IDC_SIZENWSE, IDC_SIZEWE, KillTimer, LWA_ALPHA, LoadCursorW, MA_ACTIVATE,
+    RegisterClassExW, SW_SHOW, SetCursor, SetForegroundWindow, SetLayeredWindowAttributes,
+    SetTimer, SetWindowLongPtrW, ShowWindow, WM_CHAR, WM_CLOSE, WM_DESTROY, WM_DPICHANGED,
+    WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEACTIVATE,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETCURSOR, WM_TIMER,
+    WNDCLASSEXW, WS_EX_LAYERED, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 use windows::core::{PCWSTR, Result, w};
 
@@ -80,6 +80,19 @@ pub fn is_editor_shortcut(vk: u32, modifiers: u32, editing: bool) -> bool {
     } else {
         matches!(vk, 8 | 13 | 27 | 35..=40 | 46) || !editing && tool_for_key(vk).is_some()
     }
+}
+
+fn capture_hud_bounds(capture: &CaptureBuffer, selection: Rect, dpi: u32) -> Rect {
+    let viewport = selection_work_viewport(capture, selection);
+    let scale = |value: i32| (value * dpi as i32 / 96).max(1);
+    let width = scale(104).min(viewport.width().max(1));
+    let height = scale(20);
+    let x = selection
+        .left
+        .clamp(viewport.left, (viewport.right - width).max(viewport.left));
+    let y = (selection.top - height - scale(4))
+        .clamp(viewport.top, (viewport.bottom - height).max(viewport.top));
+    Rect::new(x, y, x + width, y + height)
 }
 
 fn selection_work_viewport(capture: &CaptureBuffer, selection: Rect) -> Rect {
@@ -245,6 +258,7 @@ pub struct OverlayState {
     active_thickness: i32,
     thickness_input: Option<String>,
     thickness_dragging: bool,
+    thickness_wheel_remainder: i32,
     thickness_drag_original: Option<(usize, AnnotationKind)>,
     objects: Vec<AnnotationObject>,
     selected_id: Option<usize>,
@@ -257,6 +271,7 @@ pub struct OverlayState {
     text_edit: Option<TextEditState>,
 
     toolbar: Option<Toolbar>,
+    tools_expanded: bool,
 
     mem_dc: HDC,
     dib: HBITMAP,
@@ -290,6 +305,7 @@ impl Drop for OverlayState {
 impl OverlayState {
     pub fn handle_escape_action(&mut self) -> EscapeAction {
         if self.thickness_input.take().is_some() {
+            set_overlay_text_editing(false);
             EscapeAction::CancelledThicknessEdit
         } else if self.text_edit.take().is_some() {
             EscapeAction::CancelledTextEdit
@@ -333,6 +349,7 @@ impl OverlayState {
             active_thickness: Settings::default().default_thickness,
             thickness_input: None,
             thickness_dragging: false,
+            thickness_wheel_remainder: 0,
             thickness_drag_original: None,
             objects: Vec::new(),
             selected_id: None,
@@ -343,6 +360,7 @@ impl OverlayState {
             dragging_selection: None,
             text_edit: None,
             toolbar: None,
+            tools_expanded: false,
             mem_dc: HDC::default(),
             dib: HBITMAP::default(),
             old_bmp: HGDIOBJ::default(),
@@ -458,24 +476,19 @@ impl OverlayState {
     fn handle_key_down(&mut self, hwnd: HWND, vk: usize, mods: isize) -> LRESULT {
         if let Some(digits) = &mut self.thickness_input {
             match vk {
-                0x30..=0x39 if digits.len() < 2 => {
-                    let digit = (vk as u8 - b'0') as i32;
-                    let next = digits.parse::<i32>().unwrap_or(0) * 10 + digit;
-                    if (1..=64).contains(&next) {
-                        digits.push(char::from_u32(vk as u32).unwrap_or_default());
-                    }
-                }
                 value if value == VK_BACK.0 as usize => {
                     digits.pop();
                 }
                 value if value == VK_RETURN.0 as usize => {
-                    if let Ok(value) = digits.parse::<i32>() {
+                    if let Ok(value @ 1..=64) = digits.parse::<i32>() {
                         self.thickness_input = None;
+                        set_overlay_text_editing(false);
                         self.change_thickness(value, true);
                     }
                 }
                 value if value == VK_ESCAPE.0 as usize => {
                     self.thickness_input = None;
+                    set_overlay_text_editing(false);
                 }
                 _ => {}
             }
@@ -490,10 +503,40 @@ impl OverlayState {
             && self.text_edit.is_none()
         {
             let buttons = self.toolbar.as_ref().map(|toolbar| toolbar.buttons.clone());
-            let Some(buttons) = buttons else {
+            let Some(mut buttons) = buttons else {
                 return LRESULT(0);
             };
+            for tool in [
+                ToolKind::Highlight,
+                ToolKind::Text,
+                ToolKind::Step,
+                ToolKind::Blur,
+                ToolKind::Redact,
+            ] {
+                let item = ToolbarItem::Tool(tool);
+                if !buttons.iter().any(|button| button.item == item) {
+                    let at = buttons
+                        .iter()
+                        .position(|button| button.item == ToolbarItem::Action(ToolbarAction::Undo))
+                        .unwrap_or(buttons.len());
+                    buttons.insert(
+                        at,
+                        crate::toolbar::ToolbarButton {
+                            item,
+                            rect: Rect::default(),
+                            is_enabled: true,
+                            is_checked: tool == self.active_tool,
+                        },
+                    );
+                }
+            }
             match crate::toolbar::show_command_menu(hwnd, &buttons) {
+                Ok(Some(ToolbarItem::Tool(tool))) => {
+                    self.active_tool = tool;
+                    self.selected_id = None;
+                    self.persist_editor_preferences();
+                    self.redraw(hwnd);
+                }
                 Ok(Some(item)) => {
                     if let Some(rect) = buttons
                         .iter()
@@ -784,7 +827,16 @@ impl OverlayState {
     }
 
     fn handle_char(&mut self, hwnd: HWND, ch_code: u32) -> LRESULT {
-        if self.thickness_input.is_some() {
+        if let Some(digits) = &mut self.thickness_input {
+            if let Some(digit @ '0'..='9') = char::from_u32(ch_code)
+                && digits.len() < 2
+            {
+                let next = digits.parse::<i32>().unwrap_or(0) * 10 + (digit as i32 - '0' as i32);
+                if (1..=64).contains(&next) {
+                    digits.push(digit);
+                    self.redraw_chrome(hwnd);
+                }
+            }
             return LRESULT(0);
         }
         if let Some(edit) = &mut self.text_edit {
@@ -907,6 +959,23 @@ impl OverlayState {
         if self.text_edit.is_some() {
             return IDC_IBEAM;
         }
+        let Some(selection) = self.committed_selection else {
+            return IDC_CROSS;
+        };
+        if capture_hud_bounds(&self.capture, selection, self.dpi).contains(pt.0, pt.1) {
+            return IDC_SIZEALL;
+        }
+        match selection.hit_test_selection(pt, 4 * self.dpi as i32 / 96, 8 * self.dpi as i32 / 96) {
+            SelectionHitZone::TopLeftCorner | SelectionHitZone::BottomRightCorner => {
+                return IDC_SIZENWSE;
+            }
+            SelectionHitZone::TopRightCorner | SelectionHitZone::BottomLeftCorner => {
+                return IDC_SIZENESW;
+            }
+            SelectionHitZone::TopEdge | SelectionHitZone::BottomEdge => return IDC_SIZENS,
+            SelectionHitZone::LeftEdge | SelectionHitZone::RightEdge => return IDC_SIZEWE,
+            _ => {}
+        }
         if self.active_tool != ToolKind::Select {
             return if self.active_tool == ToolKind::Text {
                 IDC_IBEAM
@@ -938,12 +1007,11 @@ impl OverlayState {
             }
         }
 
-        let Some(selection) = self.committed_selection else {
-            return IDC_CROSS;
-        };
         match selection.hit_test_selection(pt, 4 * self.dpi as i32 / 96, 8 * self.dpi as i32 / 96) {
             SelectionHitZone::TopLeftCorner | SelectionHitZone::BottomRightCorner => IDC_SIZENWSE,
             SelectionHitZone::TopRightCorner | SelectionHitZone::BottomLeftCorner => IDC_SIZENESW,
+            SelectionHitZone::TopEdge | SelectionHitZone::BottomEdge => IDC_SIZENS,
+            SelectionHitZone::LeftEdge | SelectionHitZone::RightEdge => IDC_SIZEWE,
             SelectionHitZone::BorderEdge => IDC_SIZEALL,
             SelectionHitZone::Interior => {
                 if self.objects.iter().rev().any(|object| object.hit_test(pt)) {
@@ -1021,6 +1089,7 @@ unsafe extern "system" fn overlay_wnd_proc(
                 | WM_LBUTTONDOWN
                 | WM_LBUTTONUP
                 | WM_MOUSEMOVE
+                | WM_MOUSEWHEEL
                 | WM_LBUTTONDBLCLK
                 | WM_RBUTTONUP
                 | WM_TIMER
@@ -1040,6 +1109,7 @@ unsafe extern "system" fn overlay_wnd_proc(
                     } =>
                 {
                     let state = unsafe { &mut *state_ptr };
+                    state.settings.last_custom_color = color;
                     state.change_color(color);
                     state.redraw(hwnd);
                 }
@@ -1293,13 +1363,62 @@ unsafe extern "system" fn overlay_wnd_proc(
 
         WM_ERASEBKGND => LRESULT(1),
 
+        WM_MOUSEWHEEL => {
+            if !state_ptr.is_null() {
+                let state = unsafe { &mut *state_ptr };
+                if state.mode == OverlayMode::SelectionActive {
+                    let mut point = windows::Win32::Foundation::POINT {
+                        x: lparam.0 as i32 as i16 as i32,
+                        y: (lparam.0 >> 16) as i16 as i32,
+                    };
+                    if unsafe { ScreenToClient(hwnd, &mut point) }.as_bool()
+                        && matches!(
+                            state
+                                .toolbar
+                                .as_ref()
+                                .and_then(|tb| tb.hit_test((point.x, point.y))),
+                            Some(ToolbarItem::ThicknessSlider | ToolbarItem::ThicknessValue)
+                        )
+                    {
+                        state.thickness_wheel_remainder += (wparam.0 >> 16) as i16 as i32;
+                        let steps = state.thickness_wheel_remainder / 120;
+                        state.thickness_wheel_remainder %= 120;
+                        if steps != 0 {
+                            if state.thickness_input.take().is_some() {
+                                set_overlay_text_editing(false);
+                            }
+                            let value = (state.active_thickness + steps).clamp(1, 64);
+                            if value != state.active_thickness {
+                                state.change_thickness(value, true);
+                                state.redraw(hwnd);
+                            }
+                        }
+                        return LRESULT(0);
+                    }
+                    state.thickness_wheel_remainder = 0;
+                }
+            }
+            unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+
         WM_MOUSEMOVE => {
             if !state_ptr.is_null() {
                 let state = unsafe { &mut *state_ptr };
                 let client_x = (lparam.0 as i32) as i16 as i32;
                 let client_y = ((lparam.0 >> 16) as i32) as i16 as i32;
                 let pt = (client_x, client_y);
+                let previous_pointer = state.pointer;
                 state.pointer = pt;
+                if let Some(selection) = state.committed_selection
+                    && state.mode == OverlayMode::SelectionActive
+                {
+                    let hud = capture_hud_bounds(&state.capture, selection, state.dpi);
+                    if hud.contains(previous_pointer.0, previous_pointer.1)
+                        != hud.contains(pt.0, pt.1)
+                    {
+                        state.redraw_chrome(hwnd);
+                    }
+                }
 
                 let shift_down = (unsafe { GetKeyState(VK_SHIFT.0 as i32) } as u16 & 0x8000) != 0;
 
@@ -1425,6 +1544,22 @@ unsafe extern "system" fn overlay_wnd_proc(
                                                     .clamp((sel.left + 8).min(max_w), max_w);
                                                 sel.bottom =
                                                     client_y.clamp((sel.top + 8).min(max_h), max_h);
+                                            }
+                                            SelectionHitZone::TopEdge => {
+                                                sel.top =
+                                                    client_y.clamp(0, (sel.bottom - 8).max(0));
+                                            }
+                                            SelectionHitZone::RightEdge => {
+                                                sel.right = client_x
+                                                    .clamp((sel.left + 8).min(max_w), max_w);
+                                            }
+                                            SelectionHitZone::BottomEdge => {
+                                                sel.bottom =
+                                                    client_y.clamp((sel.top + 8).min(max_h), max_h);
+                                            }
+                                            SelectionHitZone::LeftEdge => {
+                                                sel.left =
+                                                    client_x.clamp(0, (sel.right - 8).max(0));
                                             }
                                             _ => {}
                                         }
@@ -1568,8 +1703,10 @@ unsafe extern "system" fn overlay_wnd_proc(
                     OverlayMode::SelectionActive => {
                         // 1. Toolbar button click
                         if let Some(item) = state.toolbar.as_ref().and_then(|tb| tb.hit_test(pt)) {
-                            if item != ToolbarItem::ThicknessValue {
-                                state.thickness_input = None;
+                            if item != ToolbarItem::ThicknessValue
+                                && state.thickness_input.take().is_some()
+                            {
+                                set_overlay_text_editing(false);
                             }
                             state.commit_text(hwnd);
 
@@ -1578,6 +1715,10 @@ unsafe extern "system" fn overlay_wnd_proc(
                                     state.active_tool = k;
                                     state.persist_editor_preferences();
                                     state.selected_id = None;
+                                    state.redraw(hwnd);
+                                }
+                                ToolbarItem::MoreTools => {
+                                    state.tools_expanded = !state.tools_expanded;
                                     state.redraw(hwnd);
                                 }
                                 ToolbarItem::Action(ToolbarAction::Undo) => {
@@ -1683,13 +1824,16 @@ unsafe extern "system" fn overlay_wnd_proc(
                                 }
                                 ToolbarItem::ThicknessValue => {
                                     state.thickness_input = Some(String::new());
+                                    set_overlay_text_editing(true);
                                     state.redraw(hwnd);
                                 }
                             }
                             return LRESULT(0);
                         }
 
-                        state.thickness_input = None;
+                        if state.thickness_input.take().is_some() {
+                            set_overlay_text_editing(false);
+                        }
                         // If text edit active, commit it when clicked elsewhere
                         if state.text_edit.is_some() {
                             state.commit_text(hwnd);
@@ -1698,6 +1842,45 @@ unsafe extern "system" fn overlay_wnd_proc(
                         let Some(sel) = state.committed_selection else {
                             return LRESULT(0);
                         };
+
+                        if capture_hud_bounds(&state.capture, sel, state.dpi).contains(pt.0, pt.1) {
+                            state.dragging_selection = Some(DragSelectionState {
+                                original_selection: sel,
+                                action: DragSelectionAction::Move,
+                                start_pos: pt,
+                                last_pos: pt,
+                            });
+                            state.selected_id = None;
+                            state.redraw(hwnd);
+                            return LRESULT(0);
+                        }
+
+                        let selection_zone = sel.hit_test_selection(
+                            pt,
+                            4 * state.dpi as i32 / 96,
+                            8 * state.dpi as i32 / 96,
+                        );
+                        if matches!(
+                            selection_zone,
+                            SelectionHitZone::TopLeftCorner
+                                | SelectionHitZone::TopRightCorner
+                                | SelectionHitZone::BottomLeftCorner
+                                | SelectionHitZone::BottomRightCorner
+                                | SelectionHitZone::TopEdge
+                                | SelectionHitZone::RightEdge
+                                | SelectionHitZone::BottomEdge
+                                | SelectionHitZone::LeftEdge
+                        ) {
+                            state.dragging_selection = Some(DragSelectionState {
+                                original_selection: sel,
+                                action: DragSelectionAction::Resize(selection_zone),
+                                start_pos: pt,
+                                last_pos: pt,
+                            });
+                            state.selected_id = None;
+                            state.redraw(hwnd);
+                            return LRESULT(0);
+                        }
 
                         if state.active_tool == ToolKind::Select {
                             let handle_radius = 7 * state.dpi as i32 / 96;
@@ -1715,26 +1898,15 @@ unsafe extern "system" fn overlay_wnd_proc(
                                 return LRESULT(0);
                             }
 
-                            let zone = sel.hit_test_selection(
-                                pt,
-                                4 * state.dpi as i32 / 96,
-                                8 * state.dpi as i32 / 96,
-                            );
-                            match zone {
+                            match selection_zone {
                                 SelectionHitZone::TopLeftCorner
                                 | SelectionHitZone::TopRightCorner
                                 | SelectionHitZone::BottomLeftCorner
-                                | SelectionHitZone::BottomRightCorner => {
-                                    state.dragging_selection = Some(DragSelectionState {
-                                        original_selection: sel,
-                                        action: DragSelectionAction::Resize(zone),
-                                        start_pos: pt,
-                                        last_pos: pt,
-                                    });
-                                    state.selected_id = None;
-                                    state.redraw(hwnd);
-                                    return LRESULT(0);
-                                }
+                                | SelectionHitZone::BottomRightCorner
+                                | SelectionHitZone::TopEdge
+                                | SelectionHitZone::RightEdge
+                                | SelectionHitZone::BottomEdge
+                                | SelectionHitZone::LeftEdge => unreachable!(),
                                 SelectionHitZone::BorderEdge => {
                                     state.dragging_selection = Some(DragSelectionState {
                                         original_selection: sel,

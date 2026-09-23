@@ -1,8 +1,8 @@
 # Product status and roadmap
 
-## Current release: 0.4.0
+## Current release: 0.4.1
 
-isolmaSS is a local, native Windows tray capture editor. Its current interface has three settings tabs, System/Light/Dark appearance, recorded keyboard shortcuts with conflict handling, native color selection, 1–64 px width controls, selection dimensions, editable annotations, translucent highlighter, numbered steps, opaque redaction, copy/save/export and a native tray menu. The updater checks a public releases-only repository, asks before every installation, pins a publisher signature, waits for active work, and retains an executable rollback until startup health is checked.
+isolmaSS is a local, native Windows tray capture editor. Its current interface has three settings tabs, System/Light/Dark appearance, recorded keyboard shortcuts with conflict handling, native color selection with three quick colors and a persistent custom swatch, 1–64 px width controls with numeric entry and wheel steps, eight selection handles and movable dimensions label, a four-tool rail with expandable drawing tools, translucent highlighter, numbered steps, opaque redaction, copy/save/export and a native tray menu. The updater checks a public releases-only repository, asks before every installation, pins a publisher signature, waits for active work, and retains an executable rollback until startup health is checked.
 
 Build and trust requirements are in [README.md](README.md), [SECURITY.md](SECURITY.md) and [DISTRIBUTION.md](DISTRIBUTION.md). The source repository stays private; the public repository exposes only release metadata and artifacts.
 
@@ -17,4 +17,4 @@ The interactive desktop pass is user-owned. The source and release metadata must
 
 ## Deferred candidates
 
-Scrolling capture, OCR, video/GIF capture and cloud uploads are **not** part of 0.4.0. Evaluate them only with a separate privacy, performance and product brief. The current release remains local-first; blur is not a substitute for opaque redaction.
+Scrolling capture, OCR, video/GIF capture and cloud uploads are **not** part of 0.4.1. Evaluate them only with a separate privacy, performance and product brief. The current release remains local-first; blur is not a substitute for opaque redaction.

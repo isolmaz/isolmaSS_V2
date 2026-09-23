@@ -134,6 +134,7 @@ fn run_session(
         active_thickness,
         thickness_input: None,
         thickness_dragging: false,
+        thickness_wheel_remainder: 0,
         thickness_drag_original: None,
         objects: Vec::new(),
         selected_id: None,
@@ -145,6 +146,7 @@ fn run_session(
         dragging_selection: None,
         text_edit: None,
         toolbar: None,
+        tools_expanded: false,
 
         mem_dc,
         dib,

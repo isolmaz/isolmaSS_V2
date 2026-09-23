@@ -287,14 +287,25 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         Rect::new(0, 0, capture.width, capture.height),
         ToolKind::Rectangle,
         PRESET_COLORS[0],
+        PRESET_COLORS[5],
         3,
+        false,
         true,
         true,
         true,
         false,
         96,
     );
-    assert_eq!(tb.buttons.len(), 24); // Select/drawing/history + swatches/thickness/actions
+    assert!(
+        tb.buttons
+            .iter()
+            .any(|button| button.item == ToolbarItem::MoreTools)
+    );
+    assert!(
+        !tb.buttons
+            .iter()
+            .any(|button| button.item == ToolbarItem::Tool(ToolKind::Blur))
+    );
     assert!(tb.tool_bounds.left >= 0);
     assert!(tb.tool_bounds.bottom <= capture.height);
     assert!(tb.action_bounds.left >= 0);

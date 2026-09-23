@@ -1,13 +1,13 @@
 # isolmaSS
 
-Native Windows screenshot editor in Rust. Capture a region or window, annotate it, then copy or save it locally. There is no screenshot upload or telemetry. Version **0.4.0**.
+Native Windows screenshot editor in Rust. Capture a region or window, draw on it, then copy or save it locally. There is no screenshot upload or telemetry. Version **0.4.1**.
 
 ## Use
 
 1. Start `isolmass.exe`; it remains in the notification area. Launching it again opens the running instance's Settings rather than an installer.
 2. Press **PrintScreen**, click the tray icon, or choose **Capture now** from the native tray menu. The capture shortcut and delay are configurable.
-3. Drag a region of at least 8 × 8 pixels, or click a visible window with window snapping enabled. The selection shows its pixel dimensions without covering the image with a magnifier.
-4. Annotate with **Seç/taşı**, **Çerçeve**, arrow, pen, translucent highlighter, text, numbered steps, blur/pixelation or opaque **Karart**. Secondary tools are grouped in the toolbar's F10/Apps command menu. Select an annotation to move, recolor, adjust its width, resize where applicable, or delete it. Undo and redo include edits.
+3. Drag a region of at least 8 × 8 pixels, or click a visible window with window snapping enabled. Resize from the four corners or four edge midpoints; drag the dimensions label above the top-left corner to move the entire selection.
+4. Use the four main tools (**Seç/taşı**, **Çerçeve**, arrow, pen) or click the chevron for highlighter, text, numbered steps, blur/pixelation and opaque **Karart**. F10/Apps also exposes every tool. Select a drawing to move, recolor, adjust its width, resize where applicable, or delete it. Undo and redo include edits.
 5. Choose **Copy**, **Save** or **Save as**. Editor chrome, handles, selection frame, caret and unfinished previews do not appear in the exported image.
 
 **Karart** replaces covered pixels opaquely and is rendered after other annotations. Blur and highlighter are visual effects, **not** secure redaction. Inspect the exported image before sharing sensitive material.
@@ -29,17 +29,17 @@ Native Windows screenshot editor in Rust. Capture a region or window, annotate i
 | Shift while drawing | Square rectangle/redaction; 45-degree arrow angles |
 | Esc or right-click | Cancel the current edit, deselect, clear the selection, or close the editor |
 
-While editing text, Enter commits; Ctrl+C and Ctrl+S commit before exporting. Text selection, clipboard paste and local undo/redo are supported. Text is single-line and limited to 16 KiB; pasted newlines become spaces. The toolbar width slider and its numeric button accept **1–64 px**; click the number, type a value and press Enter, or press Esc to discard it. The editor also offers the native Windows color picker.
+While editing text, Enter commits; Ctrl+C and Ctrl+S commit before exporting. Text selection, clipboard paste and local undo/redo are supported. Text is single-line and limited to 16 KiB; pasted newlines become spaces. The toolbar width slider and its numeric button accept **1–64 px**: drag, scroll over either control in 1 px steps, or click the number, type a value and press Enter (Esc discards it). Three quick colors (red, green, blue) and a fourth last-picked custom color are shown next to the native Windows color picker. The custom color and active color persist across editor sessions.
 
 ## Settings and updates
 
-Settings has **Genel / Düzenleyici / Güncellemeler** tabs, a fixed header and footer, and scrollable content. Appearance can follow Windows or be explicitly light/dark. The general tab contains shortcut recording, capture delay, save location/format, startup and notification preferences. The editor tab contains annotation color, 1–64 px width, window snapping and close-after-action. The updates tab controls checks at startup and offers a manual check.
+Settings has **Genel / Düzenleyici / Güncellemeler** tabs, a fixed header and footer, and scrollable content. Appearance can follow Windows or be explicitly light/dark. The general tab contains shortcut recording, capture delay, save location/format, startup and notification preferences. The editor tab contains drawing color, 1–64 px width, window snapping and close-after-action. The updates tab controls checks at startup and offers a manual check.
 
 Record a shortcut using Ctrl/Alt/Shift/Win with a letter, digit, F1–F24 or PrintScreen; bare PrintScreen also works. Unsupported keys are ignored. An unavailable combination is reported rather than silently replacing the current shortcut. On a startup conflict, the app asks whether to use Ctrl+Shift+S for that session. Settings remain open after a save error.
 
 Update checks use public releases from [`isolmaz/isolmaSS-updates`](https://github.com/isolmaz/isolmaSS-updates). A newer release offers **Yükle / Daha sonra / Bu sürümü atla**; installation always requires an explicit choice. The skipped version stays skipped for automatic checks; a manual check can offer it again. Installation waits for the active editor/settings session and any copy/save action to finish, verifies the signed installer again, then restarts. The installer keeps a rollback executable until the installed app passes a startup check. See [SECURITY.md](SECURITY.md) and [DISTRIBUTION.md](DISTRIBUTION.md).
 
-The signed-update mechanism begins with version 0.4.0. An installation that cannot verify this release's pinned signature needs **one manual installation** of 0.4.0 before subsequent in-app updates. The free application-level signature does not remove Windows SmartScreen warnings; do not bypass a warning automatically. Portable ZIPs are for manual use, not in-place updates of an installed copy.
+The signed-update mechanism begins with version 0.4.0. An installation that predates the pinned verifier needs **one manual installation** of 0.4.0 or later before subsequent in-app updates. The free application-level signature does not remove Windows SmartScreen warnings; do not bypass a warning automatically. Portable ZIPs are for manual use, not in-place updates of an installed copy.
 
 The native tray menu provides Capture now, Settings, Open screenshot folder, Check for updates, recent captures and Quit. Quit waits until an active edit/settings session ends.
 

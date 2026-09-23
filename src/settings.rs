@@ -55,6 +55,7 @@ pub struct Settings {
     pub hotkey: HotkeyConfig,
     pub save_directory: PathBuf,
     pub default_color: [u8; 4],
+    pub last_custom_color: [u8; 4],
     pub default_thickness: i32,
     #[serde(default = "default_true")]
     pub enable_window_snap: bool,
@@ -85,6 +86,7 @@ impl Default for Settings {
             hotkey: HotkeyConfig::default(),
             save_directory: default_save_directory(),
             default_color: PRESET_COLORS[0], // Default vibrant red
+            last_custom_color: PRESET_COLORS[5],
             default_thickness: 4,
             enable_window_snap: true,
             close_after_action: true,
@@ -280,6 +282,7 @@ impl Settings {
             Err(error) => return Err(error),
         };
         latest.default_color = self.default_color;
+        latest.last_custom_color = self.last_custom_color;
         latest.default_thickness = self.default_thickness;
         latest.last_tool = self.last_tool;
         latest.save_to_path(&path)
@@ -355,7 +358,9 @@ mod tests {
 
     #[test]
     fn test_settings_save_to_path_roundtrip_and_error() {
-        let defaults = Settings::default();
+        let mut defaults = Settings::default();
+        defaults.last_custom_color = [17, 83, 209, 255];
+        defaults.default_color = defaults.last_custom_color;
         let unique_suffix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock should be after the Unix epoch")
