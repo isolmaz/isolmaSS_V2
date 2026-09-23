@@ -13,6 +13,8 @@ pub enum ToolKind {
     Rectangle,
     Arrow,
     Pen,
+    Highlight,
+    Step,
     Text,
     Blur,
     Redact,
@@ -86,6 +88,16 @@ pub enum AnnotationKind {
         points: Vec<(i32, i32)>,
         color: [u8; 4],
         thickness: i32,
+    },
+    Highlight {
+        points: Vec<(i32, i32)>,
+        color: [u8; 4],
+        thickness: i32,
+    },
+    Step {
+        pos: (i32, i32),
+        number: u32,
+        color: [u8; 4],
     },
     Text {
         pos: (i32, i32),
@@ -164,6 +176,9 @@ impl AnnotationObject {
             } => Rect::normalized(*start, *end).inflate(*thickness * 4, *thickness * 4),
             AnnotationKind::Pen {
                 points, thickness, ..
+            }
+            | AnnotationKind::Highlight {
+                points, thickness, ..
             } => {
                 if points.is_empty() {
                     return Rect::default();
@@ -178,7 +193,15 @@ impl AnnotationObject {
                     top = top.min(p.1);
                     bottom = bottom.max(p.1);
                 }
-                Rect::new(left, top, right + 1, bottom + 1).inflate(*thickness, *thickness)
+                let radius = if matches!(&self.kind, AnnotationKind::Highlight { .. }) {
+                    thickness.saturating_mul(2)
+                } else {
+                    *thickness
+                };
+                Rect::new(left, top, right + 1, bottom + 1).inflate(radius, radius)
+            }
+            AnnotationKind::Step { pos, .. } => {
+                Rect::new(pos.0 - 14, pos.1 - 14, pos.0 + 15, pos.1 + 15)
             }
             AnnotationKind::Text {
                 pos,
@@ -222,8 +245,15 @@ impl AnnotationObject {
             }
             AnnotationKind::Pen {
                 points, thickness, ..
+            }
+            | AnnotationKind::Highlight {
+                points, thickness, ..
             } => {
-                let tol = (*thickness as f64 + 6.0).max(8.0);
+                let tol = if matches!(&self.kind, AnnotationKind::Highlight { .. }) {
+                    (*thickness as f64 * 2.0).max(8.0)
+                } else {
+                    (*thickness as f64 + 6.0).max(8.0)
+                };
                 if points.len() == 1 {
                     let d = ((pt.0 - points[0].0).pow(2) + (pt.1 - points[0].1).pow(2)) as f64;
                     return d.sqrt() <= tol;
@@ -240,6 +270,7 @@ impl AnnotationObject {
                 }
                 false
             }
+            AnnotationKind::Step { .. } => self.bounds().contains(pt.0, pt.1),
             AnnotationKind::Text { .. } => self.bounds().inflate(4, 4).contains(pt.0, pt.1),
             AnnotationKind::Blur { rect, .. } | AnnotationKind::Redact { rect } => {
                 rect.contains(pt.0, pt.1)
@@ -262,13 +293,13 @@ impl AnnotationObject {
                 end.0 += dx;
                 end.1 += dy;
             }
-            AnnotationKind::Pen { points, .. } => {
+            AnnotationKind::Pen { points, .. } | AnnotationKind::Highlight { points, .. } => {
                 for p in points {
                     p.0 += dx;
                     p.1 += dy;
                 }
             }
-            AnnotationKind::Text { pos, .. } => {
+            AnnotationKind::Text { pos, .. } | AnnotationKind::Step { pos, .. } => {
                 pos.0 += dx;
                 pos.1 += dy;
             }
@@ -287,7 +318,7 @@ impl AnnotationObject {
             | AnnotationKind::Blur { rect, .. }
             | AnnotationKind::Redact { rect } => *rect,
             AnnotationKind::Arrow { start, end, .. } => Rect::normalized(*start, *end),
-            AnnotationKind::Pen { points, .. } => {
+            AnnotationKind::Pen { points, .. } | AnnotationKind::Highlight { points, .. } => {
                 let Some(first) = points.first() else {
                     return Rect::default();
                 };
@@ -301,7 +332,7 @@ impl AnnotationObject {
                 }
                 Rect::new(left, top, right, bottom)
             }
-            AnnotationKind::Text { .. } => self.bounds(),
+            AnnotationKind::Text { .. } | AnnotationKind::Step { .. } => self.bounds(),
         }
     }
 
@@ -316,6 +347,10 @@ impl AnnotationObject {
                 ],
                 2,
             );
+        }
+        if matches!(&self.kind, AnnotationKind::Step { .. }) {
+            let empty = (AnnotationResizeHandle::TopLeft, (0, 0));
+            return ([empty; 4], 0);
         }
         // Same rect as render_selection_indicator so handles sit on the visible
         // dashed box; hit-testing follows these points automatically.
@@ -444,6 +479,11 @@ impl AnnotationObject {
                 points,
                 color,
                 thickness,
+            }
+            | AnnotationKind::Highlight {
+                points,
+                color,
+                thickness,
             } => {
                 let source = AnnotationObject::new(0, original.clone()).geometry_bounds();
                 let target = Self::resized_rect(source, handle, cursor, limit, 2);
@@ -463,10 +503,18 @@ impl AnnotationObject {
                         (nx, ny)
                     })
                     .collect();
-                AnnotationKind::Pen {
-                    points: scaled,
-                    color: *color,
-                    thickness: *thickness,
+                if matches!(original, AnnotationKind::Highlight { .. }) {
+                    AnnotationKind::Highlight {
+                        points: scaled,
+                        color: *color,
+                        thickness: *thickness,
+                    }
+                } else {
+                    AnnotationKind::Pen {
+                        points: scaled,
+                        color: *color,
+                        thickness: *thickness,
+                    }
                 }
             }
             AnnotationKind::Text {
@@ -537,6 +585,7 @@ impl AnnotationObject {
                     font_size: new_font,
                 }
             }
+            AnnotationKind::Step { .. } => original.clone(),
         };
     }
 
@@ -545,8 +594,10 @@ impl AnnotationObject {
         match &mut self.kind {
             AnnotationKind::Rectangle { color, .. } => *color = new_color,
             AnnotationKind::Arrow { color, .. } => *color = new_color,
-            AnnotationKind::Pen { color, .. } => *color = new_color,
-            AnnotationKind::Text { color, .. } => *color = new_color,
+            AnnotationKind::Pen { color, .. }
+            | AnnotationKind::Highlight { color, .. }
+            | AnnotationKind::Step { color, .. }
+            | AnnotationKind::Text { color, .. } => *color = new_color,
             AnnotationKind::Blur { .. } | AnnotationKind::Redact { .. } => {}
         }
     }
@@ -556,8 +607,11 @@ impl AnnotationObject {
         match &mut self.kind {
             AnnotationKind::Rectangle { thickness, .. } => *thickness = new_thickness,
             AnnotationKind::Arrow { thickness, .. } => *thickness = new_thickness,
-            AnnotationKind::Pen { thickness, .. } => *thickness = new_thickness,
+            AnnotationKind::Pen { thickness, .. } | AnnotationKind::Highlight { thickness, .. } => {
+                *thickness = new_thickness
+            }
             AnnotationKind::Text { .. }
+            | AnnotationKind::Step { .. }
             | AnnotationKind::Blur { .. }
             | AnnotationKind::Redact { .. } => {}
         }
@@ -569,6 +623,8 @@ impl AnnotationObject {
             AnnotationKind::Rectangle { color, .. }
             | AnnotationKind::Arrow { color, .. }
             | AnnotationKind::Pen { color, .. }
+            | AnnotationKind::Highlight { color, .. }
+            | AnnotationKind::Step { color, .. }
             | AnnotationKind::Text { color, .. } => Some(*color),
             AnnotationKind::Blur { .. } | AnnotationKind::Redact { .. } => None,
         }
@@ -579,8 +635,10 @@ impl AnnotationObject {
         match &self.kind {
             AnnotationKind::Rectangle { thickness, .. }
             | AnnotationKind::Arrow { thickness, .. }
-            | AnnotationKind::Pen { thickness, .. } => Some(*thickness),
+            | AnnotationKind::Pen { thickness, .. }
+            | AnnotationKind::Highlight { thickness, .. } => Some(*thickness),
             AnnotationKind::Text { .. }
+            | AnnotationKind::Step { .. }
             | AnnotationKind::Blur { .. }
             | AnnotationKind::Redact { .. } => None,
         }
@@ -699,6 +757,25 @@ impl AnnotationObject {
                 color,
                 thickness,
             } => render_pen_preview(hdc, points, *color, *thickness),
+            AnnotationKind::Step { number, color, .. } => {
+                let circle = self.bounds();
+                let ink = bgra_to_colorref(*color);
+                crate::drawing::rounded(hdc, circle, 28, ink, ink);
+                let brightness =
+                    (color[2] as u32 * 299 + color[1] as u32 * 587 + color[0] as u32 * 114) / 1000;
+                crate::drawing::label(
+                    hdc,
+                    circle,
+                    &number.to_string(),
+                    14,
+                    if brightness > 140 {
+                        COLORREF(0)
+                    } else {
+                        COLORREF(0x00ff_ffff)
+                    },
+                    true,
+                );
+            }
             AnnotationKind::Text {
                 pos,
                 text,
@@ -707,8 +784,10 @@ impl AnnotationObject {
             } => {
                 crate::drawing::text(hdc, *pos, text, *font_size, bgra_to_colorref(*color));
             }
-            AnnotationKind::Blur { .. } | AnnotationKind::Redact { .. } => {
-                // Blur modifies the underlying pixel buffer directly via `render_blur`
+            AnnotationKind::Highlight { .. }
+            | AnnotationKind::Blur { .. }
+            | AnnotationKind::Redact { .. } => {
+                // CPU pixel effects render through `render_blur`, not opaque GDI.
             }
         }
     }
@@ -716,6 +795,13 @@ impl AnnotationObject {
     /// Renders the blur / pixelate effect directly onto the 32-bit BGRA buffer.
     pub fn render_blur(&self, buffer: &mut [u8], width: i32, height: i32) {
         match &self.kind {
+            AnnotationKind::Highlight {
+                points,
+                color,
+                thickness,
+            } => {
+                render_highlight(buffer, width, height, points, *color, *thickness);
+            }
             AnnotationKind::Blur { rect, block_size } => {
                 apply_pixelate_blur(buffer, width, height, rect, *block_size)
             }
@@ -787,6 +873,100 @@ impl AnnotationObject {
             }
         }
     }
+}
+
+/// Blend each marker stroke once, including its self-intersections, over the preceding image.
+pub(crate) fn render_highlight(
+    buffer: &mut [u8],
+    width: i32,
+    height: i32,
+    points: &[(i32, i32)],
+    color: [u8; 4],
+    thickness: i32,
+) {
+    if width <= 0
+        || height <= 0
+        || points.is_empty()
+        || (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|pixels| pixels.checked_mul(4))
+            .is_none_or(|bytes| bytes > buffer.len())
+    {
+        return;
+    }
+    let radius = thickness.clamp(1, 64) * 2;
+    let mut left = points[0].0;
+    let mut top = points[0].1;
+    let mut right = left;
+    let mut bottom = top;
+    for &(x, y) in &points[1..] {
+        left = left.min(x);
+        top = top.min(y);
+        right = right.max(x);
+        bottom = bottom.max(y);
+    }
+    let bounds = Rect::new(
+        left.saturating_sub(radius),
+        top.saturating_sub(radius),
+        right.saturating_add(radius + 1),
+        bottom.saturating_add(radius + 1),
+    )
+    .clamp(width, height);
+    if bounds.is_empty() {
+        return;
+    }
+    let bw = bounds.width() as usize;
+    let bh = bounds.height() as usize;
+    thread_local! { static MASK: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) }; }
+    MASK.with(|scratch| {
+        let mut mask = scratch.borrow_mut();
+        let area = bw * bh;
+        mask.resize(area, 0);
+        mask[..area].fill(0);
+        let segments = points.iter().zip(points.iter().skip(1)).chain(
+            points
+                .first()
+                .filter(|_| points.len() == 1)
+                .map(|point| (point, point)),
+        );
+        for (start, end) in segments {
+            let dx = end.0 - start.0;
+            let dy = end.1 - start.1;
+            let count = (dx.abs().max(dy.abs()) / (radius / 2).max(1)).max(1);
+            for step in 0..=count {
+                let cx = start.0 + ((dx as i64 * step as i64) / count as i64) as i32;
+                let cy = start.1 + ((dy as i64 * step as i64) / count as i64) as i32;
+                for y in (cy - radius).max(bounds.top)..=(cy + radius).min(bounds.bottom - 1) {
+                    let vertical = y - cy;
+                    let half = ((radius * radius - vertical * vertical) as f64).sqrt() as i32;
+                    let row_left = (cx - half).max(bounds.left);
+                    let row_right = (cx + half + 1).min(bounds.right);
+                    if row_left < row_right {
+                        let offset =
+                            (y - bounds.top) as usize * bw + (row_left - bounds.left) as usize;
+                        mask[offset..offset + (row_right - row_left) as usize].fill(1);
+                    }
+                }
+            }
+        }
+        const ALPHA: u32 = 96;
+        for y in 0..bh {
+            for x in 0..bw {
+                if mask[y * bw + x] == 0 {
+                    continue;
+                }
+                let offset =
+                    ((bounds.top as usize + y) * width as usize + bounds.left as usize + x) * 4;
+                for channel in 0..3 {
+                    buffer[offset + channel] = ((buffer[offset + channel] as u32 * (255 - ALPHA)
+                        + color[channel] as u32 * ALPHA
+                        + 127)
+                        / 255) as u8;
+                }
+                buffer[offset + 3] = 255;
+            }
+        }
+    });
 }
 
 /// Applies a fast mosaic pixelation / box-average blur directly to a 32-bit BGRA buffer.
@@ -1278,6 +1458,28 @@ mod tests {
         assert_eq!(
             object.geometry_bounds().width(),
             crate::drawing::measure_text(text, 22).0
+        );
+    }
+    #[test]
+    fn highlighter_blends_once_per_stroke_and_leaves_outside_pixels_unchanged() {
+        let original = [100, 100, 100, 255];
+        let mut pixels = original.repeat(40 * 20);
+        AnnotationObject::new(
+            1,
+            AnnotationKind::Highlight {
+                points: vec![(4, 10), (20, 10), (8, 10), (20, 10)],
+                color: [200, 0, 0, 255],
+                thickness: 2,
+            },
+        )
+        .render_blur(&mut pixels, 40, 20);
+        assert_eq!(
+            &pixels[(10 * 40 + 10) * 4..(10 * 40 + 10) * 4 + 4],
+            &[138, 62, 62, 255]
+        );
+        assert_eq!(
+            &pixels[(10 * 40 + 30) * 4..(10 * 40 + 30) * 4 + 4],
+            &original
         );
     }
 }

@@ -1,7 +1,7 @@
 @echo off
 setlocal
-if not defined SIGNTOOL_CERT_SHA1 (
-    echo [ERROR] Set SIGNTOOL_CERT_SHA1 to the SHA-1 thumbprint of the release code-signing certificate.
+if not defined ISOLMASS_SIGNING_THUMBPRINT (
+    echo [ERROR] Set ISOLMASS_SIGNING_THUMBPRINT to the pinned CurrentUser certificate thumbprint.
     exit /b 1
 )
 set REQUIRE_SIGNING=1

@@ -55,10 +55,9 @@ jobs:
         # the runner and puts makensis.exe on PATH for package.bat.
         run: choco install nsis -y --no-progress
       - name: Non-interactive packaging
-        # package.bat enforces the embedded ProductVersion/FileVersion match,
-        # the 2.5 MiB executable budget, the 3 MiB installer budget, and writes
-        # the SHA-256 digest file. This step additionally cross-checks the
-        # recorded digest against the produced installer.
+        # The runner verifies build/version/size/digest without a private key.
+        # Public releases are signed only on the approved publisher workstation
+        # and verified with --verify-update before uploading.
         run: |
           cmd /c package.bat
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

@@ -15,6 +15,27 @@ pub enum Theme {
     Light,
     Dark,
 }
+/// User-selected appearance. System tracks the Windows app theme.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ThemePreference {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
+// 0 = follow Windows, 1 = light, 2 = dark.
+static PREFERENCE: AtomicU8 = AtomicU8::new(0);
+
+pub fn set_preference(preference: ThemePreference) {
+    let value = match preference {
+        ThemePreference::System => 0,
+        ThemePreference::Light => 1,
+        ThemePreference::Dark => 2,
+    };
+    PREFERENCE.store(value, Ordering::Release);
+}
 
 /// The full Fluent color set for one theme.
 #[derive(Clone, Copy)]
@@ -114,12 +135,17 @@ fn log_registry_fallback(context: &str) {
 
 /// Returns the cached system theme, reading `AppsUseLightTheme` on first use.
 pub fn theme() -> Theme {
+    match PREFERENCE.load(Ordering::Acquire) {
+        1 => return Theme::Light,
+        2 => return Theme::Dark,
+        _ => {}
+    }
     match THEME.load(Ordering::Acquire) {
         1 => Theme::Light,
         2 => Theme::Dark,
         _ => {
             let light = read_dword(
-                r"Software\Microsoft\Windows\CurrentVersion\Explorer\Personalize",
+                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
                 "AppsUseLightTheme",
             )
             .map(|value| value != 0)
@@ -301,16 +327,6 @@ pub const CARD_PADDING: i32 = 12;
 // ---------------------------------------------------------------------------
 // Cache control — live theme flips and accent broadcasts.
 // ---------------------------------------------------------------------------
-
-/// Overrides the cached system theme (used when `WM_SETTINGCHANGE` reports a
-/// new `AppsUseLightTheme` value).
-pub fn set_theme(value: Theme) {
-    let known = match value {
-        Theme::Light => 1,
-        Theme::Dark => 2,
-    };
-    THEME.store(known, Ordering::Release);
-}
 
 /// Drops the theme and accent caches so the next read hits the registry.
 pub fn invalidate_theme_cache() {

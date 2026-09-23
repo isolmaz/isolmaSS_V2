@@ -1,7 +1,103 @@
 //! Shared Win32 lifetime and modal-loop rules. Child windows never quit the UI thread.
-use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result};
+
+/// Native Windows color picker; cancellation is distinct from a dialog failure.
+pub fn choose_color(owner: HWND, initial: [u8; 4]) -> Result<Option<[u8; 4]>> {
+    use windows::Win32::UI::Controls::Dialogs::{
+        CC_FULLOPEN, CC_RGBINIT, CHOOSECOLORW, ChooseColorW, CommDlgExtendedError,
+    };
+    let _suspend = crate::hotkey::OverlayInputSuspension::new();
+    let mut custom = [COLORREF(0); 16];
+    let mut dialog = CHOOSECOLORW {
+        lStructSize: std::mem::size_of::<CHOOSECOLORW>() as u32,
+        hwndOwner: owner,
+        rgbResult: crate::annotation::bgra_to_colorref(initial),
+        lpCustColors: custom.as_mut_ptr(),
+        Flags: CC_RGBINIT | CC_FULLOPEN,
+        ..Default::default()
+    };
+    if !unsafe { ChooseColorW(&mut dialog).as_bool() } {
+        let error = unsafe { CommDlgExtendedError() };
+        return if error.0 == 0 {
+            Ok(None)
+        } else {
+            Err(windows::core::Error::from_hresult(
+                windows::core::HRESULT::from_win32(error.0),
+            ))
+        };
+    }
+    let value = dialog.rgbResult.0;
+    Ok(Some([
+        (value >> 16) as u8,
+        (value >> 8) as u8,
+        value as u8,
+        255,
+    ]))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum UpdateChoice {
+    Install,
+    Later,
+    SkipVersion,
+}
+
+/// Three explicit outcomes; task-dialog failure never authorizes an install.
+pub fn ask_for_update(owner: HWND, version: &str) -> Result<UpdateChoice> {
+    use windows::Win32::UI::Controls::{
+        TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TDF_ALLOW_DIALOG_CANCELLATION, TaskDialogIndirect,
+    };
+    let _suspend = crate::hotkey::OverlayInputSuspension::new();
+    let title: Vec<u16> = "isolmaSS update".encode_utf16().chain(Some(0)).collect();
+    let heading: Vec<u16> = format!("isolmaSS {version} is available")
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let content: Vec<u16> =
+        "Download and install the verified release after your current work finishes?"
+            .encode_utf16()
+            .chain(Some(0))
+            .collect();
+    let labels: Vec<Vec<u16>> = ["Yükle", "Daha sonra", "Bu sürümü atla"]
+        .iter()
+        .map(|label| label.encode_utf16().chain(Some(0)).collect())
+        .collect();
+    let buttons = [
+        TASKDIALOG_BUTTON {
+            nButtonID: 100,
+            pszButtonText: PCWSTR(labels[0].as_ptr()),
+        },
+        TASKDIALOG_BUTTON {
+            nButtonID: 101,
+            pszButtonText: PCWSTR(labels[1].as_ptr()),
+        },
+        TASKDIALOG_BUTTON {
+            nButtonID: 102,
+            pszButtonText: PCWSTR(labels[2].as_ptr()),
+        },
+    ];
+    let config = TASKDIALOGCONFIG {
+        cbSize: std::mem::size_of::<TASKDIALOGCONFIG>() as u32,
+        hwndParent: owner,
+        dwFlags: TDF_ALLOW_DIALOG_CANCELLATION,
+        pszWindowTitle: PCWSTR(title.as_ptr()),
+        pszMainInstruction: PCWSTR(heading.as_ptr()),
+        pszContent: PCWSTR(content.as_ptr()),
+        cButtons: buttons.len() as u32,
+        pButtons: buttons.as_ptr(),
+        nDefaultButton: 101,
+        ..Default::default()
+    };
+    let mut selected = 0;
+    unsafe { TaskDialogIndirect(&config, Some(&mut selected), None, None)? };
+    Ok(match selected {
+        100 => UpdateChoice::Install,
+        102 => UpdateChoice::SkipVersion,
+        _ => UpdateChoice::Later,
+    })
+}
 
 /// Declare after the state stored in GWLP_USERDATA so the window is destroyed first.
 pub struct OwnedWindow(pub HWND);
@@ -20,7 +116,6 @@ impl Drop for OwnedWindow {
 pub enum WindowKind {
     Overlay,
     Settings,
-    Menu,
 }
 
 pub fn window_loop(hwnd: HWND, kind: WindowKind) -> Result<()> {
@@ -46,16 +141,14 @@ pub fn window_loop(hwnd: HWND, kind: WindowKind) -> Result<()> {
             WM_DWMCOLORIZATIONCOLORCHANGED => crate::theme::invalidate_accent(),
             _ => {}
         }
+        if kind == WindowKind::Settings && crate::settings_window::handle_key_recording(hwnd, &msg)
+        {
+            continue;
+        }
         if dialog && msg.message == WM_KEYDOWN && msg.wParam == WPARAM(27) {
             unsafe {
                 PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0))?;
             }
-            continue;
-        }
-        if kind == WindowKind::Menu
-            && msg.message == WM_KEYDOWN
-            && crate::tray::menu::navigate(hwnd, msg.wParam.0)
-        {
             continue;
         }
         if !dialog || !unsafe { IsDialogMessageW(hwnd, &msg).as_bool() } {

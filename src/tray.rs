@@ -264,6 +264,14 @@ unsafe extern "system" fn tray_wnd_proc(
             queue_command(TrayCommand::CancelCapture);
             LRESULT(0)
         }
+        WM_SETTINGCHANGE => {
+            crate::theme::invalidate_theme_cache();
+            LRESULT(0)
+        }
+        WM_DWMCOLORIZATIONCOLORCHANGED => {
+            crate::theme::invalidate_accent();
+            LRESULT(0)
+        }
         WM_CLOSE => {
             queue_command(TrayCommand::Exit);
             if crate::hotkey::is_overlay_active()
@@ -297,9 +305,8 @@ impl Drop for MenuGuard {
 }
 
 fn show_context_menu(hwnd: HWND, anchor: Option<POINT>) {
-    // Tray callbacks are sent messages: a second right-click arrives while the
-    // first palette's modal loop is pumping. Ignore it instead of nesting a
-    // second modal loop that the first palette's destruction would corrupt.
+    // Tray callbacks are sent messages: ignore a second right-click while
+    // the system popup's modal menu loop is active.
     if MENU_OPEN.swap(true, Ordering::AcqRel) {
         return;
     }

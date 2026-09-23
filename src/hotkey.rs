@@ -55,15 +55,6 @@ impl HotkeyConfig {
         }
     }
 
-    /// Alternative fallback: Alt + PrintScreen
-    pub fn alt_print_screen() -> Self {
-        Self {
-            modifiers: (MOD_ALT | MOD_NOREPEAT).0,
-            vk: VK_SNAPSHOT.0 as u32,
-            description: "Alt+PrintScreen".to_string(),
-        }
-    }
-
     /// Parses a human-readable hotkey string like "Ctrl+Shift+S" or "PrintScreen".
     pub fn from_str(s: &str) -> Option<Self> {
         let trimmed = s.trim();
@@ -89,10 +80,10 @@ impl HotkeyConfig {
                 return None;
             }
             match part.to_ascii_lowercase().as_str() {
-                "ctrl" | "control" => modifiers |= MOD_CONTROL.0,
-                "shift" => modifiers |= MOD_SHIFT.0,
-                "alt" => modifiers |= MOD_ALT.0,
-                "win" | "windows" => modifiers |= MOD_WIN.0,
+                "ctrl" | "control" if modifiers & MOD_CONTROL.0 == 0 => modifiers |= MOD_CONTROL.0,
+                "shift" if modifiers & MOD_SHIFT.0 == 0 => modifiers |= MOD_SHIFT.0,
+                "alt" if modifiers & MOD_ALT.0 == 0 => modifiers |= MOD_ALT.0,
+                "win" | "windows" if modifiers & MOD_WIN.0 == 0 => modifiers |= MOD_WIN.0,
                 "prtsc" | "printscreen" => vk = VK_SNAPSHOT.0 as u32,
                 key if key.len() == 1 => {
                     let ch = key.chars().next().unwrap().to_ascii_uppercase();
@@ -117,7 +108,7 @@ impl HotkeyConfig {
             }
         }
 
-        if vk == 0 {
+        if vk == 0 || (vk != VK_SNAPSHOT.0 as u32 && modifiers == MOD_NOREPEAT.0) {
             return None;
         }
 
@@ -633,36 +624,11 @@ pub fn start_hotkey_listener(
             if primary_ok {
                 requested_config.description.clone()
             } else {
-                let fallback = HotkeyConfig::fallback();
-                let fallback_ok = unsafe {
-                    RegisterHotKey(
-                        HWND::default(),
-                        HOTKEY_ID,
-                        HOT_KEY_MODIFIERS(fallback.modifiers),
-                        fallback.vk,
-                    )
-                }
-                .is_ok();
-
-                if fallback_ok {
-                    crate::diagnostics::record(
-                        "hotkey",
-                        &format!(
-                            "'{}' was unavailable; using fallback '{}'.",
-                            requested_config.description, fallback.description
-                        ),
-                    );
-                    TARGET_VK.store(fallback.vk, Ordering::SeqCst);
-                    TARGET_MODS.store(fallback.modifiers, Ordering::SeqCst);
-                    fallback.description
-                } else {
-                    let err = format!(
-                        "Failed to register hotkeys '{}' or '{}'.",
-                        requested_config.description, fallback.description
-                    );
-                    let _ = ready_tx.send(Err(err));
-                    return;
-                }
+                let _ = ready_tx.send(Err(format!(
+                    "The shortcut '{}' is already registered by Windows or another application.",
+                    requested_config.description
+                )));
+                return;
             }
         };
 
@@ -813,5 +779,28 @@ mod tests {
         // Cleanup
         OVERLAY_ACTIVE.store(false, Ordering::SeqCst);
         set_overlay_text_editing(false);
+    }
+    #[test]
+    fn recorder_shortcuts_require_supported_key_and_modifier() {
+        for description in ["PrintScreen", "Ctrl+F24", "Alt+7", "Win+Shift+PrintScreen"] {
+            assert!(
+                HotkeyConfig::from_str(description).is_some(),
+                "{description}"
+            );
+        }
+        for description in [
+            "A",
+            "F2",
+            "Ctrl+F25",
+            "Ctrl+Ctrl+S",
+            "Ctrl+Mouse4",
+            "Ctrl+VolumeUp",
+            "Ctrl+A+B",
+        ] {
+            assert!(
+                HotkeyConfig::from_str(description).is_none(),
+                "{description}"
+            );
+        }
     }
 }

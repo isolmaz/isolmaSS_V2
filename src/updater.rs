@@ -7,13 +7,8 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use std::time::{Duration, Instant};
-use windows::Win32::Foundation::{HANDLE, HWND};
+use windows::Win32::Foundation::HWND;
 use windows::Win32::Networking::WinHttp::WinHttpCloseHandle;
-use windows::Win32::Security::WinTrust::{
-    WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0, WINTRUST_FILE_INFO,
-    WTD_CHOICE_FILE, WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT, WTD_REVOKE_WHOLECHAIN,
-    WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE, WinVerifyTrust,
-};
 use windows::Win32::Storage::FileSystem::{
     MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
 };
@@ -22,16 +17,18 @@ use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{PCWSTR, w};
 
 const RELEASE_API_HOST: &str = "api.github.com";
-const RELEASE_API_PATH: &str = "/repos/isolmaz/isolmaSS_V2/releases/latest";
+const RELEASE_API_PATH: &str = "/repos/isolmaz/isolmaSS-updates/releases/latest";
 const INSTALLER_ASSET_NAME: &str = "isolmass-setup.exe";
+const SIGNATURE_ASSET_NAME: &str = "isolmass-setup.exe.sig";
+const PINNED_PUBLIC_KEY: &[u8] = include_bytes!("../resources/update-public-key.blob");
 const MAX_METADATA_BYTES: usize = 2 * 1024 * 1024;
 const MAX_INSTALLER_BYTES: usize = 32 * 1024 * 1024;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UpdateInfo {
     pub version: String,
     pub download_url: String,
     pub sha256: String,
+    pub signature_url: String,
     pub release_url: String,
 }
 
@@ -319,59 +316,74 @@ pub fn check_for_update() -> Result<Option<UpdateInfo>, String> {
         return Ok(None);
     }
 
-    let asset = release
-        .assets
-        .into_iter()
-        .find(|asset| asset.name.eq_ignore_ascii_case(INSTALLER_ASSET_NAME))
-        .ok_or_else(|| {
-            format!(
-                "Release {} has no {INSTALLER_ASSET_NAME} asset.",
-                release.tag_name
-            )
-        })?;
+    let mut installer = None;
+    let mut signature = None;
+    for asset in release.assets {
+        if asset.name == INSTALLER_ASSET_NAME {
+            if installer.replace(asset).is_some() {
+                return Err("The release contains duplicate installers.".to_string());
+            }
+        } else if asset.name == SIGNATURE_ASSET_NAME && signature.replace(asset).is_some() {
+            return Err("The release contains duplicate signatures.".to_string());
+        }
+    }
+    let asset = installer.ok_or_else(|| {
+        format!(
+            "Release {} has no {INSTALLER_ASSET_NAME} asset.",
+            release.tag_name
+        )
+    })?;
+    let signature = signature.ok_or_else(|| {
+        format!(
+            "Release {} has no {SIGNATURE_ASSET_NAME} asset.",
+            release.tag_name
+        )
+    })?;
     let digest = asset
         .digest
         .and_then(|digest| digest.strip_prefix("sha256:").map(str::to_owned))
         .filter(|digest| digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit()))
-        .ok_or_else(|| "The release installer has no valid SHA-256 digest.".to_string())?;
-
+        .ok_or_else(|| "The release installer has no valid SHA-256 digest.".to_string())?
+        .to_ascii_lowercase();
     parse_https_url(&asset.browser_download_url)?;
+    parse_https_url(&signature.browser_download_url)?;
     if !release
         .html_url
-        .starts_with("https://github.com/isolmaz/isolmaSS_V2/releases/")
+        .starts_with("https://github.com/isolmaz/isolmaSS-updates/releases/tag/")
     {
         return Err("Unexpected release information URL.".to_string());
     }
     Ok(Some(UpdateInfo {
         version: release.tag_name.trim_start_matches('v').to_string(),
         download_url: asset.browser_download_url,
-        sha256: digest.to_ascii_lowercase(),
+        signature_url: signature.browser_download_url,
+        sha256: digest,
         release_url: release.html_url,
     }))
 }
 
 pub fn download_update(update: &UpdateInfo) -> Result<PathBuf, String> {
-    if parse_version(&update.version).is_none() {
-        return Err("Invalid update version.".to_string());
+    if parse_version(&update.version).is_none()
+        || update.sha256.len() != 64
+        || !update.sha256.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("Invalid signed update metadata.".to_string());
     }
+    let (signature_host, signature_path) = parse_https_url(&update.signature_url)?;
+    let signature = http_get(signature_host, &signature_path, 512)?;
+    verify_release_signature(&update.version, &update.sha256, &signature)?;
     let (host, path) = parse_https_url(&update.download_url)?;
     let bytes = http_get(host, &path, MAX_INSTALLER_BYTES)?;
-    let actual = sha256_hex(&bytes)?;
-    if actual != update.sha256 {
-        return Err(format!(
-            "The installer digest does not match the GitHub release metadata (expected {}, got {actual}).",
-            update.sha256
-        ));
+    if sha256_hex(&bytes)? != update.sha256 {
+        return Err(
+            "The downloaded installer does not match its signed SHA-256 digest.".to_string(),
+        );
     }
-
-    let root = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .ok_or_else(|| "%LOCALAPPDATA% is unavailable.".to_string())?
-        .join("isolmaSS")
-        .join("updates");
+    let root = update_directory()?;
     std::fs::create_dir_all(&root)
         .map_err(|error| format!("Could not create the update folder: {error}"))?;
     let destination = root.join(format!("isolmass-setup-{}.exe", update.version));
+    let signature_destination = destination.with_extension("exe.sig");
     let temporary = root.join(format!(
         ".download-{}-{}-{}.tmp",
         std::process::id(),
@@ -381,133 +393,109 @@ pub fn download_update(update: &UpdateInfo) -> Result<PathBuf, String> {
             .map_err(|error| error.to_string())?
             .as_nanos()
     ));
+    let signature_temporary = temporary.with_extension("sig.tmp");
     let result = (|| {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temporary)
-            .map_err(|error| error.to_string())?;
-        file.write_all(&bytes)
-            .and_then(|_| file.sync_all())
-            .map_err(|error| format!("Could not write the update installer: {error}"))?;
-        drop(file);
+        write_staged_file(&temporary, &bytes)?;
         check_cancelled(Instant::now() + Duration::from_secs(1))?;
-        verify_authenticode(&temporary)?;
         if file_version(&temporary)? != update.version {
             return Err(
-                "The installer file version does not match the announced release.".to_string(),
+                "The installer file version does not match the signed release.".to_string(),
             );
         }
-        use std::os::windows::ffi::OsStrExt;
-        let source: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
-        let target: Vec<u16> = destination
-            .as_os_str()
-            .encode_wide()
-            .chain(Some(0))
-            .collect();
-        unsafe {
-            MoveFileExW(
-                PCWSTR(source.as_ptr()),
-                PCWSTR(target.as_ptr()),
-                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-            )
-        }
-        .map_err(|error| format!("Could not finalize the update installer: {error}"))?;
+        write_staged_file(&signature_temporary, &signature)?;
+        replace_staged_file(&temporary, &destination)?;
+        replace_staged_file(&signature_temporary, &signature_destination)?;
         Ok(destination)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&temporary);
+        let _ = std::fs::remove_file(&signature_temporary);
     }
     result
 }
 
-fn trusted_signer_key(path: &Path) -> Result<String, String> {
+fn update_directory() -> Result<PathBuf, String> {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .ok_or_else(|| "%LOCALAPPDATA% is unavailable.".to_string())
+        .map(|root| root.join("isolmaSS").join("updates"))
+}
+
+fn write_staged_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|error| format!("Could not stage the update: {error}"))?;
+    file.write_all(bytes)
+        .and_then(|_| file.sync_all())
+        .map_err(|error| format!("Could not write the staged update: {error}"))
+}
+
+fn replace_staged_file(source: &Path, target: &Path) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
-    let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-    let mut file_info = WINTRUST_FILE_INFO {
-        cbStruct: std::mem::size_of::<WINTRUST_FILE_INFO>() as u32,
-        pcwszFilePath: PCWSTR(path_wide.as_ptr()),
-        hFile: HANDLE::default(),
-        pgKnownSubject: std::ptr::null_mut(),
-    };
-    let mut data = WINTRUST_DATA {
-        cbStruct: std::mem::size_of::<WINTRUST_DATA>() as u32,
-        dwUIChoice: WTD_UI_NONE,
-        fdwRevocationChecks: WTD_REVOKE_WHOLECHAIN,
-        dwUnionChoice: WTD_CHOICE_FILE,
-        Anonymous: WINTRUST_DATA_0 {
-            pFile: &mut file_info,
-        },
-        dwStateAction: WTD_STATEACTION_VERIFY,
-        dwProvFlags: WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT,
-        ..Default::default()
-    };
-    let mut action = WINTRUST_ACTION_GENERIC_VERIFY_V2;
-    let status = unsafe {
-        WinVerifyTrust(
-            HWND::default(),
-            &mut action,
-            (&mut data as *mut WINTRUST_DATA).cast(),
-        )
-    };
-    let key = if status == 0 {
-        unsafe { signer_public_key(&data) }
-    } else {
-        Err(format!(
-            "Authenticode verification failed with status 0x{status:08X}."
-        ))
-    };
-    data.dwStateAction = WTD_STATEACTION_CLOSE;
+    let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let target: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
     unsafe {
-        let _ = WinVerifyTrust(
-            HWND::default(),
-            &mut action,
-            (&mut data as *mut WINTRUST_DATA).cast(),
-        );
+        MoveFileExW(
+            PCWSTR(source.as_ptr()),
+            PCWSTR(target.as_ptr()),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
     }
-    key
+    .map_err(|error| format!("Could not finalize the staged update: {error}"))
 }
 
-unsafe fn signer_public_key(data: &WINTRUST_DATA) -> Result<String, String> {
+/// Signature covers both the exact semantic version and the downloaded executable's digest.
+fn verify_release_signature(version: &str, digest: &str, signature: &[u8]) -> Result<(), String> {
     use windows::Win32::Security::Cryptography::{
-        CALG_SHA_256, CryptHashPublicKeyInfo, HCRYPTPROV_LEGACY, X509_ASN_ENCODING,
+        BCRYPT_KEY_HANDLE, BCRYPT_PAD_PKCS1, BCRYPT_PKCS1_PADDING_INFO, BCRYPT_RSA_ALG_HANDLE,
+        BCRYPT_RSAPUBLIC_BLOB, BCRYPT_SHA256_ALGORITHM, BCryptDestroyKey, BCryptImportKeyPair,
+        BCryptVerifySignature,
     };
-    use windows::Win32::Security::WinTrust::{
-        WTHelperGetProvSignerFromChain, WTHelperProvDataFromStateData,
-    };
-    let provider = unsafe { WTHelperProvDataFromStateData(data.hWVTStateData) };
-    if provider.is_null() {
-        return Err("No verified signature provider.".to_string());
-    }
-    let signer = unsafe { WTHelperGetProvSignerFromChain(provider, 0, false, 0) };
-    if signer.is_null() || unsafe { (*signer).csCertChain == 0 || (*signer).pasCertChain.is_null() }
+    if parse_version(version).is_none()
+        || digest.len() != 64
+        || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || signature.len() != 384
     {
-        return Err("No verified publisher certificate.".to_string());
+        return Err("Invalid update signature metadata.".to_string());
     }
-    let certificate = unsafe { (*(*signer).pasCertChain).pCert };
-    if certificate.is_null() || unsafe { (*certificate).pCertInfo.is_null() } {
-        return Err("The publisher certificate has no public key.".to_string());
-    }
-    let mut digest = [0u8; 32];
-    let mut size = 32u32;
+    let message = format!(
+        "isolmaSS-update-v1\n{version}\n{}\n",
+        digest.to_ascii_lowercase()
+    );
+    let hash = sha256_digest(message.as_bytes())?;
+    let mut key = BCRYPT_KEY_HANDLE::default();
     unsafe {
-        CryptHashPublicKeyInfo(
-            HCRYPTPROV_LEGACY::default(),
-            CALG_SHA_256,
+        BCryptImportKeyPair(
+            BCRYPT_RSA_ALG_HANDLE,
+            BCRYPT_KEY_HANDLE::default(),
+            BCRYPT_RSAPUBLIC_BLOB,
+            &mut key,
+            PINNED_PUBLIC_KEY,
             0,
-            X509_ASN_ENCODING,
-            &(*(*certificate).pCertInfo).SubjectPublicKeyInfo,
-            Some(digest.as_mut_ptr()),
-            &mut size,
         )
     }
-    .map_err(|error| format!("Publisher public key could not be verified: {error}"))?;
-    if size != 32 {
-        return Err("Unexpected publisher digest length.".to_string());
+    .ok()
+    .map_err(|error| format!("Could not load the pinned update key: {error}"))?;
+    let padding = BCRYPT_PKCS1_PADDING_INFO {
+        pszAlgId: BCRYPT_SHA256_ALGORITHM,
+    };
+    let result = unsafe {
+        BCryptVerifySignature(
+            key,
+            Some((&raw const padding).cast()),
+            &hash,
+            signature,
+            BCRYPT_PAD_PKCS1,
+        )
     }
-    Ok(hex(&digest))
+    .ok();
+    unsafe {
+        let _ = BCryptDestroyKey(key);
+    }
+    result.map_err(|_| "The update signature does not match the pinned publisher key.".to_string())
 }
-
 /// Read the version embedded in an executable, independent of its filename or timestamp.
 pub fn file_version(path: &Path) -> Result<String, String> {
     use std::os::windows::ffi::OsStrExt;
@@ -550,24 +538,42 @@ pub fn file_version(path: &Path) -> Result<String, String> {
     ))
 }
 
-pub fn verify_authenticode(path: &Path) -> Result<(), String> {
-    let actual = trusted_signer_key(path)?;
-    // Trust the publisher of this verified running executable. Rotation keys must
-    // ship in an already trusted release, never in unsigned network metadata.
-    let configured = option_env!("ISOLMASS_UPDATE_PUBLIC_KEYS").unwrap_or("");
-    let own = std::env::current_exe()
-        .map_err(|error| error.to_string())
-        .and_then(|path| trusted_signer_key(&path));
-    if own.as_ref().is_ok_and(|key| key == &actual)
-        || configured
-            .split(';')
-            .any(|key| key.len() == 64 && key.eq_ignore_ascii_case(&actual))
-    {
-        return Ok(());
+fn verify_staged_installer(path: &Path) -> Result<(), String> {
+    let root = std::fs::canonicalize(update_directory()?)
+        .map_err(|error| format!("Could not find the update folder: {error}"))?;
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|error| format!("Could not find the staged installer: {error}"))?;
+    if canonical.parent() != Some(root.as_path()) {
+        return Err("The installer is not in the trusted update staging folder.".to_string());
     }
-    Err("The installer is not signed by the expected isolmaSS publisher. Unsigned development builds cannot establish publisher identity.".to_string())
+    let version = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("isolmass-setup-"))
+        .and_then(|name| name.strip_suffix(".exe"))
+        .filter(|version| parse_version(version).is_some())
+        .ok_or_else(|| "Unexpected staged installer filename.".to_string())?;
+    let verified_version = verify_update_artifact(path)?;
+    if verified_version != version {
+        return Err("The staged installer version differs from its signed release.".to_string());
+    }
+    Ok(())
 }
 
+/// Verify a local installer and detached signature without executing either.
+pub fn verify_update_artifact(path: &Path) -> Result<String, String> {
+    let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+    if metadata.len() > MAX_INSTALLER_BYTES as u64 {
+        return Err("The staged installer exceeds the allowed size.".to_string());
+    }
+    let bytes = std::fs::read(path).map_err(|error| error.to_string())?;
+    let digest = sha256_hex(&bytes)?;
+    let signature = std::fs::read(path.with_extension("exe.sig"))
+        .map_err(|error| format!("The staged update signature is unavailable: {error}"))?;
+    let version = file_version(path)?;
+    verify_release_signature(&version, &digest, &signature)?;
+    Ok(version)
+}
 pub fn launch_installer(path: &Path) -> Result<(), String> {
     use std::os::windows::fs::OpenOptionsExt;
     let _locked_file = std::fs::OpenOptions::new()
@@ -575,7 +581,7 @@ pub fn launch_installer(path: &Path) -> Result<(), String> {
         .share_mode(1)
         .open(path)
         .map_err(|error| error.to_string())?;
-    verify_authenticode(path)?;
+    verify_staged_installer(path)?;
     let parameters = wide(&format!("/S /UPDATE /WAITPID={}", std::process::id()));
     use std::os::windows::ffi::OsStrExt;
     let path_wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -607,13 +613,17 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-fn sha256_hex(input: &[u8]) -> Result<String, String> {
+fn sha256_digest(input: &[u8]) -> Result<[u8; 32], String> {
     use windows::Win32::Security::Cryptography::{BCRYPT_SHA256_ALG_HANDLE, BCryptHash};
     let mut digest = [0u8; 32];
     unsafe { BCryptHash(BCRYPT_SHA256_ALG_HANDLE, None, input, &mut digest) }
         .ok()
         .map_err(|error| format!("Windows SHA-256 failed: {error}"))?;
-    Ok(hex(&digest))
+    Ok(digest)
+}
+
+fn sha256_hex(input: &[u8]) -> Result<String, String> {
+    Ok(hex(&sha256_digest(input)?))
 }
 
 #[cfg(test)]
@@ -643,12 +653,7 @@ mod tests {
         ] {
             assert!(parse_https_url(url).is_err(), "{url}");
         }
-        assert!(
-            parse_https_url(
-                "https://github.com/isolmaz/isolmaSS_V2/releases/download/v0.3.0/isolmass-setup.exe"
-            )
-            .is_ok()
-        );
+        assert!(parse_https_url("https://github.com/owner/release").is_ok());
         for key in [0x56, 0x4d, 0x52, 0x54, 0x42] {
             assert!(crate::overlay::is_editor_shortcut(key, 0, false));
         }

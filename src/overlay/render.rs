@@ -22,116 +22,8 @@ impl OverlayState {
         let bounds = Rect::new(x, y, x + label_width, y + label_height);
         crate::drawing::rounded(self.mem_dc, bounds, scale(6), tokens.card, tokens.stroke);
         crate::drawing::label(self.mem_dc, bounds, &label, scale(11), tokens.text, true);
-        if self.mode != OverlayMode::DraggingSelection {
-            return;
-        }
-
-        const SIDE: usize = 11;
-        let mut pixels = [0u8; SIDE * SIDE * 4];
-        for row in 0..SIDE {
-            for col in 0..SIDE {
-                let sx = (self.pointer.0 + col as i32 - 5).clamp(0, self.capture.width - 1);
-                let sy = (self.pointer.1 + row as i32 - 5).clamp(0, self.capture.height - 1);
-                let source = (sy as usize * self.capture.width as usize + sx as usize) * 4;
-                let target = (row * SIDE + col) * 4;
-                pixels[target..target + 4]
-                    .copy_from_slice(&self.capture.original[source..source + 4]);
-            }
-        }
-        let size = scale(76);
-        let left = (self.pointer.0 + scale(16)).clamp(
-            viewport.left,
-            (viewport.right - size - scale(8)).max(viewport.left),
-        );
-        let top = (self.pointer.1 + scale(16)).clamp(
-            viewport.top,
-            (viewport.bottom - size - scale(26)).max(viewport.top),
-        );
-        crate::drawing::rounded(
-            self.mem_dc,
-            Rect::new(
-                left - scale(3),
-                top - scale(3),
-                left + size + scale(3),
-                top + size + scale(22),
-            ),
-            scale(8),
-            tokens.card,
-            tokens.stroke,
-        );
-        let bitmap = BITMAPINFO {
-            bmiHeader: BITMAPINFOHEADER {
-                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth: SIDE as i32,
-                biHeight: -(SIDE as i32),
-                biPlanes: 1,
-                biBitCount: 32,
-                biCompression: BI_RGB.0,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        unsafe {
-            let _ = windows::Win32::Graphics::Gdi::SetStretchBltMode(
-                self.mem_dc,
-                windows::Win32::Graphics::Gdi::COLORONCOLOR,
-            );
-            windows::Win32::Graphics::Gdi::StretchDIBits(
-                self.mem_dc,
-                left,
-                top,
-                size,
-                size,
-                0,
-                0,
-                SIDE as i32,
-                SIDE as i32,
-                Some(pixels.as_ptr().cast()),
-                &bitmap,
-                DIB_RGB_COLORS,
-                SRCCOPY,
-            );
-        }
-        let center = size / 2;
-        let cell = (size / SIDE as i32).max(1);
-        crate::drawing::with_brush(self.mem_dc, tokens.card, || {
-            crate::drawing::with_pen(
-                self.mem_dc,
-                windows::Win32::Graphics::Gdi::PS_SOLID,
-                1,
-                tokens.accent,
-                || unsafe {
-                    let previous = SelectObject(
-                        self.mem_dc,
-                        windows::Win32::Graphics::Gdi::GetStockObject(
-                            windows::Win32::Graphics::Gdi::NULL_BRUSH,
-                        ),
-                    );
-                    let _ = windows::Win32::Graphics::Gdi::Rectangle(
-                        self.mem_dc,
-                        left + center - cell / 2,
-                        top + center - cell / 2,
-                        left + center + cell / 2 + 1,
-                        top + center + cell / 2 + 1,
-                    );
-                    SelectObject(self.mem_dc, previous);
-                },
-            )
-        });
-        crate::drawing::label(
-            self.mem_dc,
-            Rect::new(
-                left - scale(3),
-                top + size,
-                left + size + scale(3),
-                top + size + scale(20),
-            ),
-            "Pixel precision",
-            scale(10),
-            tokens.text_secondary,
-            true,
-        );
     }
+
     pub(super) fn composite_scene(&mut self) {
         self.composite_scene_with(CompositionPolicy::EDITOR);
     }
@@ -194,7 +86,10 @@ impl OverlayState {
                         {
                             continue;
                         }
-                        if matches!(obj.kind, AnnotationKind::Blur { .. }) {
+                        if matches!(
+                            obj.kind,
+                            AnnotationKind::Blur { .. } | AnnotationKind::Highlight { .. }
+                        ) {
                             unsafe {
                                 let _ = GdiFlush();
                             }
@@ -273,12 +168,28 @@ impl OverlayState {
                             );
                             preview.render_gdi(self.mem_dc);
                         }
-                        Some(InProgressDrawing::Pen { points }) => render_pen_preview(
-                            self.mem_dc,
-                            points,
-                            self.active_color,
-                            self.active_thickness,
-                        ),
+                        Some(InProgressDrawing::Pen { points }) => {
+                            if self.active_tool == ToolKind::Highlight {
+                                unsafe {
+                                    let _ = GdiFlush();
+                                }
+                                crate::annotation::render_highlight(
+                                    buffer,
+                                    width,
+                                    height,
+                                    points,
+                                    self.active_color,
+                                    self.active_thickness,
+                                );
+                            } else {
+                                render_pen_preview(
+                                    self.mem_dc,
+                                    points,
+                                    self.active_color,
+                                    self.active_thickness,
+                                );
+                            }
+                        }
                         _ => {}
                     }
                 }
@@ -386,10 +297,13 @@ impl OverlayState {
                             )
                         } else {
                             match self.active_tool {
-                                ToolKind::Rectangle | ToolKind::Arrow | ToolKind::Pen => {
+                                ToolKind::Rectangle
+                                | ToolKind::Arrow
+                                | ToolKind::Pen
+                                | ToolKind::Highlight => {
                                     (self.active_color, self.active_thickness, true, true)
                                 }
-                                ToolKind::Text => {
+                                ToolKind::Text | ToolKind::Step => {
                                     (self.active_color, self.active_thickness, true, false)
                                 }
                                 ToolKind::Blur | ToolKind::Redact | ToolKind::Select => {
@@ -436,7 +350,7 @@ impl OverlayState {
                             .hovered_item
                             .filter(|item| tb.buttons.iter().any(|button| button.item == *item));
                     }
-                    tb.render(self.mem_dc);
+                    tb.render(self.mem_dc, self.thickness_input.as_deref());
                     self.toolbar = Some(tb);
                 }
             }

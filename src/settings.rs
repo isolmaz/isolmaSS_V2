@@ -1,6 +1,7 @@
 use crate::annotation::ToolKind;
 use crate::hotkey::HotkeyConfig;
 use crate::save::default_save_directory;
+use crate::theme::ThemePreference;
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -49,6 +50,7 @@ impl SaveFormat {
 
 /// Persistent application settings model.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Settings {
     pub hotkey: HotkeyConfig,
     pub save_directory: PathBuf,
@@ -71,8 +73,9 @@ pub struct Settings {
     #[serde(default = "default_true")]
     pub check_updates_automatically: bool,
     #[serde(default)]
-    pub install_updates_automatically: bool,
+    pub skipped_update_version: Option<String>,
     #[serde(default)]
+    pub theme_preference: ThemePreference,
     pub last_tool: ToolKind,
 }
 
@@ -91,7 +94,8 @@ impl Default for Settings {
             save_format: SaveFormat::Png,
             jpeg_quality: default_jpeg_quality(),
             check_updates_automatically: true,
-            install_updates_automatically: false,
+            skipped_update_version: None,
+            theme_preference: ThemePreference::System,
             last_tool: ToolKind::default(),
         }
     }
@@ -246,6 +250,13 @@ impl Settings {
             Some("save_directory must be an absolute Windows path without NUL characters")
         } else if !self.hotkey.is_valid() {
             Some("hotkey description, key and modifiers must describe the same supported shortcut")
+        } else if self.skipped_update_version.as_ref().is_some_and(|version| {
+            version.len() > 32
+                || !version
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || byte == b'.')
+        }) {
+            Some("skipped_update_version must be a dotted numeric version")
         } else {
             None
         };
@@ -271,6 +282,20 @@ impl Settings {
         latest.default_color = self.default_color;
         latest.default_thickness = self.default_thickness;
         latest.last_tool = self.last_tool;
+        latest.save_to_path(&path)
+    }
+
+    /// Update dismissal merges into the latest on-disk preferences under the settings lock.
+    pub fn skip_update_version(version: &str) -> std::io::Result<()> {
+        let _lock = crate::instance::SettingsLock::acquire()?;
+        let path =
+            Self::config_path().ok_or_else(|| std::io::Error::other("APPDATA is unavailable"))?;
+        let mut latest = match Self::load_from_path(&path) {
+            Ok(value) => value,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(error) => return Err(error),
+        };
+        latest.skipped_update_version = Some(version.to_owned());
         latest.save_to_path(&path)
     }
 
@@ -310,46 +335,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_settings_new_toggles_defaults_and_serde() {
-        let defaults = Settings::default();
-        assert!(defaults.enable_window_snap);
-        assert!(defaults.close_after_action);
-
-        // Serialization round-trip
-        let json = serde_json::to_string(&defaults).expect("serialize settings");
-        assert!(json.contains("enable_window_snap"));
-        assert!(json.contains("close_after_action"));
-
-        let mut deserialized: Settings = serde_json::from_str(&json).expect("deserialize settings");
-        assert_eq!(deserialized, defaults);
-
-        // Backward compatibility: JSON missing the two new fields
+    fn older_settings_keep_saved_values_and_fill_new_preferences() {
         let legacy_json = serde_json::json!({
-            "hotkey": defaults.hotkey,
-            "save_directory": defaults.save_directory,
-            "default_color": defaults.default_color,
-            "default_thickness": defaults.default_thickness,
-        })
-        .to_string();
-
-        let loaded: Settings =
-            serde_json::from_str(&legacy_json).expect("deserialize legacy settings");
-        assert!(
-            loaded.enable_window_snap,
-            "Legacy JSON should default enable_window_snap to true"
-        );
-        assert!(
-            loaded.close_after_action,
-            "Legacy JSON should default close_after_action to true"
-        );
-
-        // Custom toggles
-        deserialized.enable_window_snap = false;
-        deserialized.close_after_action = false;
-        let json2 = serde_json::to_string(&deserialized).expect("serialize customized");
-        let loaded2: Settings = serde_json::from_str(&json2).expect("deserialize customized");
-        assert!(!loaded2.enable_window_snap);
-        assert!(!loaded2.close_after_action);
+            "hotkey": HotkeyConfig::from_str("Ctrl+Alt+K").expect("supported shortcut"),
+            "save_directory": r"C:\Capture Archive",
+            "default_color": [23, 45, 67, 255],
+            "default_thickness": 11,
+        });
+        let loaded: Settings = serde_json::from_value(legacy_json).expect("legacy settings");
+        assert_eq!(loaded.hotkey.description, "Ctrl+Alt+K");
+        assert_eq!(loaded.save_directory, PathBuf::from(r"C:\Capture Archive"));
+        assert_eq!(loaded.default_color, [23, 45, 67, 255]);
+        assert_eq!(loaded.default_thickness, 11);
+        assert_eq!(loaded.theme_preference, ThemePreference::System);
+        assert_eq!(loaded.skipped_update_version, None);
+        assert!(loaded.enable_window_snap && loaded.close_after_action);
+        loaded.validate().expect("migrated settings remain usable");
     }
 
     #[test]

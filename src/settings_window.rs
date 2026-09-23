@@ -1,5 +1,6 @@
 use crate::hotkey::HotkeyConfig;
-use crate::settings::{PRESET_COLORS, PRESET_THICKNESSES, SaveFormat, Settings};
+use crate::settings::{PRESET_COLORS, SaveFormat, Settings};
+use crate::theme::ThemePreference;
 use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::{
     COLORREF, ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT,
@@ -8,8 +9,8 @@ use windows::Win32::Foundation::{
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, COLOR_WINDOW, CreatePen, CreateSolidBrush, DeleteObject, EndPaint, FillRect,
     GetMonitorInfoW, HBRUSH, HDC, HGDIOBJ, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromWindow, PAINTSTRUCT, PS_SOLID, RoundRect, SelectObject, SetBkMode, SetTextColor,
-    TRANSPARENT,
+    MonitorFromWindow, PAINTSTRUCT, PS_SOLID, RoundRect, SelectObject, SetBkColor, SetBkMode,
+    SetTextColor, TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{SetScrollInfo, SetScrollPos};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -19,8 +20,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, CreateWindowExW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GetClientRect,
     GetDlgCtrlID, GetWindowLongPtrW, GetWindowRect, IDC_ARROW, IsWindow, RegisterClassExW, SW_HIDE,
     SW_SHOW, SetForegroundWindow, SetWindowLongPtrW, ShowWindow, WM_CLOSE, WM_CTLCOLORBTN,
-    WM_CTLCOLORSTATIC, WM_DESTROY, WM_DWMCOLORIZATIONCOLORCHANGED, WM_ERASEBKGND, WM_KEYDOWN,
-    WM_PAINT, WM_SETTINGCHANGE, WNDCLASSEXW,
+    WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DWMCOLORIZATIONCOLORCHANGED, WM_ERASEBKGND,
+    WM_KEYDOWN, WM_PAINT, WM_SETTINGCHANGE, WNDCLASSEXW,
 };
 use windows::core::{PCWSTR, Result, w};
 
@@ -28,14 +29,18 @@ const SETTINGS_CLASS_NAME: PCWSTR = w!("isolmaSS_SettingsClass");
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsView {
-    Simple,
-    Advanced,
+    General,
+    Editor,
+    Updates,
 }
 
 pub struct SettingsWindowState {
     settings: Settings,
     saved: bool,
     active_view: SettingsView,
+    recording_hotkey: bool,
+    original_hotkey: HotkeyConfig,
+    updating_thickness: bool,
     dpi: u32,
     font: windows::Win32::Graphics::Gdi::HFONT,
     title_font: windows::Win32::Graphics::Gdi::HFONT,
@@ -85,36 +90,33 @@ const ID_CANCEL: i32 = 101;
 const ID_BROWSE: i32 = 102;
 const ID_CHECK_UPDATE: i32 = 103;
 const ID_FOLDER_LABEL: i32 = 104;
-const ID_VIEW_SIMPLE: i32 = 105;
-const ID_VIEW_ADVANCED: i32 = 106;
-const ID_HOTKEY_PRINT: i32 = 200;
-const ID_HOTKEY_CTRL_SHIFT_S: i32 = 201;
-const ID_HOTKEY_ALT_PRINT: i32 = 202;
+const ID_VIEW_GENERAL: i32 = 105;
+const ID_VIEW_EDITOR: i32 = 106;
+const ID_VIEW_UPDATES: i32 = 107;
+const ID_HOTKEY_RECORD: i32 = 200;
 const ID_COLOR_FIRST: i32 = 300;
-const ID_THICKNESS_FIRST: i32 = 320;
+const ID_COLOR_CUSTOM: i32 = 308;
+const ID_THICKNESS_SLIDER: i32 = 320;
+const ID_THICKNESS_EDIT: i32 = 323;
 const ID_WINDOW_SNAP: i32 = 400;
 const ID_CLOSE_AFTER_ACTION: i32 = 401;
 const ID_START_WITH_WINDOWS: i32 = 402;
 const ID_NOTIFY_AFTER_SAVE: i32 = 403;
 const ID_CHECK_UPDATES: i32 = 404;
-const ID_AUTO_INSTALL: i32 = 405;
+const ID_THEME_SYSTEM: i32 = 406;
+const ID_THEME_LIGHT: i32 = 407;
+const ID_THEME_DARK: i32 = 408;
 const ID_DELAY_FIRST: i32 = 500;
 const ID_FORMAT_PNG: i32 = 600;
 const ID_FORMAT_JPEG: i32 = 601;
 const ID_QUALITY_FIRST: i32 = 610;
-const SETTINGS_WIDTH: i32 = 660;
+const SETTINGS_WIDTH: i32 = 700;
 const SETTINGS_HEIGHT: i32 = 580;
-/// Smallest window the layout accepts before it has to scroll.
-const SETTINGS_MIN_WIDTH: i32 = 520;
+/// Keep the complete card column visible at the minimum width.
+const SETTINGS_MIN_WIDTH: i32 = 700;
 const SETTINGS_MIN_HEIGHT: i32 = 430;
-/// Sidebar band width (brand, navigation, version block).
-const SIDEBAR_WIDTH: i32 = 108;
-/// Left edge of the content column: page margin + sidebar band + gap.
-const CONTENT_LEFT: i32 = 140;
-/// Card column width inside the scroll container.
-const CONTENT_WIDTH: i32 = 480;
-/// Scroll extent of the tallest view, in scroll-container design pixels.
-const CONTENT_HEIGHT: i32 = 416;
+const CONTENT_LEFT: i32 = 20;
+const CONTENT_WIDTH: i32 = 600;
 /// Id of the scroll container child window that owns the settings cards.
 const ID_SCROLL_CONTAINER: i32 = 900;
 /// The scroll container is a real cluster: pages are painted at its origin.
@@ -199,7 +201,14 @@ fn create_button(parent: HWND, id: i32, text: &str, style: i32) -> Result<HWND> 
     )
 }
 
-fn move_control(hwnd: HWND, id: i32, x: i32, y: i32, width: i32, height: i32, dpi: u32) {
+fn move_control_with_redraw(
+    hwnd: HWND,
+    id: i32,
+    bounds: (i32, i32, i32, i32),
+    dpi: u32,
+    redraw: bool,
+) {
+    let (x, y, width, height) = bounds;
     if let Ok(child) = unsafe { windows::Win32::UI::WindowsAndMessaging::GetDlgItem(hwnd, id) } {
         unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::MoveWindow(
@@ -216,10 +225,14 @@ fn move_control(hwnd: HWND, id: i32, x: i32, y: i32, width: i32, height: i32, dp
                     ),
                 scale(width, dpi),
                 scale(height, dpi),
-                true,
+                redraw,
             );
         }
     }
+}
+
+fn move_control(hwnd: HWND, id: i32, x: i32, y: i32, width: i32, height: i32, dpi: u32) {
+    move_control_with_redraw(hwnd, id, (x, y, width, height), dpi, true);
 }
 
 fn create_font_px(dpi: u32, pixels: i32, weight: i32) -> windows::Win32::Graphics::Gdi::HFONT {
@@ -304,8 +317,9 @@ fn set_control_font(hwnd: HWND, id: i32, font: windows::Win32::Graphics::Gdi::HF
 fn card_rects(view: SettingsView) -> &'static [(i32, i32, i32, i32)] {
     const W: i32 = CONTENT_WIDTH;
     match view {
-        SettingsView::Simple => &[(0, 0, W, 104), (0, 116, W, 252), (0, 264, W, 368)],
-        SettingsView::Advanced => &[(0, 0, W, 104), (0, 116, W, 220), (0, 232, W, 404)],
+        SettingsView::General => &[(0, 0, W, 112), (0, 124, W, 260), (0, 272, W, 420)],
+        SettingsView::Editor => &[(0, 0, W, 112), (0, 124, W, 252)],
+        SettingsView::Updates => &[(0, 0, W, 148)],
     }
 }
 
@@ -450,6 +464,10 @@ unsafe extern "system" fn scroll_wnd_proc(
             LRESULT(0)
         }
         WM_VSCROLL | WM_HSCROLL => {
+            if lparam.0 != 0 {
+                let parent = unsafe { GetParent(hwnd) }.unwrap_or_default();
+                return LRESULT(unsafe { SendMessageW(parent, message, wparam, lparam) }.0);
+            }
             let horizontal = message == WM_HSCROLL;
             let bar = if horizontal { SB_HORZ } else { SB_VERT };
             let mut info = SCROLLINFO {
@@ -471,13 +489,71 @@ unsafe extern "system" fn scroll_wnd_proc(
             scroll_container_by(hwnd, horizontal, delta);
             LRESULT(0)
         }
-        WM_COMMAND | WM_NOTIFY | WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
+        WM_COMMAND | WM_NOTIFY | WM_CTLCOLORSTATIC | WM_CTLCOLORBTN | WM_CTLCOLOREDIT => {
             let parent = unsafe { windows::Win32::UI::WindowsAndMessaging::GetParent(hwnd) }
                 .unwrap_or_default();
             LRESULT(unsafe { SendMessageW(parent, message, wparam, lparam) }.0)
         }
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
     }
+}
+
+fn draw_settings_slider(
+    draw: &windows::Win32::UI::Controls::NMCUSTOMDRAW,
+    state: &SettingsWindowState,
+) {
+    let mut rect = RECT::default();
+    unsafe {
+        let _ = GetClientRect(draw.hdr.hwndFrom, &mut rect);
+    }
+    unsafe {
+        let _ = FillRect(draw.hdc, &rect, state.card_brush);
+    }
+    let left = scale(10, state.dpi);
+    let right = rect.right - left;
+    let center = (rect.top + rect.bottom) / 2;
+    let value = unsafe {
+        windows::Win32::UI::WindowsAndMessaging::SendMessageW(
+            draw.hdr.hwndFrom,
+            windows::Win32::UI::WindowsAndMessaging::WM_USER,
+            WPARAM(0),
+            LPARAM(0),
+        )
+        .0 as i32
+    }
+    .clamp(1, 64);
+    let knob = left + (right - left).max(0) * (value - 1) / 63;
+    let track = crate::capture::Rect::new(left, center - 2, right + 1, center + 3);
+    crate::drawing::rounded(draw.hdc, track, 4, color_border(), color_border());
+    if knob > left {
+        crate::drawing::rounded(
+            draw.hdc,
+            crate::capture::Rect::new(left, center - 2, knob + 1, center + 3),
+            4,
+            color_accent(),
+            color_accent(),
+        );
+    }
+    let radius = scale(8, state.dpi);
+    crate::drawing::rounded(
+        draw.hdc,
+        crate::capture::Rect::new(
+            knob - radius,
+            center - radius,
+            knob + radius + 1,
+            center + radius + 1,
+        ),
+        radius * 2,
+        color_accent(),
+        if draw
+            .uItemState
+            .contains(windows::Win32::UI::Controls::CDIS_FOCUS)
+        {
+            color_text()
+        } else {
+            color_accent()
+        },
+    );
 }
 
 fn draw_settings_button(
@@ -493,7 +569,7 @@ fn draw_settings_button(
     let checked = unsafe { SendMessageW(draw.hdr.hwndFrom, BM_GETCHECK, WPARAM(0), LPARAM(0)).0 }
         == BST_CHECKED.0 as isize;
     let primary = id == ID_SAVE;
-    let toggle = (ID_WINDOW_SNAP..=ID_AUTO_INSTALL).contains(&id);
+    let toggle = (ID_WINDOW_SNAP..=ID_CHECK_UPDATES).contains(&id);
     // Color presets are swatch circles: the square chip stays invisible so the
     // circle carries the state, and a ring marks the selected swatch.
     let swatch = (ID_COLOR_FIRST..ID_COLOR_FIRST + 8).contains(&id);
@@ -619,6 +695,17 @@ fn draw_settings_button(
                 true,
             );
         }
+        if draw.uItemState.contains(CDIS_FOCUS) {
+            let focus = RECT {
+                left: rect.left + 2,
+                top: rect.top + 2,
+                right: rect.right - 2,
+                bottom: rect.bottom - 2,
+            };
+            unsafe {
+                let _ = DrawFocusRect(hdc, &focus);
+            }
+        }
         return;
     }
     if toggle {
@@ -710,12 +797,20 @@ fn draw_settings_button(
 fn control_uses_card(id: i32) -> bool {
     !matches!(
         id,
-        700 | 709 | 716 | 717 | 718 | ID_VIEW_SIMPLE | ID_VIEW_ADVANCED | ID_SAVE | ID_CANCEL
+        700 | 709
+            | 716
+            | 717
+            | 718
+            | ID_VIEW_GENERAL
+            | ID_VIEW_EDITOR
+            | ID_VIEW_UPDATES
+            | ID_SAVE
+            | ID_CANCEL
     )
 }
 
 /// Header band: page margin + title + subtitle + air below.
-const HEADER_BOTTOM: i32 = 68;
+const HEADER_BOTTOM: i32 = 124;
 /// Footer band: control row + page margin.
 const FOOTER_HEIGHT: i32 = 42;
 /// Air between the scroll container and the footer band.
@@ -740,69 +835,72 @@ fn client_design_size(hwnd: HWND, dpi: u32) -> (i32, i32) {
 fn layout_chrome(hwnd: HWND, dpi: u32) {
     use crate::theme::{CONTROL_HEIGHT, PAGE_MARGIN};
     let (width, height) = client_design_size(hwnd, dpi);
-    let row = CONTROL_HEIGHT;
-    let side = SIDEBAR_WIDTH;
-    let content_left = CONTENT_LEFT;
-    let content_right = (width - PAGE_MARGIN).max(content_left + 160);
-    // Sidebar: brand, subtitle, navigation, version block.
-    move_control(hwnd, 700, PAGE_MARGIN, PAGE_MARGIN, side, 20, dpi);
-    move_control(hwnd, 709, PAGE_MARGIN, PAGE_MARGIN + 24, side, 32, dpi);
+    let right = (width - PAGE_MARGIN).max(CONTENT_LEFT + 160);
+    move_control(hwnd, 700, CONTENT_LEFT, 12, 116, 22, dpi);
     move_control(
         hwnd,
-        ID_VIEW_SIMPLE,
-        PAGE_MARGIN,
-        PAGE_MARGIN + 68,
-        side,
-        row,
+        709,
+        CONTENT_LEFT + 120,
+        14,
+        right - CONTENT_LEFT - 120,
+        18,
         dpi,
     );
     move_control(
         hwnd,
-        ID_VIEW_ADVANCED,
-        PAGE_MARGIN,
-        PAGE_MARGIN + 68 + row + 6,
-        side,
-        row,
+        ID_VIEW_GENERAL,
+        CONTENT_LEFT,
+        42,
+        128,
+        CONTROL_HEIGHT,
         dpi,
     );
+    move_control(
+        hwnd,
+        ID_VIEW_EDITOR,
+        CONTENT_LEFT + 136,
+        42,
+        128,
+        CONTROL_HEIGHT,
+        dpi,
+    );
+    move_control(
+        hwnd,
+        ID_VIEW_UPDATES,
+        CONTENT_LEFT + 272,
+        42,
+        128,
+        CONTROL_HEIGHT,
+        dpi,
+    );
+    move_control(hwnd, 716, CONTENT_LEFT, 78, right - CONTENT_LEFT, 20, dpi);
+    move_control(hwnd, 717, CONTENT_LEFT, 100, right - CONTENT_LEFT, 16, dpi);
     move_control(
         hwnd,
         718,
-        PAGE_MARGIN,
+        CONTENT_LEFT,
         height - PAGE_MARGIN - 32,
-        side,
+        260,
         32,
         dpi,
     );
-    // Header shared by both views.
+    let footer_y = height - PAGE_MARGIN - CONTROL_HEIGHT;
     move_control(
         hwnd,
-        716,
-        content_left,
-        PAGE_MARGIN,
-        content_right - content_left,
-        20,
+        ID_SAVE,
+        right - 108,
+        footer_y,
+        108,
+        CONTROL_HEIGHT,
         dpi,
     );
-    move_control(
-        hwnd,
-        717,
-        content_left,
-        PAGE_MARGIN + 22,
-        content_right - content_left,
-        16,
-        dpi,
-    );
-    // Footer pinned to the bottom edge of the client area.
-    let footer_y = height - PAGE_MARGIN - row;
-    move_control(hwnd, ID_SAVE, content_right - 108, footer_y, 108, row, dpi);
     move_control(
         hwnd,
         ID_CANCEL,
-        content_right - 108 - 8 - 84,
+        right - 200,
         footer_y,
         84,
-        row,
+        CONTROL_HEIGHT,
         dpi,
     );
 }
@@ -817,8 +915,8 @@ fn position_container(hwnd: HWND, dpi: u32) {
     };
     let (width, height) = client_design_size(hwnd, dpi);
     let left = CONTENT_LEFT;
-    // The container runs to the client's right edge so its scroll bar sits
-    // flush with the frame and the 480 px card column still fits beside it.
+    // The container reaches the right edge so its vertical scrollbar stays
+    // outside the fixed-width cards, even at the minimum window size.
     let right = width.max(left + 160);
     let top = HEADER_BOTTOM;
     let bottom = (height - FOOTER_HEIGHT - FOOTER_GAP).max(top + crate::theme::CONTROL_HEIGHT);
@@ -840,66 +938,65 @@ fn position_container(hwnd: HWND, dpi: u32) {
 /// offset, so a control always sits on the card it belongs to.
 fn layout_content(container: HWND, dpi: u32) {
     use crate::theme::{CARD_PADDING, CONTROL_HEIGHT};
-    let pad = CARD_PADDING; // 12
-    let row = CONTROL_HEIGHT; // 26
-    let section = 16; // section label line
-    let label = LABEL_WIDTH; // property label column
-    let chips = pad + label + 8; // first chip column
+    let pad = CARD_PADDING;
+    let row = CONTROL_HEIGHT;
+    let label = LABEL_WIDTH;
+    let chips = pad + label + 8;
     let right = CONTENT_WIDTH - pad;
-    let chip_area = right - chips;
     let full = CONTENT_WIDTH - 2 * pad;
-    let place =
-        |id: i32, x: i32, y: i32, w: i32, h: i32| move_control(container, id, x, y, w, h, dpi);
-    let heading = |id: i32, top: i32| place(id, pad, top, full, section);
-    let row_label = |id: i32, top: i32| place(id, pad, top + (row - 16) / 2, label, 16);
+    let place = |id: i32, x: i32, y: i32, w: i32, h: i32| {
+        move_control_with_redraw(container, id, (x, y, w, h), dpi, false)
+    };
+    let heading = |id: i32, top: i32| place(id, pad, top, full, 16);
+    let row_label = |id: i32, top: i32| place(id, pad, top + 5, label, 16);
 
-    // Capture card (General).
     heading(710, 12);
     row_label(701, 34);
-    place(ID_HOTKEY_PRINT, chips, 34, 92, row);
-    place(ID_HOTKEY_CTRL_SHIFT_S, chips + 98, 34, 96, row);
-    place(ID_HOTKEY_ALT_PRINT, chips + 200, 34, 112, row);
+    place(ID_HOTKEY_RECORD, chips, 34, 252, row);
     row_label(705, 66);
     for index in 0..4 {
-        place(ID_DELAY_FIRST + index, chips + index * 78, 66, 72, row);
+        place(ID_DELAY_FIRST + index, chips + index * 92, 66, 86, row);
     }
-    // Saving card (General).
-    heading(711, 128);
-    row_label(702, 150);
-    place(ID_FOLDER_LABEL, chips, 154, chip_area - 100, 18);
-    place(ID_BROWSE, right - 92, 150, 92, row);
-    row_label(706, 182);
-    place(ID_FORMAT_PNG, chips, 182, 72, row);
-    place(ID_FORMAT_JPEG, chips + 78, 182, 72, row);
-    row_label(707, 214);
+    heading(711, 136);
+    row_label(702, 158);
+    place(ID_FOLDER_LABEL, chips, 162, right - chips - 104, 18);
+    place(ID_BROWSE, right - 96, 158, 96, row);
+    row_label(706, 190);
+    place(ID_FORMAT_PNG, chips, 190, 72, row);
+    place(ID_FORMAT_JPEG, chips + 80, 190, 72, row);
+    row_label(707, 222);
     for index in 0..3 {
-        place(ID_QUALITY_FIRST + index, chips + index * 78, 214, 72, row);
+        place(ID_QUALITY_FIRST + index, chips + index * 80, 222, 72, row);
     }
-    // After capture card (General).
-    heading(712, 276);
-    place(ID_WINDOW_SNAP, pad, 298, full, row);
-    place(ID_CLOSE_AFTER_ACTION, pad, 330, full, row);
-    // Annotation defaults card (Editor and system).
+    heading(712, 284);
+    place(ID_START_WITH_WINDOWS, pad, 306, full, row);
+    place(ID_NOTIFY_AFTER_SAVE, pad, 338, full, row);
+    row_label(719, 374);
+    for (index, id) in [ID_THEME_SYSTEM, ID_THEME_LIGHT, ID_THEME_DARK]
+        .into_iter()
+        .enumerate()
+    {
+        place(id, chips + index as i32 * 108, 374, 100, row);
+    }
+
     heading(713, 12);
     row_label(703, 34);
     for index in 0..8 {
-        // Swatch circles: 8 fit one row, so the color row stays a single line.
-        place(ID_COLOR_FIRST + index, chips + index * 44, 34, 44, row);
+        place(ID_COLOR_FIRST + index, chips + index * 44, 34, 42, row);
     }
-    row_label(704, 66);
-    for index in 0..3 {
-        place(ID_THICKNESS_FIRST + index, chips + index * 78, 66, 72, row);
-    }
-    // Windows card (Editor and system).
-    heading(714, 128);
-    place(ID_START_WITH_WINDOWS, pad, 150, full, row);
-    place(ID_NOTIFY_AFTER_SAVE, pad, 182, full, row);
-    // Updates card (Editor and system).
-    heading(715, 244);
-    place(ID_CHECK_UPDATES, pad, 266, full, row);
-    place(ID_AUTO_INSTALL, pad, 298, full, row);
-    place(ID_CHECK_UPDATE, chips, 330, 132, row);
-    place(708, chips, 362, chip_area, 30);
+    place(ID_COLOR_CUSTOM, chips + 358, 34, 110, row);
+    row_label(704, 70);
+    place(ID_THICKNESS_SLIDER, chips, 70, 278, row);
+    place(ID_THICKNESS_EDIT, chips + 290, 70, 52, row);
+    place(720, chips + 346, 74, 26, 18);
+    heading(714, 136);
+    place(ID_WINDOW_SNAP, pad, 158, full, row);
+    place(ID_CLOSE_AFTER_ACTION, pad, 190, full, row);
+
+    heading(715, 12);
+    place(ID_CHECK_UPDATES, pad, 34, full, row);
+    place(ID_CHECK_UPDATE, pad, 66, 164, row);
+    place(708, pad, 102, full, 32);
 }
 
 /// Sizes the container's scroll bars against the content extent and refreshes
@@ -923,7 +1020,12 @@ fn update_container_scrollbars(container: HWND, dpi: u32) {
     let bar_width = unsafe { GetSystemMetrics(SM_CXVSCROLL) };
     let bar_height = unsafe { GetSystemMetrics(SM_CYHSCROLL) };
     let width = scale(CONTENT_WIDTH + crate::theme::GRID, dpi);
-    let height = scale(CONTENT_HEIGHT, dpi);
+    let view =
+        scroll_parent_state(container).map_or(SettingsView::General, |state| state.active_view);
+    let height = scale(
+        card_rects(view).last().map_or(0, |rect| rect.3) + crate::theme::CARD_PADDING,
+        dpi,
+    );
     let mut horizontal = width > full_width;
     let mut vertical = height > full_height;
     for _ in 0..2 {
@@ -948,7 +1050,15 @@ fn update_container_scrollbars(container: HWND, dpi: u32) {
     }
     layout_content(container, dpi);
     unsafe {
-        let _ = InvalidateRect(container, None, true);
+        let _ = windows::Win32::Graphics::Gdi::RedrawWindow(
+            container,
+            None,
+            None,
+            windows::Win32::Graphics::Gdi::RDW_INVALIDATE
+                | windows::Win32::Graphics::Gdi::RDW_ERASE
+                | windows::Win32::Graphics::Gdi::RDW_ALLCHILDREN
+                | windows::Win32::Graphics::Gdi::RDW_UPDATENOW,
+        );
     }
     UPDATING.with(|flag| flag.set(false));
 }
@@ -967,13 +1077,24 @@ fn scroll_container_by(container: HWND, horizontal: bool, delta: i32) {
         let _ = GetScrollInfo(container, bar, &mut info);
     }
     let position = (info.nPos + delta).clamp(0, (info.nMax - info.nPage as i32 + 1).max(0));
+    if position == info.nPos {
+        return;
+    }
     unsafe {
         SetScrollPos(container, bar, position, true);
     }
     let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(container) }.max(96);
     layout_content(container, dpi);
     unsafe {
-        let _ = InvalidateRect(container, None, true);
+        let _ = windows::Win32::Graphics::Gdi::RedrawWindow(
+            container,
+            None,
+            None,
+            windows::Win32::Graphics::Gdi::RDW_INVALIDATE
+                | windows::Win32::Graphics::Gdi::RDW_ERASE
+                | windows::Win32::Graphics::Gdi::RDW_ALLCHILDREN
+                | windows::Win32::Graphics::Gdi::RDW_UPDATENOW,
+        );
     }
 }
 
@@ -1037,7 +1158,7 @@ fn show_controls(hwnd: HWND, ids: &[i32], show: bool) {
 }
 
 fn set_active_view(hwnd: HWND, view: SettingsView) {
-    const SIMPLE_CONTROLS: &[i32] = &[
+    const GENERAL: &[i32] = &[
         710,
         711,
         712,
@@ -1046,55 +1167,69 @@ fn set_active_view(hwnd: HWND, view: SettingsView) {
         705,
         706,
         707,
+        719,
         ID_FOLDER_LABEL,
         ID_BROWSE,
-        ID_HOTKEY_PRINT,
-        ID_HOTKEY_CTRL_SHIFT_S,
-        ID_HOTKEY_ALT_PRINT,
+        ID_HOTKEY_RECORD,
         ID_FORMAT_PNG,
         ID_FORMAT_JPEG,
+        ID_START_WITH_WINDOWS,
+        ID_NOTIFY_AFTER_SAVE,
+        ID_THEME_SYSTEM,
+        ID_THEME_LIGHT,
+        ID_THEME_DARK,
+    ];
+    const EDITOR: &[i32] = &[
+        713,
+        714,
+        703,
+        704,
+        720,
+        ID_COLOR_CUSTOM,
+        ID_THICKNESS_SLIDER,
+        ID_THICKNESS_EDIT,
         ID_WINDOW_SNAP,
         ID_CLOSE_AFTER_ACTION,
     ];
-    const ADVANCED_CONTROLS: &[i32] = &[
-        713,
-        714,
-        715,
-        703,
-        704,
-        ID_START_WITH_WINDOWS,
-        ID_NOTIFY_AFTER_SAVE,
-        ID_CHECK_UPDATES,
-        ID_AUTO_INSTALL,
-        ID_CHECK_UPDATE,
-        708,
-    ];
-
-    let simple = view == SettingsView::Simple;
-    show_controls(hwnd, SIMPLE_CONTROLS, simple);
-    show_controls(hwnd, ADVANCED_CONTROLS, !simple);
+    const UPDATES: &[i32] = &[715, 708, ID_CHECK_UPDATES, ID_CHECK_UPDATE];
+    for (controls, section) in [
+        (GENERAL, SettingsView::General),
+        (EDITOR, SettingsView::Editor),
+        (UPDATES, SettingsView::Updates),
+    ] {
+        show_controls(hwnd, controls, view == section);
+    }
     for id in ID_DELAY_FIRST..=ID_DELAY_FIRST + 3 {
-        show_controls(hwnd, &[id], simple);
+        show_controls(hwnd, &[id], view == SettingsView::General);
     }
     for id in ID_QUALITY_FIRST..=ID_QUALITY_FIRST + 2 {
-        show_controls(hwnd, &[id], simple);
+        show_controls(hwnd, &[id], view == SettingsView::General);
     }
-    for id in ID_COLOR_FIRST..=ID_COLOR_FIRST + PRESET_COLORS.len() as i32 - 1 {
-        show_controls(hwnd, &[id], !simple);
-    }
-    for id in ID_THICKNESS_FIRST..=ID_THICKNESS_FIRST + PRESET_THICKNESSES.len() as i32 - 1 {
-        show_controls(hwnd, &[id], !simple);
+    for id in ID_COLOR_FIRST..ID_COLOR_FIRST + PRESET_COLORS.len() as i32 {
+        show_controls(hwnd, &[id], view == SettingsView::Editor);
     }
     check_radio(
         hwnd,
-        ID_VIEW_SIMPLE,
-        ID_VIEW_ADVANCED,
-        if simple {
-            ID_VIEW_SIMPLE
-        } else {
-            ID_VIEW_ADVANCED
+        ID_VIEW_GENERAL,
+        ID_VIEW_UPDATES,
+        match view {
+            SettingsView::General => ID_VIEW_GENERAL,
+            SettingsView::Editor => ID_VIEW_EDITOR,
+            SettingsView::Updates => ID_VIEW_UPDATES,
         },
     );
+    if let Some(container) = control(hwnd, ID_SCROLL_CONTAINER) {
+        unsafe {
+            for bar in [
+                windows::Win32::UI::WindowsAndMessaging::SB_HORZ,
+                windows::Win32::UI::WindowsAndMessaging::SB_VERT,
+            ] {
+                windows::Win32::UI::Controls::SetScrollPos(container, bar, 0, true);
+            }
+        }
+        let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(container) }.max(96);
+        update_container_scrollbars(container, dpi);
+    }
     unsafe {
         let _ = InvalidateRect(hwnd, None, true);
     }
@@ -1136,10 +1271,12 @@ fn set_radio_group(hwnd: HWND, first: i32, last: i32, selected: Option<i32>) {
     }
 }
 
-/// Shows a custom (non-preset) value beside its existing section label.
+/// Shows non-preset values in the fixed-width property label without clipping.
 fn set_label_note(hwnd: HWND, id: i32, base: &str, note: Option<String>) {
     let text = match note {
-        Some(note) => format!("{base} ({note})"),
+        Some(note) if id == 705 => format!("Delay: {note}"),
+        Some(note) if id == 707 => format!("JPEG: {note}"),
+        Some(note) => format!("{base}: {note}"),
         None => base.to_owned(),
     };
     let text = wide_string(&text);
@@ -1164,30 +1301,18 @@ fn set_jpeg_quality_enabled(hwnd: HWND, enabled: bool) {
 }
 
 fn initialize_control_values(hwnd: HWND, settings: &Settings) {
-    // Custom (non-preset) values keep their originals in state and show no checked
-    // preset; the section label carries the actual value instead.
-    let hotkey_id = if settings
-        .hotkey
-        .description
-        .eq_ignore_ascii_case("Ctrl+Shift+S")
-    {
-        Some(ID_HOTKEY_CTRL_SHIFT_S)
-    } else if settings
-        .hotkey
-        .description
-        .eq_ignore_ascii_case("Alt+PrintScreen")
-    {
-        Some(ID_HOTKEY_ALT_PRINT)
-    } else if settings
-        .hotkey
-        .description
-        .eq_ignore_ascii_case("PrintScreen")
-    {
-        Some(ID_HOTKEY_PRINT)
-    } else {
-        None
-    };
-    set_radio_group(hwnd, ID_HOTKEY_PRINT, ID_HOTKEY_ALT_PRINT, hotkey_id);
+    let shortcut = wide_string(&format!(
+        "{}  ·  Record shortcut",
+        settings.hotkey.description
+    ));
+    if let Some(button) = control(hwnd, ID_HOTKEY_RECORD) {
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowTextW(
+                button,
+                PCWSTR(shortcut.as_ptr()),
+            );
+        }
+    }
     let color_id = PRESET_COLORS
         .iter()
         .position(|color| *color == settings.default_color)
@@ -1198,16 +1323,25 @@ fn initialize_control_values(hwnd: HWND, settings: &Settings) {
         ID_COLOR_FIRST + PRESET_COLORS.len() as i32 - 1,
         color_id,
     );
-    let thickness_id = PRESET_THICKNESSES
-        .iter()
-        .position(|value| *value == settings.default_thickness)
-        .map(|index| ID_THICKNESS_FIRST + index as i32);
-    set_radio_group(
-        hwnd,
-        ID_THICKNESS_FIRST,
-        ID_THICKNESS_FIRST + PRESET_THICKNESSES.len() as i32 - 1,
-        thickness_id,
-    );
+    if let Some(slider) = control(hwnd, ID_THICKNESS_SLIDER) {
+        unsafe {
+            windows::Win32::UI::WindowsAndMessaging::SendMessageW(
+                slider,
+                windows::Win32::UI::Controls::TBM_SETPOS,
+                WPARAM(1),
+                LPARAM(settings.default_thickness as isize),
+            );
+        }
+    }
+    let thickness = wide_string(&settings.default_thickness.to_string());
+    if let Some(edit) = control(hwnd, ID_THICKNESS_EDIT) {
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowTextW(
+                edit,
+                PCWSTR(thickness.as_ptr()),
+            );
+        }
+    }
     let delay_id = [0, 1000, 3000, 5000]
         .iter()
         .position(|&value| value == settings.capture_delay_ms)
@@ -1250,10 +1384,15 @@ fn initialize_control_values(hwnd: HWND, settings: &Settings) {
     set_check(hwnd, ID_START_WITH_WINDOWS, settings.start_with_windows);
     set_check(hwnd, ID_NOTIFY_AFTER_SAVE, settings.notify_after_save);
     set_check(hwnd, ID_CHECK_UPDATES, settings.check_updates_automatically);
-    set_check(
+    check_radio(
         hwnd,
-        ID_AUTO_INSTALL,
-        settings.install_updates_automatically,
+        ID_THEME_SYSTEM,
+        ID_THEME_DARK,
+        match settings.theme_preference {
+            ThemePreference::System => ID_THEME_SYSTEM,
+            ThemePreference::Light => ID_THEME_LIGHT,
+            ThemePreference::Dark => ID_THEME_DARK,
+        },
     );
     update_folder_label(hwnd, &settings.save_directory);
 }
@@ -1323,28 +1462,34 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
         |parent: HWND, id, text| create_control(parent, w!("STATIC"), text, Default::default(), id);
 
     label(hwnd, 700, "isolmaSS")?;
-    label(hwnd, 716, "Capture settings")?;
-    label(hwnd, 717, "Choose how you capture, edit, and save.")?;
+    label(hwnd, 716, "Preferences")?;
+    label(hwnd, 717, "Capture, annotate, save and update.")?;
     label(
         hwnd,
         718,
         concat!(
             "Version ",
             env!("CARGO_PKG_VERSION"),
-            "\nPrivate by design. MIT licensed."
+            "  ·  Local and private"
         ),
     )?;
-    label(hwnd, 709, "Your capture studio.\nMade for Windows.")?;
+    label(hwnd, 709, "Windows screenshot utility")?;
     create_button(
         hwnd,
-        ID_VIEW_SIMPLE,
-        "General",
+        ID_VIEW_GENERAL,
+        "Genel",
         BS_AUTORADIOBUTTON | BS_PUSHLIKE | WS_GROUP.0 as i32 | WS_TABSTOP.0 as i32,
     )?;
     create_button(
         hwnd,
-        ID_VIEW_ADVANCED,
-        "Editor",
+        ID_VIEW_EDITOR,
+        "Düzenleyici",
+        BS_AUTORADIOBUTTON | BS_PUSHLIKE | WS_TABSTOP.0 as i32,
+    )?;
+    create_button(
+        hwnd,
+        ID_VIEW_UPDATES,
+        "Güncellemeler",
         BS_AUTORADIOBUTTON | BS_PUSHLIKE | WS_TABSTOP.0 as i32,
     )?;
 
@@ -1352,21 +1497,9 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
     label(content, 701, "Global hotkey")?;
     create_button(
         content,
-        ID_HOTKEY_PRINT,
-        "PrintScreen",
-        BS_AUTORADIOBUTTON | WS_GROUP.0 as i32 | WS_TABSTOP.0 as i32,
-    )?;
-    create_button(
-        content,
-        ID_HOTKEY_CTRL_SHIFT_S,
-        "Ctrl+Shift+S",
-        BS_AUTORADIOBUTTON | WS_TABSTOP.0 as i32,
-    )?;
-    create_button(
-        content,
-        ID_HOTKEY_ALT_PRINT,
-        "Alt+PrintScreen",
-        BS_AUTORADIOBUTTON | WS_TABSTOP.0 as i32,
+        ID_HOTKEY_RECORD,
+        "Record shortcut",
+        BS_PUSHBUTTON | WS_GROUP.0 as i32 | WS_TABSTOP.0 as i32,
     )?;
     label(content, 705, "Capture delay")?;
     for (index, name) in ["None", "1 second", "3 seconds", "5 seconds"]
@@ -1432,7 +1565,7 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
         )?;
     }
 
-    label(content, 712, "After capture")?;
+    label(content, 712, "Windows and appearance")?;
     create_button(
         content,
         ID_WINDOW_SNAP,
@@ -1468,24 +1601,30 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
                 | WS_TABSTOP.0 as i32,
         )?;
     }
+    create_button(
+        content,
+        ID_COLOR_CUSTOM,
+        "More colors...",
+        BS_PUSHBUTTON | WS_TABSTOP.0 as i32,
+    )?;
     label(content, 704, "Line thickness")?;
-    for (index, value) in PRESET_THICKNESSES.iter().enumerate() {
-        let label = format!("{value} px");
-        create_button(
-            content,
-            ID_THICKNESS_FIRST + index as i32,
-            &label,
-            BS_AUTORADIOBUTTON
-                | if index == 0 {
-                    WS_GROUP.0 as i32
-                } else {
-                    Default::default()
-                }
-                | WS_TABSTOP.0 as i32,
-        )?;
-    }
+    create_control(
+        content,
+        w!("msctls_trackbar32"),
+        "",
+        windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(WS_TABSTOP.0),
+        ID_THICKNESS_SLIDER,
+    )?;
+    create_control(
+        content,
+        w!("EDIT"),
+        "4",
+        windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(WS_TABSTOP.0 | 0x2000),
+        ID_THICKNESS_EDIT,
+    )?;
+    label(content, 720, "px")?;
 
-    label(content, 714, "Windows")?;
+    label(content, 714, "Editor behavior")?;
     create_button(
         content,
         ID_START_WITH_WINDOWS,
@@ -1498,6 +1637,25 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
         "Show a notification after saving",
         BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32,
     )?;
+    label(content, 719, "Appearance")?;
+    create_button(
+        content,
+        ID_THEME_SYSTEM,
+        "System",
+        BS_AUTORADIOBUTTON | WS_GROUP.0 as i32 | WS_TABSTOP.0 as i32,
+    )?;
+    create_button(
+        content,
+        ID_THEME_LIGHT,
+        "Light",
+        BS_AUTORADIOBUTTON | WS_TABSTOP.0 as i32,
+    )?;
+    create_button(
+        content,
+        ID_THEME_DARK,
+        "Dark",
+        BS_AUTORADIOBUTTON | WS_TABSTOP.0 as i32,
+    )?;
 
     label(content, 715, "Updates")?;
     create_button(
@@ -1508,12 +1666,6 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
     )?;
     create_button(
         content,
-        ID_AUTO_INSTALL,
-        "Automatically install verified signed updates",
-        BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32,
-    )?;
-    create_button(
-        content,
         ID_CHECK_UPDATE,
         "Check for updates",
         BS_PUSHBUTTON | WS_TABSTOP.0 as i32,
@@ -1521,7 +1673,7 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
     label(
         content,
         708,
-        "Manual and automatic installs require HTTPS, a GitHub SHA-256 digest, and a valid Authenticode signature.",
+        "Updates are checked on startup. Installation always asks first and verifies the release signature.",
     )?;
 
     create_button(
@@ -1541,49 +1693,63 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
 
 fn apply_button_action(hwnd: HWND, state: &mut SettingsWindowState, id: i32) {
     match id {
-        ID_VIEW_SIMPLE => {
-            state.active_view = SettingsView::Simple;
+        ID_VIEW_GENERAL | ID_VIEW_EDITOR | ID_VIEW_UPDATES => {
+            state.active_view = match id {
+                ID_VIEW_EDITOR => SettingsView::Editor,
+                ID_VIEW_UPDATES => SettingsView::Updates,
+                _ => SettingsView::General,
+            };
             set_active_view(hwnd, state.active_view);
         }
-        ID_VIEW_ADVANCED => {
-            state.active_view = SettingsView::Advanced;
-            set_active_view(hwnd, state.active_view);
+        ID_HOTKEY_RECORD => {
+            state.recording_hotkey = true;
+            if let Some(button) = control(hwnd, ID_HOTKEY_RECORD) {
+                let text = wide_string("Press a shortcut (Esc cancels)");
+                unsafe {
+                    let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowTextW(
+                        button,
+                        PCWSTR(text.as_ptr()),
+                    );
+                    let _ = SetFocus(button);
+                }
+            }
         }
-        ID_HOTKEY_PRINT => state.settings.hotkey = HotkeyConfig::default(),
-        ID_HOTKEY_CTRL_SHIFT_S => state.settings.hotkey = HotkeyConfig::fallback(),
-        ID_HOTKEY_ALT_PRINT => state.settings.hotkey = HotkeyConfig::alt_print_screen(),
         ID_COLOR_FIRST..=307 => {
             state.settings.default_color = PRESET_COLORS[(id - ID_COLOR_FIRST) as usize];
         }
-        ID_THICKNESS_FIRST..=322 => {
-            state.settings.default_thickness =
-                PRESET_THICKNESSES[(id - ID_THICKNESS_FIRST) as usize];
+        ID_COLOR_CUSTOM => match crate::ui::choose_color(hwnd, state.settings.default_color) {
+            Ok(Some(color)) => state.settings.default_color = color,
+            Ok(None) => {}
+            Err(error) => crate::ui::error(hwnd, "Color picker failed", &error.to_string()),
+        },
+        ID_THEME_SYSTEM | ID_THEME_LIGHT | ID_THEME_DARK => {
+            state.settings.theme_preference = match id {
+                ID_THEME_LIGHT => ThemePreference::Light,
+                ID_THEME_DARK => ThemePreference::Dark,
+                _ => ThemePreference::System,
+            };
+            crate::theme::set_preference(state.settings.theme_preference);
+            unsafe {
+                crate::theme::apply_window_theme(
+                    hwnd,
+                    crate::theme::theme() == crate::theme::Theme::Dark,
+                    true,
+                );
+            }
+            state.refresh_brushes();
         }
         ID_WINDOW_SNAP => state.settings.enable_window_snap = !state.settings.enable_window_snap,
         ID_CLOSE_AFTER_ACTION => {
-            state.settings.close_after_action = !state.settings.close_after_action;
+            state.settings.close_after_action = !state.settings.close_after_action
         }
         ID_START_WITH_WINDOWS => {
-            state.settings.start_with_windows = !state.settings.start_with_windows;
+            state.settings.start_with_windows = !state.settings.start_with_windows
         }
         ID_NOTIFY_AFTER_SAVE => {
-            state.settings.notify_after_save = !state.settings.notify_after_save;
+            state.settings.notify_after_save = !state.settings.notify_after_save
         }
         ID_CHECK_UPDATES => {
-            state.settings.check_updates_automatically =
-                !state.settings.check_updates_automatically;
-            if !state.settings.check_updates_automatically {
-                state.settings.install_updates_automatically = false;
-                set_check(hwnd, ID_AUTO_INSTALL, false);
-            }
-        }
-        ID_AUTO_INSTALL => {
-            state.settings.install_updates_automatically =
-                !state.settings.install_updates_automatically;
-            if state.settings.install_updates_automatically {
-                state.settings.check_updates_automatically = true;
-                set_check(hwnd, ID_CHECK_UPDATES, true);
-            }
+            state.settings.check_updates_automatically = !state.settings.check_updates_automatically
         }
         ID_DELAY_FIRST..=503 => {
             state.settings.capture_delay_ms = [0, 1000, 3000, 5000][(id - ID_DELAY_FIRST) as usize];
@@ -1607,6 +1773,105 @@ fn apply_button_action(hwnd: HWND, state: &mut SettingsWindowState, id: i32) {
     }
 }
 
+/// Intercept keyboard messages before dialog navigation consumes Tab/Alt/Enter.
+pub fn handle_key_recording(
+    hwnd: HWND,
+    message: &windows::Win32::UI::WindowsAndMessaging::MSG,
+) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        GetKeyState, HOT_KEY_MODIFIERS, MOD_ALT, MOD_CONTROL, MOD_SHIFT, MOD_WIN, RegisterHotKey,
+        UnregisterHotKey, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT, VK_SNAPSHOT,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP};
+    let ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut SettingsWindowState;
+    if ptr.is_null() || !unsafe { (*ptr).recording_hotkey } {
+        return false;
+    }
+    let state = unsafe { &mut *ptr };
+    let key = message.wParam.0 as u32;
+    if message.message == WM_KEYUP || message.message == WM_SYSKEYUP {
+        if key != VK_SNAPSHOT.0 as u32 {
+            return true;
+        }
+    } else if message.message != WM_KEYDOWN && message.message != WM_SYSKEYDOWN {
+        return false;
+    }
+    if key == VK_ESCAPE.0 as u32 {
+        state.recording_hotkey = false;
+        initialize_control_values(hwnd, &state.settings);
+        return true;
+    }
+    if [VK_CONTROL.0, VK_SHIFT.0, VK_MENU.0, VK_LWIN.0, VK_RWIN.0].contains(&(key as u16)) {
+        return true;
+    }
+    let down = |vk: u16| unsafe { GetKeyState(vk as i32) < 0 };
+    let mut parts = Vec::with_capacity(5);
+    let mut modifiers = 0u32;
+    if down(VK_CONTROL.0) {
+        parts.push("Ctrl".to_string());
+        modifiers |= MOD_CONTROL.0;
+    }
+    if down(VK_MENU.0) {
+        parts.push("Alt".to_string());
+        modifiers |= MOD_ALT.0;
+    }
+    if down(VK_SHIFT.0) {
+        parts.push("Shift".to_string());
+        modifiers |= MOD_SHIFT.0;
+    }
+    if down(VK_LWIN.0) || down(VK_RWIN.0) {
+        parts.push("Win".to_string());
+        modifiers |= MOD_WIN.0;
+    }
+    let key_name = match key {
+        0x30..=0x39 | 0x41..=0x5a => char::from_u32(key).map(|value| value.to_string()),
+        0x70..=0x87 => Some(format!("F{}", key - 0x6f)),
+        value if value == VK_SNAPSHOT.0 as u32 => Some("PrintScreen".to_string()),
+        _ => None,
+    };
+    let Some(key_name) = key_name else {
+        return true;
+    };
+    if modifiers == 0 && key != VK_SNAPSHOT.0 as u32 {
+        return true;
+    }
+    parts.push(key_name);
+    let description = parts.join("+");
+    let Some(candidate) = HotkeyConfig::from_str(&description) else {
+        return true;
+    };
+    state.recording_hotkey = false;
+    if candidate != state.settings.hotkey && candidate != state.original_hotkey {
+        const PROBE_ID: i32 = 0x5a51;
+        match unsafe {
+            RegisterHotKey(
+                HWND::default(),
+                PROBE_ID,
+                HOT_KEY_MODIFIERS(candidate.modifiers),
+                candidate.vk,
+            )
+        } {
+            Ok(()) => {
+                let _ = unsafe { UnregisterHotKey(HWND::default(), PROBE_ID) };
+            }
+            Err(_) => {
+                crate::ui::error(
+                    hwnd,
+                    "Shortcut conflict",
+                    &format!(
+                        "{description} is already reserved by Windows or another application. Your current shortcut was kept. Record a different combination."
+                    ),
+                );
+                initialize_control_values(hwnd, &state.settings);
+                return true;
+            }
+        }
+    }
+    state.settings.hotkey = candidate;
+    initialize_control_values(hwnd, &state.settings);
+    true
+}
+
 unsafe extern "system" fn settings_wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -1617,9 +1882,14 @@ unsafe extern "system" fn settings_wnd_proc(
     match msg {
         windows::Win32::UI::WindowsAndMessaging::WM_NCDESTROY => {
             unsafe {
+                let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(hwnd, 1);
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             }
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_TIMER if wparam.0 == 1 => {
+            crate::updater::poll(hwnd, false);
+            LRESULT(0)
         }
         windows::Win32::UI::WindowsAndMessaging::WM_SIZE => {
             if !state_ptr.is_null() {
@@ -1666,8 +1936,20 @@ unsafe extern "system" fn settings_wnd_proc(
                 if header.code == NM_CUSTOMDRAW {
                     let draw = unsafe { &*(lparam.0 as *const NMCUSTOMDRAW) };
                     if draw.dwDrawStage == CDDS_PREPAINT {
-                        draw_settings_button(draw, unsafe { &*state_ptr });
-                        return LRESULT(CDRF_SKIPDEFAULT as isize);
+                        let id = draw.hdr.idFrom as i32;
+                        if id == ID_THICKNESS_SLIDER
+                            && crate::theme::theme() == crate::theme::Theme::Dark
+                        {
+                            draw_settings_slider(draw, unsafe { &*state_ptr });
+                            return LRESULT(CDRF_SKIPDEFAULT as isize);
+                        }
+                        if id != ID_THICKNESS_SLIDER
+                            && (crate::theme::theme() == crate::theme::Theme::Dark
+                                || (ID_COLOR_FIRST..ID_COLOR_FIRST + 8).contains(&id))
+                        {
+                            draw_settings_button(draw, unsafe { &*state_ptr });
+                            return LRESULT(CDRF_SKIPDEFAULT as isize);
+                        }
                     }
                 }
             }
@@ -1700,41 +1982,18 @@ unsafe extern "system" fn settings_wnd_proc(
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         WM_SETTINGCHANGE => {
-            // Theme/accent broadcast: re-read the registry caches, rebuild
-            // the theme-colored brushes and repaint with the new palette.
-            let name = if lparam.0 == 0 {
-                String::new()
-            } else {
-                unsafe {
-                    let pointer = lparam.0 as *const u16;
-                    let mut length = 0;
-                    while *pointer.add(length) != 0 {
-                        length += 1;
-                    }
-                    String::from_utf16_lossy(std::slice::from_raw_parts(pointer, length))
-                }
-            };
+            crate::theme::invalidate_theme_cache();
             if !state_ptr.is_null() {
                 let state = unsafe { &mut *state_ptr };
-                if name.eq_ignore_ascii_case("AppsUseLightTheme") {
-                    crate::theme::invalidate_theme_cache();
-                    let current = crate::theme::theme();
-                    crate::theme::set_theme(current);
-                    unsafe {
-                        crate::theme::apply_window_theme(
-                            hwnd,
-                            current == crate::theme::Theme::Dark,
-                            true,
-                        );
-                    }
-                } else {
-                    // Accent colors live under HKCU\...\Explorer\Accent and
-                    // arrive as plain WM_SETTINGCHANGE broadcasts as well.
-                    crate::theme::invalidate_accent();
+                unsafe {
+                    crate::theme::apply_window_theme(
+                        hwnd,
+                        crate::theme::theme() == crate::theme::Theme::Dark,
+                        true,
+                    );
                 }
                 state.refresh_brushes();
                 unsafe {
-                    let _ = InvalidateRect(hwnd, None, true);
                     let _ = windows::Win32::Graphics::Gdi::RedrawWindow(
                         hwnd,
                         None,
@@ -1764,6 +2023,15 @@ unsafe extern "system" fn settings_wnd_proc(
             }
             LRESULT(0)
         }
+        WM_CTLCOLOREDIT if !state_ptr.is_null() => {
+            let state = unsafe { &*state_ptr };
+            let hdc = HDC(wparam.0 as *mut _);
+            unsafe {
+                let _ = SetTextColor(hdc, color_text());
+                let _ = SetBkColor(hdc, color_card());
+            }
+            LRESULT(state.card_brush.0 as isize)
+        }
         WM_CTLCOLORSTATIC | WM_CTLCOLORBTN => {
             if state_ptr.is_null() {
                 return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
@@ -1792,11 +2060,72 @@ unsafe extern "system" fn settings_wnd_proc(
             };
             LRESULT(brush.0 as isize)
         }
+        windows::Win32::UI::WindowsAndMessaging::WM_HSCROLL if !state_ptr.is_null() => {
+            let slider = HWND(lparam.0 as *mut _);
+            if unsafe { GetDlgCtrlID(slider) } == ID_THICKNESS_SLIDER {
+                let value = unsafe {
+                    windows::Win32::UI::WindowsAndMessaging::SendMessageW(
+                        slider,
+                        windows::Win32::UI::WindowsAndMessaging::WM_USER,
+                        WPARAM(0),
+                        LPARAM(0),
+                    )
+                    .0 as i32
+                }
+                .clamp(1, 64);
+                let state = unsafe { &mut *state_ptr };
+                state.settings.default_thickness = value;
+                if let Some(edit) = control(hwnd, ID_THICKNESS_EDIT) {
+                    state.updating_thickness = true;
+                    let text = wide_string(&value.to_string());
+                    unsafe {
+                        let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowTextW(
+                            edit,
+                            PCWSTR(text.as_ptr()),
+                        );
+                    }
+                    state.updating_thickness = false;
+                }
+            }
+            LRESULT(0)
+        }
         windows::Win32::UI::WindowsAndMessaging::WM_COMMAND => {
-            if state_ptr.is_null() || wparam.0 >> 16 != 0 {
+            if state_ptr.is_null() {
                 return LRESULT(0);
             }
             let id = (wparam.0 & 0xffff) as i32;
+            if id == ID_THICKNESS_EDIT && unsafe { (*state_ptr).updating_thickness } {
+                return LRESULT(0);
+            }
+            if (wparam.0 >> 16) as u32 == 0x300 && id == ID_THICKNESS_EDIT {
+                let mut digits = [0u16; 8];
+                let length = unsafe {
+                    windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(
+                        HWND(lparam.0 as *mut _),
+                        &mut digits,
+                    )
+                };
+                if let Ok(value) =
+                    String::from_utf16_lossy(&digits[..length.max(0) as usize]).parse::<i32>()
+                    && (1..=64).contains(&value)
+                {
+                    unsafe { (*state_ptr).settings.default_thickness = value };
+                    if let Some(slider) = control(hwnd, ID_THICKNESS_SLIDER) {
+                        unsafe {
+                            windows::Win32::UI::WindowsAndMessaging::SendMessageW(
+                                slider,
+                                windows::Win32::UI::Controls::TBM_SETPOS,
+                                WPARAM(1),
+                                LPARAM(value as isize),
+                            );
+                        }
+                    }
+                }
+                return LRESULT(0);
+            }
+            if wparam.0 >> 16 != 0 {
+                return LRESULT(0);
+            }
             if id == 2 {
                 // IDCANCEL as translated from Escape by IsDialogMessage in ui::window_loop;
                 // with a child control focused the WM_KEYDOWN path never sees the key.
@@ -1817,10 +2146,32 @@ unsafe extern "system" fn settings_wnd_proc(
                     }
                 }
             } else if id == ID_SAVE {
-                let settings = unsafe { (*state_ptr).settings.clone() };
+                let mut digits = [0u16; 8];
+                if let Some(edit) = control(hwnd, ID_THICKNESS_EDIT) {
+                    let count = unsafe {
+                        windows::Win32::UI::WindowsAndMessaging::GetWindowTextW(edit, &mut digits)
+                    };
+                    if !String::from_utf16_lossy(&digits[..count.max(0) as usize])
+                        .parse::<i32>()
+                        .is_ok_and(|value| (1..=64).contains(&value))
+                    {
+                        crate::ui::error(
+                            hwnd,
+                            "Invalid thickness",
+                            "Enter a line thickness from 1 to 64 pixels.",
+                        );
+                        return LRESULT(0);
+                    }
+                }
+                let mut settings = unsafe { (*state_ptr).settings.clone() };
+                match Settings::load() {
+                    Ok(latest) => settings.skipped_update_version = latest.skipped_update_version,
+                    Err(error) => crate::diagnostics::record("settings merge", &error.to_string()),
+                }
                 let result = save_settings(&settings);
                 match result {
                     Ok(()) => unsafe {
+                        (*state_ptr).settings = settings;
                         (*state_ptr).saved = true;
                         let _ = DestroyWindow(hwnd);
                     },
@@ -1829,7 +2180,9 @@ unsafe extern "system" fn settings_wnd_proc(
             } else {
                 apply_button_action(hwnd, unsafe { &mut *state_ptr }, id);
                 if unsafe { IsWindow(hwnd).as_bool() } {
-                    initialize_control_values(hwnd, unsafe { &(*state_ptr).settings });
+                    if !unsafe { (*state_ptr).recording_hotkey } {
+                        initialize_control_values(hwnd, unsafe { &(*state_ptr).settings });
+                    }
                     unsafe {
                         let _ = windows::Win32::Graphics::Gdi::RedrawWindow(
                             hwnd,
@@ -2028,7 +2381,8 @@ fn activate_dialog(hwnd: HWND) {
         let _ = BringWindowToTop(hwnd);
         let _ = SetActiveWindow(hwnd);
         let _ = SetForegroundWindow(hwnd);
-        if let Ok(first) = windows::Win32::UI::WindowsAndMessaging::GetDlgItem(hwnd, ID_VIEW_SIMPLE)
+        if let Ok(first) =
+            windows::Win32::UI::WindowsAndMessaging::GetDlgItem(hwnd, ID_VIEW_GENERAL)
         {
             let _ = SetFocus(first);
         }
@@ -2040,17 +2394,21 @@ pub fn show_settings_dialog(current: &Settings, owner: Option<HWND>) -> Result<O
         use windows::Win32::UI::Controls::*;
         let init = INITCOMMONCONTROLSEX {
             dwSize: std::mem::size_of::<INITCOMMONCONTROLSEX>() as u32,
-            dwICC: ICC_STANDARD_CLASSES,
+            dwICC: ICC_STANDARD_CLASSES | ICC_BAR_CLASSES,
         };
         let _ = InitCommonControlsEx(&init);
     }
     crate::diagnostics::record("settings", "Opening settings window");
     register_settings_class()?;
     register_scroll_class()?;
+    crate::theme::set_preference(current.theme_preference);
     let mut state = Box::new(SettingsWindowState {
         settings: current.clone(),
         saved: false,
-        active_view: SettingsView::Simple,
+        active_view: SettingsView::General,
+        recording_hotkey: false,
+        original_hotkey: current.hotkey.clone(),
+        updating_thickness: false,
         dpi: 96,
         font: Default::default(),
         title_font: Default::default(),
@@ -2117,12 +2475,31 @@ pub fn show_settings_dialog(current: &Settings, owner: Option<HWND>) -> Result<O
     state.title_font = create_title_font(state.dpi);
     state.heading_font = create_heading_font(state.dpi);
     create_settings_controls(hwnd)?;
+    if let Some(slider) = control(hwnd, ID_THICKNESS_SLIDER) {
+        unsafe {
+            windows::Win32::UI::WindowsAndMessaging::SendMessageW(
+                slider,
+                windows::Win32::UI::Controls::TBM_SETRANGE,
+                WPARAM(1),
+                LPARAM(((64 << 16) | 1) as isize),
+            );
+        }
+    }
     crate::diagnostics::record("settings", "Controls created");
     set_controls_font(hwnd, state.font);
     set_control_font(hwnd, 700, state.title_font);
     set_control_font(hwnd, 716, state.title_font);
     for id in 710..=715 {
         set_control_font(hwnd, id, state.heading_font);
+    }
+    unsafe {
+        let timer = windows::Win32::UI::WindowsAndMessaging::SetTimer(hwnd, 1, 350, None);
+        if timer == 0 {
+            crate::diagnostics::record(
+                "settings update polling",
+                "Could not start update polling timer",
+            );
+        }
     }
     layout_chrome(hwnd, state.dpi);
     position_container(hwnd, state.dpi);
@@ -2146,6 +2523,7 @@ pub fn show_settings_dialog(current: &Settings, owner: Option<HWND>) -> Result<O
     if state.saved {
         Ok(Some(state.settings.clone()))
     } else {
+        crate::theme::set_preference(current.theme_preference);
         Ok(None)
     }
 }

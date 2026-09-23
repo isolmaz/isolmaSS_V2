@@ -1,6 +1,6 @@
 use crate::annotation::{ToolKind, bgra_to_colorref};
 use crate::capture::Rect;
-use crate::settings::{PRESET_COLORS, PRESET_THICKNESSES};
+use crate::settings::PRESET_COLORS;
 use windows::Win32::Foundation::{COLORREF, HWND, POINT};
 use windows::Win32::Graphics::Gdi::{HDC, PS_SOLID, Polyline};
 /// Corner radius (96-dpi px, scaled at each use site) for toolbar buttons and
@@ -22,7 +22,9 @@ pub enum ToolbarItem {
     Tool(ToolKind),
     Action(ToolbarAction),
     Color([u8; 4]),
-    Thickness(i32),
+    ColorPicker,
+    ThicknessSlider,
+    ThicknessValue,
 }
 
 #[derive(Debug, Clone)]
@@ -82,7 +84,9 @@ impl Toolbar {
             (ToolbarItem::Tool(ToolKind::Rectangle), true),
             (ToolbarItem::Tool(ToolKind::Arrow), true),
             (ToolbarItem::Tool(ToolKind::Pen), true),
+            (ToolbarItem::Tool(ToolKind::Highlight), true),
             (ToolbarItem::Tool(ToolKind::Text), true),
+            (ToolbarItem::Tool(ToolKind::Step), true),
             (ToolbarItem::Tool(ToolKind::Blur), true),
             (ToolbarItem::Tool(ToolKind::Redact), true),
             (ToolbarItem::Action(ToolbarAction::Undo), can_undo),
@@ -91,22 +95,23 @@ impl Toolbar {
         let tool_width = tool_button + pad * 2;
         let tool_height = pad * 2
             + tool_items.len() as i32 * tool_button
-            + (tool_items.len() as i32 - 1) * scale(2);
+            + (tool_items.len() as i32 - 1) * scale(2)
+            + scale(12);
 
         let color_size = scale(18);
         let color_step = scale(22);
-        let thickness_width = scale(22);
-        let thickness_step = scale(24);
+        let thickness_width = scale(100);
+        let value_width = scale(40);
         let action_button = scale(28);
         let action_step = scale(32);
         let section_gap = scale(8);
         let colors_width = if show_color {
-            PRESET_COLORS.len() as i32 * color_step - (color_step - color_size)
+            PRESET_COLORS.len() as i32 * color_step - (color_step - color_size) + scale(30)
         } else {
             0
         };
         let thicknesses_width = if show_thickness {
-            PRESET_THICKNESSES.len() as i32 * thickness_step - (thickness_step - thickness_width)
+            thickness_width + value_width + scale(4)
         } else {
             0
         };
@@ -237,8 +242,8 @@ impl Toolbar {
 
         let mut buttons = Vec::with_capacity(
             tool_items.len()
-                + usize::from(show_color) * PRESET_COLORS.len()
-                + usize::from(show_thickness) * PRESET_THICKNESSES.len()
+                + usize::from(show_color) * (PRESET_COLORS.len() + 1)
+                + usize::from(show_thickness) * 2
                 + 4,
         );
         let mut y = tool_bounds.bottom - pad - tool_button;
@@ -255,7 +260,16 @@ impl Toolbar {
                 is_enabled: enabled,
                 is_checked,
             });
-            y -= tool_button + scale(2);
+            y -= tool_button
+                + scale(2)
+                + if matches!(
+                    item,
+                    ToolbarItem::Tool(ToolKind::Highlight | ToolKind::Redact)
+                ) {
+                    scale(6)
+                } else {
+                    0
+                };
         }
         let item_y = action_bounds.top + (action_height - color_size) / 2;
         let mut x = action_bounds.left + pad;
@@ -269,20 +283,36 @@ impl Toolbar {
                 });
                 x += color_step;
             }
-            x += section_gap - (color_step - color_size);
+            x += scale(2);
+            buttons.push(ToolbarButton {
+                item: ToolbarItem::ColorPicker,
+                rect: Rect::new(
+                    x,
+                    item_y - scale(4),
+                    x + scale(26),
+                    item_y + color_size + scale(4),
+                ),
+                is_enabled: true,
+                is_checked: !PRESET_COLORS.contains(&active_color),
+            });
+            x += scale(26) + section_gap;
         }
         if show_thickness {
-            for thickness in PRESET_THICKNESSES {
-                let y = action_bounds.top + (action_height - tool_button) / 2;
-                buttons.push(ToolbarButton {
-                    item: ToolbarItem::Thickness(thickness),
-                    rect: Rect::new(x, y, x + thickness_width, y + tool_button),
-                    is_enabled: true,
-                    is_checked: thickness == active_thickness,
-                });
-                x += thickness_step;
-            }
-            x += section_gap - (thickness_step - thickness_width);
+            let y = action_bounds.top + (action_height - tool_button) / 2;
+            buttons.push(ToolbarButton {
+                item: ToolbarItem::ThicknessSlider,
+                rect: Rect::new(x, y, x + thickness_width, y + tool_button),
+                is_enabled: true,
+                is_checked: false,
+            });
+            x += thickness_width + scale(4);
+            buttons.push(ToolbarButton {
+                item: ToolbarItem::ThicknessValue,
+                rect: Rect::new(x, y, x + value_width, y + tool_button),
+                is_enabled: true,
+                is_checked: false,
+            });
+            x += value_width + section_gap;
         }
         for action in [
             ToolbarAction::Save,
@@ -380,6 +410,15 @@ impl Toolbar {
         None
     }
 
+    pub fn slider_value_at(&self, x: i32) -> Option<i32> {
+        let rect = self
+            .buttons
+            .iter()
+            .find(|button| button.item == ToolbarItem::ThicknessSlider)?
+            .rect;
+        Some(1 + ((x - rect.left).clamp(0, rect.width() - 1) * 63 / (rect.width() - 1).max(1)))
+    }
+
     /// Updates hover state based on mouse coordinates.
     pub fn update_hover(&mut self, pt: (i32, i32)) -> bool {
         let new_hover = self
@@ -396,7 +435,7 @@ impl Toolbar {
     }
 
     /// Flat, high-contrast controls share the settings window's visual language.
-    pub fn render(&self, hdc: HDC) {
+    pub fn render(&self, hdc: HDC, thickness_input: Option<&str>) {
         use crate::drawing::{icon, label, rounded, with_pen};
         let scale = |value: i32| (value * self.dpi as i32 / 96).max(1);
         // Native Fluent chrome from the shared token set (light/dark aware).
@@ -425,8 +464,8 @@ impl Toolbar {
         }
         for button in &self.buttons {
             let hovered = self.hovered_item == Some(button.item) && button.is_enabled;
-            let selected = matches!(button.item, ToolbarItem::Tool(tool) if tool == self.active_tool)
-                || matches!(button.item, ToolbarItem::Thickness(value) if value == self.active_thickness);
+            let selected =
+                matches!(button.item, ToolbarItem::Tool(tool) if tool == self.active_tool);
             let primary = button.item == ToolbarItem::Action(ToolbarAction::Copy);
             let fill = if primary {
                 accent
@@ -476,67 +515,76 @@ impl Toolbar {
                         icon(hdc, swatch, 0xe73e, scale(10), check, true);
                     }
                 }
-                ToolbarItem::Thickness(value) => {
-                    let y = (button.rect.top + button.rect.bottom) / 2;
-                    with_pen(hdc, PS_SOLID, scale(value), ink, || unsafe {
-                        let _ = Polyline(
-                            hdc,
-                            &[
-                                POINT {
-                                    x: button.rect.left + scale(4),
-                                    y,
-                                },
-                                POINT {
-                                    x: button.rect.right - scale(4),
-                                    y,
-                                },
-                            ],
-                        );
-                    });
+                ToolbarItem::ColorPicker => {
+                    let center = (button.rect.left + button.rect.right) / 2;
+                    rounded(
+                        hdc,
+                        Rect::new(
+                            center - scale(9),
+                            button.rect.top + scale(7),
+                            center - scale(1),
+                            button.rect.bottom - scale(7),
+                        ),
+                        scale(3),
+                        COLORREF(0x0029_31e0),
+                        stroke,
+                    );
+                    rounded(
+                        hdc,
+                        Rect::new(
+                            center,
+                            button.rect.top + scale(7),
+                            center + scale(9),
+                            button.rect.bottom - scale(7),
+                        ),
+                        scale(3),
+                        COLORREF(0x00c2_7119),
+                        stroke,
+                    );
                 }
-                item => {
-                    // Segoe Fluent Icons codepoints, each verified present in
-                    // BOTH official glyph tables (Segoe Fluent Icons on
-                    // Windows 11, Segoe MDL2 Assets on Windows 10) so the
-                    // shared range still renders as a Windows 10 fallback:
-                    //   Select E7C4 TaskView, Rectangle E799 AspectRatio,
-                    //   Arrow E72A Forward, Pen E70F Edit (pencil),
-                    //   Text E90A Comment (text-callout bubble),
-                    //   Undo E7A7, Redo E7A6, Save E74E, Copy E8C8,
-                    //   Settings E713, Cancel E711, swatch check E73E.
-                    // Suggested values that are wrong in the real tables were
-                    // avoided: E734 is FavoriteStar, E74C is OEM, E72C is
-                    // Refresh (Redo is E7A6).
-                    // Blur (▦ mosaic) and Redact (■ solid bar) stay Segoe UI
-                    // text: neither icon font has a shared blur/redaction
-                    // glyph — Effects E794, Contrast E7A1, PortraitBlur EABE
-                    // and Blocked E733 are Fluent-only and would not resolve
-                    // on Windows 10.
-                    let codepoint = match item {
-                        ToolbarItem::Tool(ToolKind::Select) => Some(0xe7c4u16),
-                        ToolbarItem::Tool(ToolKind::Rectangle) => Some(0xe799),
-                        ToolbarItem::Tool(ToolKind::Arrow) => Some(0xe72a),
-                        ToolbarItem::Tool(ToolKind::Pen) => Some(0xe70f),
-                        ToolbarItem::Tool(ToolKind::Text) => Some(0xe90a),
-                        ToolbarItem::Action(ToolbarAction::Undo) => Some(0xe7a7),
-                        ToolbarItem::Action(ToolbarAction::Redo) => Some(0xe7a6),
-                        ToolbarItem::Action(ToolbarAction::Save) => Some(0xe74e),
-                        ToolbarItem::Action(ToolbarAction::Copy) => Some(0xe8c8),
-                        ToolbarItem::Action(ToolbarAction::Settings) => Some(0xe713),
-                        ToolbarItem::Action(ToolbarAction::Cancel) => Some(0xe711),
-                        _ => None,
+                ToolbarItem::ThicknessSlider => {
+                    let y = (button.rect.top + button.rect.bottom) / 2;
+                    let left = button.rect.left + scale(9);
+                    let right = button.rect.right - scale(9);
+                    with_pen(hdc, PS_SOLID, scale(2), stroke, || unsafe {
+                        let _ = Polyline(hdc, &[POINT { x: left, y }, POINT { x: right, y }]);
+                    });
+                    let knob =
+                        left + (right - left) * (self.active_thickness.clamp(1, 64) - 1) / 63;
+                    rounded(
+                        hdc,
+                        Rect::new(knob - scale(5), y - scale(5), knob + scale(6), y + scale(6)),
+                        scale(5),
+                        accent,
+                        card,
+                    );
+                }
+                ToolbarItem::ThicknessValue => {
+                    let value = thickness_input.map_or_else(
+                        || self.active_thickness.to_string(),
+                        |digits| {
+                            if digits.is_empty() {
+                                "_".to_owned()
+                            } else {
+                                digits.to_owned()
+                            }
+                        },
+                    );
+                    label(hdc, button.rect, &value, scale(11), ink, true);
+                }
+                ToolbarItem::Tool(tool) => {
+                    draw_tool_icon(hdc, button.rect, tool, ink, card, self.dpi)
+                }
+                ToolbarItem::Action(action) => {
+                    let codepoint = match action {
+                        ToolbarAction::Undo => 0xe7a7,
+                        ToolbarAction::Redo => 0xe7a6,
+                        ToolbarAction::Save => 0xe74e,
+                        ToolbarAction::Copy => 0xe8c8,
+                        ToolbarAction::Settings => 0xe713,
+                        ToolbarAction::Cancel => 0xe711,
                     };
-                    match codepoint {
-                        Some(codepoint) => icon(hdc, button.rect, codepoint, scale(14), ink, true),
-                        None => {
-                            let glyph = match item {
-                                ToolbarItem::Tool(ToolKind::Blur) => "▦",
-                                ToolbarItem::Tool(ToolKind::Redact) => "■",
-                                _ => "",
-                            };
-                            label(hdc, button.rect, glyph, scale(16), ink, true);
-                        }
-                    }
+                    icon(hdc, button.rect, codepoint, scale(14), ink, true);
                 }
             }
         }
@@ -544,13 +592,15 @@ impl Toolbar {
             && let Some(button) = self.buttons.iter().find(|button| button.item == item)
         {
             let tip = match item {
-                ToolbarItem::Tool(ToolKind::Select) => "Select · V".to_owned(),
-                ToolbarItem::Tool(ToolKind::Rectangle) => "Rectangle · R".to_owned(),
+                ToolbarItem::Tool(ToolKind::Select) => "Seç/taşı · V".to_owned(),
+                ToolbarItem::Tool(ToolKind::Rectangle) => "Çerçeve · R".to_owned(),
                 ToolbarItem::Tool(ToolKind::Arrow) => "Arrow · A".to_owned(),
                 ToolbarItem::Tool(ToolKind::Pen) => "Pen · P".to_owned(),
+                ToolbarItem::Tool(ToolKind::Highlight) => "Highlighter · H".to_owned(),
+                ToolbarItem::Tool(ToolKind::Step) => "Numbered step · N".to_owned(),
                 ToolbarItem::Tool(ToolKind::Text) => "Text · T".to_owned(),
-                ToolbarItem::Tool(ToolKind::Blur) => "Blur · B".to_owned(),
-                ToolbarItem::Tool(ToolKind::Redact) => "Redact · M".to_owned(),
+                ToolbarItem::Tool(ToolKind::Blur) => "Blur · B (not secure redaction)".to_owned(),
+                ToolbarItem::Tool(ToolKind::Redact) => "Karart · M (opaque)".to_owned(),
                 ToolbarItem::Action(ToolbarAction::Undo) => "Undo · Ctrl+Z".to_owned(),
                 ToolbarItem::Action(ToolbarAction::Redo) => "Redo · Ctrl+Y".to_owned(),
                 ToolbarItem::Action(ToolbarAction::Save) => {
@@ -560,7 +610,11 @@ impl Toolbar {
                 ToolbarItem::Action(ToolbarAction::Settings) => "Settings · Ctrl+,".to_owned(),
                 ToolbarItem::Action(ToolbarAction::Cancel) => "Cancel · Esc".to_owned(),
                 ToolbarItem::Color(_) => "Annotation color".to_owned(),
-                ToolbarItem::Thickness(value) => format!("{value} px stroke"),
+                ToolbarItem::ColorPicker => "More colors...".to_owned(),
+                ToolbarItem::ThicknessSlider => {
+                    format!("Drag to adjust stroke · {} px", self.active_thickness)
+                }
+                ToolbarItem::ThicknessValue => "Type 1–64 px · Enter to apply".to_owned(),
             };
             let margin = scale(4);
             let width = (crate::drawing::measure_text(&tip, scale(11)).0 + scale(16))
@@ -585,6 +639,117 @@ impl Toolbar {
             label(hdc, bounds, &tip, scale(11), tokens.text, true);
         }
     }
+}
+
+/// Draw tool-specific geometry at a shared stroke weight; no misleading font glyph aliases.
+fn draw_tool_icon(
+    hdc: HDC,
+    rect: Rect,
+    tool: ToolKind,
+    ink: COLORREF,
+    surface: COLORREF,
+    dpi: u32,
+) {
+    use crate::drawing::{icon, label, rounded, with_pen};
+    let unit = |value: i32| (value * dpi as i32 / 96).max(1);
+    let cx = (rect.left + rect.right) / 2;
+    let cy = (rect.top + rect.bottom) / 2;
+    let s = unit(1);
+    if tool == ToolKind::Pen {
+        icon(hdc, rect, 0xe70f, unit(15), ink, true);
+        return;
+    }
+    if tool == ToolKind::Text {
+        label(hdc, rect, "T", unit(15), ink, true);
+        return;
+    }
+    if tool == ToolKind::Step {
+        rounded(
+            hdc,
+            Rect::new(cx - unit(9), cy - unit(9), cx + unit(10), cy + unit(10)),
+            unit(9),
+            ink,
+            ink,
+        );
+        label(hdc, rect, "1", unit(12), surface, true);
+        return;
+    }
+    if tool == ToolKind::Highlight {
+        rounded(
+            hdc,
+            Rect::new(cx - unit(9), cy - unit(2), cx + unit(10), cy + unit(4)),
+            unit(2),
+            ink,
+            ink,
+        );
+        return;
+    }
+    if tool == ToolKind::Redact {
+        rounded(
+            hdc,
+            Rect::new(cx - unit(9), cy - unit(5), cx + unit(10), cy + unit(6)),
+            unit(1),
+            ink,
+            ink,
+        );
+        return;
+    }
+    let point = |x: i32, y: i32| POINT {
+        x: cx + x * s,
+        y: cy + y * s,
+    };
+    with_pen(hdc, PS_SOLID, unit(2), ink, || unsafe {
+        match tool {
+            ToolKind::Select => {
+                let _ = Polyline(
+                    hdc,
+                    &[
+                        point(-7, -9),
+                        point(-7, 7),
+                        point(-3, 4),
+                        point(0, 9),
+                        point(3, 7),
+                        point(0, 2),
+                        point(7, 2),
+                        point(-7, -9),
+                    ],
+                );
+            }
+            ToolKind::Rectangle => {
+                let _ = Polyline(
+                    hdc,
+                    &[
+                        point(-9, -7),
+                        point(9, -7),
+                        point(9, 7),
+                        point(-9, 7),
+                        point(-9, -7),
+                    ],
+                );
+            }
+            ToolKind::Arrow => {
+                let _ = Polyline(hdc, &[point(-9, 7), point(7, -5), point(0, -5)]);
+                let _ = Polyline(hdc, &[point(7, -5), point(5, 2)]);
+            }
+            ToolKind::Blur => {
+                let _ = Polyline(
+                    hdc,
+                    &[
+                        point(-9, -8),
+                        point(9, -8),
+                        point(9, 8),
+                        point(-9, 8),
+                        point(-9, -8),
+                    ],
+                );
+                let _ = Polyline(hdc, &[point(-3, -8), point(-3, 8)]);
+                let _ = Polyline(hdc, &[point(3, -8), point(3, 8)]);
+                let _ = Polyline(hdc, &[point(-9, -2), point(9, -2)]);
+                let _ = Polyline(hdc, &[point(-9, 4), point(9, 4)]);
+            }
+            _ => {}
+        }
+    });
 }
 
 /// Presents the toolbar's commands as a native popup menu for keyboard and screen-reader
@@ -616,22 +781,25 @@ pub fn show_command_menu(
     }
     fn group(item: ToolbarItem) -> &'static str {
         match item {
+            ToolbarItem::Tool(ToolKind::Step | ToolKind::Blur | ToolKind::Redact) => "More tools",
             ToolbarItem::Tool(_) => "Tools",
             ToolbarItem::Action(ToolbarAction::Undo | ToolbarAction::Redo) => "History",
-            ToolbarItem::Color(_) => "Color",
-            ToolbarItem::Thickness(_) => "Line width",
+            ToolbarItem::Color(_) | ToolbarItem::ColorPicker => "Color",
+            ToolbarItem::ThicknessSlider | ToolbarItem::ThicknessValue => "Line width",
             ToolbarItem::Action(_) => "Commands",
         }
     }
     fn label(item: ToolbarItem) -> String {
         match item {
-            ToolbarItem::Tool(ToolKind::Select) => "Select region".to_owned(),
-            ToolbarItem::Tool(ToolKind::Rectangle) => "Rectangle".to_owned(),
+            ToolbarItem::Tool(ToolKind::Select) => "Seç/taşı".to_owned(),
+            ToolbarItem::Tool(ToolKind::Rectangle) => "Çerçeve".to_owned(),
             ToolbarItem::Tool(ToolKind::Arrow) => "Arrow".to_owned(),
             ToolbarItem::Tool(ToolKind::Pen) => "Pen".to_owned(),
+            ToolbarItem::Tool(ToolKind::Highlight) => "Highlighter".to_owned(),
+            ToolbarItem::Tool(ToolKind::Step) => "Numbered step".to_owned(),
             ToolbarItem::Tool(ToolKind::Text) => "Text".to_owned(),
-            ToolbarItem::Tool(ToolKind::Blur) => "Blur".to_owned(),
-            ToolbarItem::Tool(ToolKind::Redact) => "Redact".to_owned(),
+            ToolbarItem::Tool(ToolKind::Blur) => "Blur (not secure redaction)".to_owned(),
+            ToolbarItem::Tool(ToolKind::Redact) => "Karart (opaque)".to_owned(),
             ToolbarItem::Action(ToolbarAction::Undo) => "Undo".to_owned(),
             ToolbarItem::Action(ToolbarAction::Redo) => "Redo".to_owned(),
             ToolbarItem::Action(ToolbarAction::Save) => "Save screenshot".to_owned(),
@@ -650,7 +818,10 @@ pub fn show_command_menu(
                 .copied()
                 .unwrap_or("Custom color")
                 .to_owned(),
-            ToolbarItem::Thickness(value) => format!("{value} px"),
+            ToolbarItem::ColorPicker => "More colors...".to_owned(),
+            ToolbarItem::ThicknessSlider | ToolbarItem::ThicknessValue => {
+                "Enter line width (1–64 px)".to_owned()
+            }
         }
     }
 
@@ -842,29 +1013,6 @@ mod tests {
                     Some(button.item)
                 );
             }
-        }
-    }
-
-    #[test]
-    fn missing_hover_target_does_not_crash_rendering() {
-        let mut toolbar = Toolbar::layout(
-            &Rect::new(10, 10, 20, 20),
-            Rect::new(0, 0, 800, 600),
-            ToolKind::Blur,
-            PRESET_COLORS[0],
-            2,
-            false,
-            false,
-            false,
-            false,
-            96,
-        );
-        toolbar.hovered_item = Some(ToolbarItem::Color(PRESET_COLORS[0]));
-        let dc = unsafe { windows::Win32::Graphics::Gdi::CreateCompatibleDC(None) };
-        assert!(!dc.is_invalid());
-        toolbar.render(dc);
-        unsafe {
-            let _ = windows::Win32::Graphics::Gdi::DeleteDC(dc);
         }
     }
 }

@@ -40,7 +40,7 @@ use windows::core::{PCWSTR, w};
 fn print_usage() {
     println!("isolmaSS - Lightweight Native Windows Screenshot Utility");
     println!("Usage:");
-    println!("  isolmass                   Run interactive hotkey daemon (PrtScn / fallback)");
+    println!("  isolmass                   Run tray daemon with configured capture shortcut");
     println!(
         "  isolmass --fix-printscreen Apply registry fix to disable Windows Snipping Tool on PrtScn"
     );
@@ -52,7 +52,7 @@ fn print_usage() {
     println!(
         "  isolmass --benchmark [N]   Measure N capture-to-visible samples (default 50; JSON lines)"
     );
-    println!("  isolmass --verify-update P Verify installer signature and expected publisher");
+    println!("  isolmass --verify-update P Verify installer with pinned publisher signature");
     println!("  isolmass --help            Show this help message");
 }
 
@@ -144,39 +144,51 @@ fn apply_settings(
             Ok(next) => *runtime = Some(next),
             Err(error) => {
                 let requested = latest.hotkey.description.clone();
-                match start_hotkey_runtime(settings.hotkey.clone()) {
-                    Ok(previous) => {
-                        *runtime = Some(previous);
-                        let mut detail = format!("'{requested}' could not start: {error}");
-                        if let Err(rollback) =
-                            rollback_hotkey_setting(&mut latest, &settings.hotkey)
-                        {
-                            detail.push_str(&format!(" {rollback}"));
+                let keep_previous = ui::confirm(
+                    tray::window_handle(),
+                    "Shortcut conflict",
+                    &format!(
+                        "'{requested}' is unavailable: {error}\nKeep the previous '{}' shortcut? Choose No to capture from the tray until you record another shortcut.",
+                        settings.hotkey.description
+                    ),
+                );
+                if keep_previous {
+                    match start_hotkey_runtime(settings.hotkey.clone()) {
+                        Ok(previous) => {
+                            *runtime = Some(previous);
+                            if let Err(rollback) =
+                                rollback_hotkey_setting(&mut latest, &settings.hotkey)
+                            {
+                                tray::show_notification(
+                                    "Shortcut preference not restored",
+                                    &rollback,
+                                );
+                            }
                         }
-                        tray::show_notification("Hotkey unchanged", &detail);
+                        Err(restart_error) => {
+                            *runtime = None;
+                            tray::set_active_hotkey("");
+                            let mut detail =
+                                format!("Previous shortcut also failed: {restart_error}");
+                            if let Err(rollback) =
+                                rollback_hotkey_setting(&mut latest, &settings.hotkey)
+                            {
+                                detail.push_str(&format!(" {rollback}"));
+                            }
+                            tray::show_notification("Shortcut unavailable", &detail);
+                        }
                     }
-                    Err(restart_error) => {
-                        // Keep the daemon alive without a shortcut instead of
-                        // aborting the message loop; say so accurately.
-                        *runtime = None;
-                        tray::set_active_hotkey("");
-                        let mut detail = format!(
-                            "'{requested}' could not start ({error}) and the previous shortcut failed too ({restart_error})"
-                        );
-                        if let Err(rollback) =
-                            rollback_hotkey_setting(&mut latest, &settings.hotkey)
-                        {
-                            detail.push_str(&format!(" {rollback}"));
-                        }
-                        detail.push_str(
-                            ". Capture from the tray menu or open Settings to choose a shortcut.",
-                        );
-                        tray::show_notification("Capture shortcut unavailable", &detail);
+                } else {
+                    *runtime = None;
+                    tray::set_active_hotkey("");
+                    if let Err(rollback) = rollback_hotkey_setting(&mut latest, &settings.hotkey) {
+                        tray::show_notification("Shortcut preference not restored", &rollback);
                     }
                 }
             }
         }
     }
+    theme::set_preference(latest.theme_preference);
     updater::configure(settings, &latest);
     *settings = latest;
     tray::refresh_preferences(settings);
@@ -191,6 +203,27 @@ fn capture(triggered: Instant) {
     }
     tray::capture_finished();
 }
+/// Exercises the installed executable's normal startup dependencies before setup commits.
+fn run_health_check() -> Result<(), Box<dyn std::error::Error>> {
+    let instance = match instance::acquire_or_notify()? {
+        InstanceState::Primary(instance) => instance,
+        InstanceState::ExistingNotified => {
+            return Err("Another isolmaSS instance is still running.".into());
+        }
+    };
+    let (settings, warning) = Settings::load_with_warning()?;
+    if let Some(warning) = warning {
+        diagnostics::record("health check settings", &warning);
+    }
+    theme::set_preference(settings.theme_preference);
+    tray::set_active_hotkey(&settings.hotkey.description);
+    let tray = tray::TrayManager::create()?;
+    let runtime = start_hotkey_runtime(settings.hotkey)?;
+    drop(runtime);
+    drop(tray);
+    drop(instance);
+    Ok(())
+}
 
 fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error::Error>> {
     use windows::Win32::UI::WindowsAndMessaging::*;
@@ -199,6 +232,7 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
         InstanceState::ExistingNotified => return Ok(()),
     };
     let (mut settings, warning) = Settings::load_with_warning()?;
+    theme::set_preference(settings.theme_preference);
     if let Err(error) = startup::set_start_with_windows(settings.start_with_windows) {
         diagnostics::record("startup", &error);
     }
@@ -208,9 +242,45 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
     if let Some(warning) = warning {
         tray::show_notification("Settings recovered", &warning);
     }
-    let mut runtime = Some(start_hotkey_runtime(settings.hotkey.clone())?);
+    let mut runtime = match start_hotkey_runtime(settings.hotkey.clone()) {
+        Ok(active) => Some(active),
+        Err(error) => {
+            let fallback = HotkeyConfig::fallback();
+            if settings.hotkey != fallback
+                && ui::confirm(
+                    tray::window_handle(),
+                    "Shortcut unavailable",
+                    &format!(
+                        "{error}\nUse {} for this session instead?",
+                        fallback.description
+                    ),
+                )
+            {
+                match start_hotkey_runtime(fallback) {
+                    Ok(active) => Some(active),
+                    Err(fallback_error) => {
+                        tray::set_active_hotkey("");
+                        tray::show_notification(
+                            "Shortcut unavailable",
+                            &fallback_error.to_string(),
+                        );
+                        None
+                    }
+                }
+            } else {
+                tray::set_active_hotkey("");
+                tray::show_notification(
+                    "Shortcut unavailable",
+                    &format!(
+                        "{error} Capture from the tray or choose another shortcut in Settings."
+                    ),
+                );
+                None
+            }
+        }
+    };
     if settings.check_updates_automatically {
-        updater::run_automatic_update_check(settings.install_updates_automatically);
+        updater::run_automatic_update_check();
     }
     if open_settings {
         tray::queue_command(TrayCommand::Settings);
@@ -445,12 +515,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--capture-once" => {
                 return run_capture_once();
             }
+            "--health-check" => {
+                return run_health_check();
+            }
             "--verify-update" => {
                 let path = args
                     .get(2)
                     .ok_or("--verify-update requires an installer path")?;
-                updater::verify_authenticode(Path::new(path))?;
-                println!("Installer trust and publisher identity verified.");
+                let version = updater::verify_update_artifact(Path::new(path))?;
+                println!("Installer v{version} matches the pinned publisher signature.");
                 return Ok(());
             }
             "--settings" => {

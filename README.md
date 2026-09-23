@@ -1,97 +1,71 @@
 # isolmaSS
 
-A small, native Windows screenshot editor written in Rust. Capture a region or a window, annotate it, then copy or save it. Screenshots stay on your computer; the optional update check contacts GitHub.
+Native Windows screenshot editor in Rust. Capture a region or window, annotate it, then copy or save it locally. There is no screenshot upload or telemetry. Version **0.4.0**.
 
-Version **0.3.0** introduces a compact, modern interface across Settings, the editor toolbar, the tray command menu, and application dialogs. A single Windows 11 Fluent token module (`src/theme.rs`) drives the palette (the current user's system accent color, light/dark sets) and the Segoe UI Variable type scale (12 px body, 11 px section labels, 15 px titles) with compact 26 px controls; labeled Save/Copy actions remain. No web runtime or new external package was added.
+## Use
 
-## Capture and edit
+1. Start `isolmass.exe`; it remains in the notification area. Launching it again opens the running instance's Settings rather than an installer.
+2. Press **PrintScreen**, click the tray icon, or choose **Capture now** from the native tray menu. The capture shortcut and delay are configurable.
+3. Drag a region of at least 8 × 8 pixels, or click a visible window with window snapping enabled. The selection shows its pixel dimensions without covering the image with a magnifier.
+4. Annotate with **Seç/taşı**, **Çerçeve**, arrow, pen, translucent highlighter, text, numbered steps, blur/pixelation or opaque **Karart**. Secondary tools are grouped in the toolbar's F10/Apps command menu. Select an annotation to move, recolor, adjust its width, resize where applicable, or delete it. Undo and redo include edits.
+5. Choose **Copy**, **Save** or **Save as**. Editor chrome, handles, selection frame, caret and unfinished previews do not appear in the exported image.
 
-1. Start `isolmass.exe`. Its icon appears in the notification area.
-2. Press **PrintScreen**, click the tray icon, or choose **Capture now** from its menu.
-3. Drag a region, or click a visible window when window snapping is enabled. A magnifier and pixel dimensions help precise selection. Regions must be at least 8 × 8 pixels.
-4. Add rectangles, arrows, pen strokes, text, blur, or opaque redaction. Use **Select** to edit existing annotations.
-5. Choose **Copy** or **Save**. The exported image excludes the toolbar, selection frame, handles, caret, magnifier, and unfinished drawing previews.
+**Karart** replaces covered pixels opaquely and is rendered after other annotations. Blur and highlighter are visual effects, **not** secure redaction. Inspect the exported image before sharing sensitive material.
 
-The editor toolbar uses the selected monitor's work area and DPI. Buttons are 28 px tall with Fluent 4/6 px corner radii and Segoe Fluent Icons glyphs (shared MDL2 codepoints, so older Windows still renders them). On short or narrow work areas it switches to a grid so all commands remain reachable. Full-frame presentation is retained for compatibility with applications that hook GDI, including RTSS.
-
-**Redact** covers pixels with an opaque fill, including annotations added underneath it later. Blur is a visual mosaic effect and should not be used to remove confidential information.
-
-## Keyboard shortcuts
+### Keyboard
 
 | Shortcut | Action |
 |---|---|
-| PrintScreen | Start a capture using the configured delay |
-| V / R / A / P / T / B / M | Select / Rectangle / Arrow / Pen / Text / Blur / Redact |
-| Ctrl+C or Enter | Copy the selected screenshot |
-| Ctrl+S | Save in the configured format and folder |
-| Ctrl+Shift+S | Save as, with a native file picker and overwrite confirmation |
-| Ctrl+Z / Ctrl+Y | Undo / Redo |
-| Ctrl+, | Open Settings |
-| F10 or Apps key | Open the toolbar as a native command menu (keyboard/screen-reader access) |
-| Delete / Backspace | Delete the selected annotation |
-| Arrow keys | Move the selected annotation; otherwise move the screenshot region |
-| Shift+arrows | Move by 10 pixels |
-| Ctrl+arrows | Resize the screenshot region when no annotation is selected |
-| Shift while drawing | Square rectangles/redaction regions; 45-degree arrow angles |
-| Esc or right-click | Cancel text editing, deselect an object, clear the region, then close the editor |
-| Esc during a selection drag | Cancel the selection drag; the editor stays open |
-| Esc during countdown | Cancel the pending capture |
+| Configured capture shortcut (default PrintScreen) | Start capture using the configured delay |
+| V / R / A / P / T / H / N / B / M | Select, rectangle, arrow, pen, text, highlighter, numbered step, blur, opaque redaction |
+| Ctrl+C or Enter | Copy the selection |
+| Ctrl+S / Ctrl+Shift+S | Save / Save as |
+| Ctrl+Z / Ctrl+Y | Undo / redo |
+| Ctrl+, | Settings |
+| F10 or Apps | Native toolbar command menu |
+| Delete or Backspace | Delete selected annotation |
+| Arrow keys / Shift+arrows | Move selection or object by 1 / 10 pixels |
+| Ctrl+arrows | Resize selection when no object is selected |
+| Shift while drawing | Square rectangle/redaction; 45-degree arrow angles |
+| Esc or right-click | Cancel the current edit, deselect, clear the selection, or close the editor |
 
-While editing text, **Enter commits text**; **Ctrl+C and Ctrl+S commit it before exporting**. Ctrl+A, Shift+Left/Right/Home/End, Backspace/Delete, Ctrl+V, and local text Undo/Redo are supported. Text uses the normal Windows character-input path, preserves UTF-16 surrogate pairs and literal ampersands, and uses the same measured font for preview and output. Text is single-line, capped at 16 KiB; pasted line breaks become spaces. Cursor movement is by Unicode scalar value, not grapheme cluster. Complex IME and keyboard-layout scenarios still need interactive verification.
+While editing text, Enter commits; Ctrl+C and Ctrl+S commit before exporting. Text selection, clipboard paste and local undo/redo are supported. Text is single-line and limited to 16 KiB; pasted newlines become spaces. The toolbar width slider and its numeric button accept **1–64 px**; click the number, type a value and press Enter, or press Esc to discard it. The editor also offers the native Windows color picker.
 
-A non-PrintScreen shortcut that is unavailable falls back to Ctrl+Shift+S with a notification. PrintScreen uses the keyboard hook even when the Windows registration is occupied. Repeated capture requests are coalesced while a capture or countdown is active.
+## Settings and updates
 
-## Settings and tray menu
+Settings has **Genel / Düzenleyici / Güncellemeler** tabs, a fixed header and footer, and scrollable content. Appearance can follow Windows or be explicitly light/dark. The general tab contains shortcut recording, capture delay, save location/format, startup and notification preferences. The editor tab contains annotation color, 1–64 px width, window snapping and close-after-action. The updates tab controls checks at startup and offers a manual check.
 
-Settings has **General** and **Editor** views. It opens at a compact 660 x 580 (96-DPI base) with a 108 px navigation rail, a pinned header and footer, and a scrollable settings column that clips its own contents, so scrolled cards and their controls move together and can never draw over the navigation, header or Save/Cancel band. Unsaved choices survive navigation. The window enforces a minimum size, keeps the Windows 11 Mica window backdrop with a dark title bar on supported systems (build 22621+), paints its page opaquely, follows the system light/dark theme live, and brings keyboard focus into view. Native buttons, radio choices and checkboxes retain keyboard/accessibility semantics beneath the custom drawing.
+Record a shortcut using Ctrl/Alt/Shift/Win with a letter, digit, F1–F24 or PrintScreen; bare PrintScreen also works. Unsupported keys are ignored. An unavailable combination is reported rather than silently replacing the current shortcut. On a startup conflict, the app asks whether to use Ctrl+Shift+S for that session. Settings remain open after a save error.
 
-Settings controls include the capture shortcut and delay, PNG/JPEG and JPEG quality, destination folder, annotation defaults, window snapping, whether the editor closes after an action, startup registration, notifications, and update preferences. PNG disables JPEG quality controls. Save failures keep the window open and show an error. Startup registration is restored to its exact previous value if saving settings fails.
+Update checks use public releases from [`isolmaz/isolmaSS-updates`](https://github.com/isolmaz/isolmaSS-updates). A newer release offers **Yükle / Daha sonra / Bu sürümü atla**; installation always requires an explicit choice. The skipped version stays skipped for automatic checks; a manual check can offer it again. Installation waits for the active editor/settings session and any copy/save action to finish, verifies the signed installer again, then restarts. The installer keeps a rollback executable until the installed app passes a startup check. See [SECURITY.md](SECURITY.md) and [DISTRIBUTION.md](DISTRIBUTION.md).
 
-`--settings` routes to the running daemon. If none exists, it starts the daemon and opens Settings. A request received during editing waits for the current session to finish. Saved hotkey and update changes are applied to the daemon; editor tool/color/stroke changes are merged into the latest configuration once at the end of a session.
+The signed-update mechanism begins with version 0.4.0. An installation that cannot verify this release's pinned signature needs **one manual installation** of 0.4.0 before subsequent in-app updates. The free application-level signature does not remove Windows SmartScreen warnings; do not bypass a warning automatically. Portable ZIPs are for manual use, not in-place updates of an installed copy.
 
-The tray command menu offers Capture now, Settings, Open screenshot folder, Check for updates, five recent captures, and Quit in a compact 260 px palette with 28 px rows. Its palette uses the shared Fluent tokens and follows the system light/dark theme live while open. Recent files are cached; directory refresh runs in the background at most every 30 seconds. A refresh scans for at most two seconds between filesystem calls, so the list is best-effort in large or slow folders. Successful saves update it immediately. Quit and update installation wait for an active editing/settings session to finish. Control commands are deduplicated in a queue bounded at 16 entries, so a command issued during a nested dialog is delivered right after that dialog returns; if the queue fills, the dropped command is recorded in diagnostics.
+The native tray menu provides Capture now, Settings, Open screenshot folder, Check for updates, recent captures and Quit. Quit waits until an active edit/settings session ends.
 
-## Files, configuration and privacy
+## Files and privacy
 
-- Default output: the actual Windows **Pictures** known folder, then `Screenshots` (including redirected Pictures folders).
-- Settings: `%APPDATA%\isolmaSS\settings.json`.
-- Diagnostics: `%LOCALAPPDATA%\isolmaSS\logs\diagnostic.log`, rotated at about 1 MiB into a single previous file; if rotation fails, new records are appended instead of dropped. Logs contain stages and errors, not screenshots, typed annotation text, or keystroke logs. Error messages can contain local file paths.
-- Update downloads: `%LOCALAPPDATA%\isolmaSS\updates`.
+- Default output: Windows Pictures known folder → `Screenshots`.
+- Configuration: `%APPDATA%\isolmaSS\settings.json` (64 KiB limit, validated, atomically saved under a cross-process lock).
+- Diagnostics: `%LOCALAPPDATA%\isolmaSS\logs\diagnostic.log` (rotated near 1 MiB). Logs exclude screenshot pixels, annotation text and recorded keystrokes; errors may include local paths.
+- Staged update downloads: `%LOCALAPPDATA%\isolmaSS\updates`.
 
-Settings JSON is limited to 64 KiB and validated on load/save. Supported limits include stroke width 1–64 pixels, delay 0–5000 ms, and JPEG quality 1–100, and the save folder must be an absolute path without NUL characters. Loading fails closed: a missing file yields defaults, invalid JSON is first copied to `settings.corrupt.json` and only then reset — if that backup fails, recovery aborts and the error is reported — and transient read errors such as sharing violations propagate instead of silently substituting defaults. Saving skips an unreachable save folder, such as an unavailable network share, rather than failing the write. Writes use same-directory temporary files and atomic replacement. Configuration merge/write operations are serialized across app processes.
+Invalid settings JSON is copied to `settings.corrupt.json` before reset; a failed backup or other read error remains visible. Output PNG/JPEG and clipboard DIB are opaque. Save as replaces a chosen file only after encoding and flushing succeeds.
 
-PNG/JPEG output is explicitly opaque. Normal Save reserves a unique timestamped filename; Save as replaces an existing file only after successful encoding and flushing. Copy transfers a bottom-up 32-bit `CF_DIB` to Windows; ownership transfers only after success. Reading pasted text is bounded to 32 KiB: a failed size query is an error, and truncation is recorded only when text was actually cut.
+## Build
 
-## Build and verify
-
-Windows x64, Visual Studio C++ Build Tools / Windows SDK, and Rust **1.98.0** are required. `rust-toolchain.toml` pins the compiler; `Cargo.lock` pins dependencies.
+Windows x64, the Windows SDK/Visual Studio C++ Build Tools, Rust **1.98.0** and NSIS are required. `Cargo.lock` pins dependencies.
 
 ```powershell
 cargo fmt --check
 cargo check --locked
 cargo clippy --all-targets --locked -- -D warnings
-cargo test --locked -- --test-threads=1
-cargo build --release --locked
-.\target\release\isolmass.exe --smoke-test
-```
-
-The smoke command requires an interactive Windows desktop, a release build, and NSIS 3.10 on PATH or in `%LOCALAPPDATA%\Programs\nsis-3.10`. It exercises clipboard ownership/failure, capture geometry, PNG decoding and opaque pixels, history, text, configuration and fresh installer/version checks. **It changes the clipboard** and briefly registers hooks/tray resources; use a disposable desktop or preserve your clipboard before running it. It does not install or uninstall the application. Tests do not silently stand in for complete manual UX validation.
-
-The Windows CI workflow runs on pull requests and on pushes to `main`. It runs formatting, locked check, lint, tests with `--test-threads=1` while skipping the interactive `test_tray_manager_lifecycle` test, the release build with its executable-size gate, NSIS provisioning, and a non-interactive `package.bat` run that re-checks both size budgets and the recorded installer SHA-256. Its remote execution has not been observed.
-
-```powershell
-# Actual capture/window/presentation path, 50 samples, JSON lines; no images saved.
-.\target\release\isolmass.exe --benchmark 50
-
-# Packaging; production releases additionally require a code-signing certificate.
+cargo test --locked -- --test-threads=1 --skip test_tray_manager_lifecycle
 cmd /c package.bat
-cmd /c release.bat
 ```
 
-Other commands: `--capture-once`, `--settings`, `--check-update`, `--verify-update PATH`, `--help`, and the legacy `--test-capture` alias for smoke. `--fix-printscreen` explicitly changes Windows' PrintScreen/Snipping Tool registration preference; it is never run automatically.
+`package.bat` verifies versions, size budgets and SHA-256. Set `ISOLMASS_BUILD_DIR=target\release-candidate` to avoid replacing a running `target\release\isolmass.exe`. `release.bat` requires access to the publisher's non-exportable Windows signing key; CI has no private key and does not publish releases. Release steps are in [DISTRIBUTION.md](DISTRIBUTION.md).
 
-See [ROADMAP.md](ROADMAP.md) for measured results and remaining verification, [DISTRIBUTION.md](DISTRIBUTION.md) for signing/packaging, and [SECURITY.md](SECURITY.md) for the update trust model.
+`--capture-once` opens the editor without starting the tray daemon. `--settings`, `--check-update`, `--verify-update PATH`, `--benchmark N` and `--help` are also available. `--smoke-test` requires an interactive desktop, briefly uses hooks/tray resources and **changes the clipboard**; it builds a temporary installer without modifying the signed release artifact. Use a disposable desktop or preserve your clipboard first. `--fix-printscreen` changes the Windows Snipping Tool registration preference only when explicitly invoked.
 
-## License
-
-MIT; see [LICENSE](LICENSE). Upstream notices are included in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and the installer. The current local artifacts are unsigned development builds, not a verified signed production release.
+Current verification and deferred features are tracked in [ROADMAP.md](ROADMAP.md). MIT license: [LICENSE](LICENSE); dependencies: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

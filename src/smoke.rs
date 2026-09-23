@@ -1155,7 +1155,6 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         "Settings::default() close_after_action must default to true"
     );
     assert!(default_settings.check_updates_automatically);
-    assert!(!default_settings.install_updates_automatically);
 
     // Test explicit round-trip serialization and deserialization with false
     let mut custom_false = default_settings.clone();
@@ -1224,13 +1223,31 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
     // C9 packaging check: installer artifact and distribution size budget only
     // ------------------------------------------------------------
     println!("\n[C9 Packaging Check] Verifying Installer Artifact & Distribution Size Budget...");
-    const BUDGET_BYTES: u64 = 3 * 1024 * 1024; // 3 MB budget
+    const BUDGET_BYTES: u64 = 3 * 1024 * 1024;
     let nsi_path = std::path::Path::new("installer.nsi");
     assert!(
         nsi_path.exists(),
         "installer.nsi must exist at repository root"
     );
-    let setup_path = std::path::Path::new("target/release/isolmass-setup.exe");
+    let binary = std::env::current_exe()?;
+    let setup_path = std::env::temp_dir().join(format!(
+        "isolmass-smoke-{}-{}.exe",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    struct StagedSetup(std::path::PathBuf);
+    impl Drop for StagedSetup {
+        fn drop(&mut self) {
+            if let Err(error) = std::fs::remove_file(&self.0)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                crate::diagnostics::record("smoke cleanup", &error.to_string());
+            }
+        }
+    }
+    let _cleanup = StagedSetup(setup_path.clone());
     {
         let makensis_local = format!(
             "{}\\Programs\\nsis-3.10\\makensis.exe",
@@ -1261,6 +1278,8 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         println!("  - Building installer with NSIS ({makensis_cmd})...");
         let compile_status = std::process::Command::new(&makensis_cmd)
             .arg(format!("/DPRODUCT_VERSION={}", env!("CARGO_PKG_VERSION")))
+            .arg(format!("/DPRODUCT_EXE_SOURCE={}", binary.display()))
+            .arg(format!("/DPRODUCT_OUTPUT={}", setup_path.display()))
             .arg("installer.nsi")
             .creation_flags(0x08000000)
             .status()?;
@@ -1270,21 +1289,15 @@ pub fn run_smoke_test() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    assert!(
-        setup_path.exists(),
-        "Installer artifact 'target/release/isolmass-setup.exe' MUST exist!"
-    );
-    for path in [
-        setup_path,
-        std::path::Path::new("target/release/isolmass.exe"),
-    ] {
+    assert!(setup_path.exists(), "The smoke installer must be produced");
+    for path in [&setup_path, &binary] {
         assert_eq!(
             crate::updater::file_version(path)?,
             env!("CARGO_PKG_VERSION"),
             "Artifact version must match the source version"
         );
     }
-    let mut setup_file = std::fs::File::open(setup_path)?;
+    let mut setup_file = std::fs::File::open(&setup_path)?;
     let mut pe_magic = [0u8; 2];
     setup_file.read_exact(&mut pe_magic)?;
     drop(setup_file);

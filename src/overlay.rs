@@ -51,6 +51,7 @@ const DEFAULT_BLUR_BLOCK: i32 = 12;
 const WM_EDITOR_SETTINGS: u32 = 0x8000 + 301;
 const WM_EDITOR_ERROR: u32 = 0x8000 + 302;
 const WM_EDITOR_SAVE_AS: u32 = 0x8000 + 303;
+const WM_EDITOR_PICK_COLOR: u32 = 0x8000 + 304;
 thread_local! { static ACTION_ERROR: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) }; }
 
 pub fn tool_for_key(vk: u32) -> Option<ToolKind> {
@@ -60,6 +61,8 @@ pub fn tool_for_key(vk: u32) -> Option<ToolKind> {
         0x41 => Some(ToolKind::Arrow),
         0x50 => Some(ToolKind::Pen),
         0x54 => Some(ToolKind::Text),
+        0x48 => Some(ToolKind::Highlight),
+        0x4e => Some(ToolKind::Step),
         0x42 => Some(ToolKind::Blur),
         0x4d => Some(ToolKind::Redact),
         _ => None,
@@ -174,6 +177,7 @@ struct DragSelectionState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EscapeAction {
     CancelledTextEdit,
+    CancelledThicknessEdit,
     DeselectedObject(usize),
     CancelledSelection,
     CloseOverlay,
@@ -239,6 +243,9 @@ pub struct OverlayState {
     active_tool: ToolKind,
     active_color: [u8; 4],
     active_thickness: i32,
+    thickness_input: Option<String>,
+    thickness_dragging: bool,
+    thickness_drag_original: Option<(usize, AnnotationKind)>,
     objects: Vec<AnnotationObject>,
     selected_id: Option<usize>,
     next_id: usize,
@@ -282,7 +289,9 @@ impl Drop for OverlayState {
 
 impl OverlayState {
     pub fn handle_escape_action(&mut self) -> EscapeAction {
-        if self.text_edit.take().is_some() {
+        if self.thickness_input.take().is_some() {
+            EscapeAction::CancelledThicknessEdit
+        } else if self.text_edit.take().is_some() {
             EscapeAction::CancelledTextEdit
         } else if let Some(id) = self.selected_id.take() {
             EscapeAction::DeselectedObject(id)
@@ -322,6 +331,9 @@ impl OverlayState {
             active_tool: ToolKind::Rectangle,
             active_color: [49, 49, 224, 255],
             active_thickness: Settings::default().default_thickness,
+            thickness_input: None,
+            thickness_dragging: false,
+            thickness_drag_original: None,
             objects: Vec::new(),
             selected_id: None,
             next_id: 1,
@@ -444,6 +456,32 @@ impl OverlayState {
     }
 
     fn handle_key_down(&mut self, hwnd: HWND, vk: usize, mods: isize) -> LRESULT {
+        if let Some(digits) = &mut self.thickness_input {
+            match vk {
+                0x30..=0x39 if digits.len() < 2 => {
+                    let digit = (vk as u8 - b'0') as i32;
+                    let next = digits.parse::<i32>().unwrap_or(0) * 10 + digit;
+                    if (1..=64).contains(&next) {
+                        digits.push(char::from_u32(vk as u32).unwrap_or_default());
+                    }
+                }
+                value if value == VK_BACK.0 as usize => {
+                    digits.pop();
+                }
+                value if value == VK_RETURN.0 as usize => {
+                    if let Ok(value) = digits.parse::<i32>() {
+                        self.thickness_input = None;
+                        self.change_thickness(value, true);
+                    }
+                }
+                value if value == VK_ESCAPE.0 as usize => {
+                    self.thickness_input = None;
+                }
+                _ => {}
+            }
+            self.redraw(hwnd);
+            return LRESULT(0);
+        }
         // F10 / Apps: expose every toolbar command as a native popup menu for
         // keyboard and screen-reader access. The chosen command is replayed
         // through the ordinary click path so behavior stays identical.
@@ -501,7 +539,9 @@ impl OverlayState {
                     set_overlay_text_editing(false);
                     self.redraw(hwnd);
                 }
-                EscapeAction::DeselectedObject(_) | EscapeAction::CancelledSelection => {
+                EscapeAction::CancelledThicknessEdit
+                | EscapeAction::DeselectedObject(_)
+                | EscapeAction::CancelledSelection => {
                     self.redraw(hwnd);
                 }
                 EscapeAction::CloseOverlay => {
@@ -744,6 +784,9 @@ impl OverlayState {
     }
 
     fn handle_char(&mut self, hwnd: HWND, ch_code: u32) -> LRESULT {
+        if self.thickness_input.is_some() {
+            return LRESULT(0);
+        }
         if let Some(edit) = &mut self.text_edit {
             edit.insert_utf16(ch_code);
             self.redraw(hwnd);
@@ -913,6 +956,45 @@ impl OverlayState {
         }
     }
 
+    fn change_color(&mut self, color: [u8; 4]) {
+        self.active_color = color;
+        if let Some(object) = self
+            .selected_id
+            .and_then(|id| self.objects.iter_mut().find(|object| object.id == id))
+        {
+            let before = object.kind.clone();
+            object.set_color(color);
+            if before != object.kind {
+                self.history.record(EditCommand::Modify {
+                    id: object.id,
+                    old_kind: before,
+                    new_kind: object.kind.clone(),
+                });
+            }
+        }
+        self.persist_editor_preferences();
+    }
+
+    fn change_thickness(&mut self, value: i32, record: bool) {
+        self.active_thickness = value.clamp(1, 64);
+        if let Some(object) = self
+            .selected_id
+            .and_then(|id| self.objects.iter_mut().find(|object| object.id == id))
+        {
+            let before = object.kind.clone();
+            object.set_thickness(self.active_thickness);
+            if record && before != object.kind {
+                self.history.record(EditCommand::Modify {
+                    id: object.id,
+                    old_kind: before,
+                    new_kind: object.kind.clone(),
+                });
+            }
+        }
+        if record {
+            self.persist_editor_preferences();
+        }
+    }
     fn persist_editor_preferences(&mut self) {
         self.settings.default_color = self.active_color;
         self.settings.default_thickness = self.active_thickness;
@@ -943,8 +1025,28 @@ unsafe extern "system" fn overlay_wnd_proc(
                 | WM_RBUTTONUP
                 | WM_TIMER
                 | WM_EDITOR_SETTINGS
+                | WM_EDITOR_PICK_COLOR
         )
     {
+        return LRESULT(0);
+    }
+    if msg == WM_EDITOR_PICK_COLOR {
+        if !state_ptr.is_null() {
+            let initial = unsafe { (*state_ptr).active_color };
+            match crate::ui::choose_color(hwnd, initial) {
+                Ok(Some(color))
+                    if unsafe {
+                        windows::Win32::UI::WindowsAndMessaging::IsWindow(hwnd).as_bool()
+                    } =>
+                {
+                    let state = unsafe { &mut *state_ptr };
+                    state.change_color(color);
+                    state.redraw(hwnd);
+                }
+                Ok(_) => {}
+                Err(error) => crate::ui::error(hwnd, "Color picker failed", &error.to_string()),
+            }
+        }
         return LRESULT(0);
     }
     match msg {
@@ -1256,6 +1358,18 @@ unsafe extern "system" fn overlay_wnd_proc(
                         }
                     }
                     OverlayMode::SelectionActive => {
+                        if state.thickness_dragging {
+                            if let Some(value) = state
+                                .toolbar
+                                .as_ref()
+                                .and_then(|toolbar| toolbar.slider_value_at(pt.0))
+                                && value != state.active_thickness
+                            {
+                                state.change_thickness(value, false);
+                                state.redraw(hwnd);
+                            }
+                            return LRESULT(0);
+                        }
                         // 1. Dragging selection (Move or Resize)
                         if let Some(drag) = state.dragging_selection {
                             let dx = client_x - drag.last_pos.0;
@@ -1454,6 +1568,9 @@ unsafe extern "system" fn overlay_wnd_proc(
                     OverlayMode::SelectionActive => {
                         // 1. Toolbar button click
                         if let Some(item) = state.toolbar.as_ref().and_then(|tb| tb.hit_test(pt)) {
+                            if item != ToolbarItem::ThicknessValue {
+                                state.thickness_input = None;
+                            }
                             state.commit_text(hwnd);
 
                             match item {
@@ -1534,43 +1651,45 @@ unsafe extern "system" fn overlay_wnd_proc(
                                     state.redraw(hwnd);
                                 }
                                 ToolbarItem::Color(col) => {
-                                    state.active_color = col;
-                                    if let Some(obj) = state.selected_id.and_then(|id| {
-                                        state.objects.iter_mut().find(|o| o.id == id)
-                                    }) {
-                                        let old_kind = obj.kind.clone();
-                                        obj.set_color(col);
-                                        let new_kind = obj.kind.clone();
-                                        state.history.record(EditCommand::Modify {
-                                            id: obj.id,
-                                            old_kind,
-                                            new_kind,
-                                        });
-                                    }
-                                    state.persist_editor_preferences();
+                                    state.change_color(col);
                                     state.redraw(hwnd);
                                 }
-                                ToolbarItem::Thickness(thick) => {
-                                    state.active_thickness = thick;
-                                    if let Some(obj) = state.selected_id.and_then(|id| {
-                                        state.objects.iter_mut().find(|o| o.id == id)
-                                    }) {
-                                        let old_kind = obj.kind.clone();
-                                        obj.set_thickness(thick);
-                                        let new_kind = obj.kind.clone();
-                                        state.history.record(EditCommand::Modify {
-                                            id: obj.id,
-                                            old_kind,
-                                            new_kind,
+                                ToolbarItem::ColorPicker => unsafe {
+                                    let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                                        hwnd,
+                                        WM_EDITOR_PICK_COLOR,
+                                        WPARAM(0),
+                                        LPARAM(0),
+                                    );
+                                },
+                                ToolbarItem::ThicknessSlider => {
+                                    state.thickness_dragging = true;
+                                    state.thickness_drag_original =
+                                        state.selected_id.and_then(|id| {
+                                            state
+                                                .objects
+                                                .iter()
+                                                .find(|object| object.id == id)
+                                                .map(|object| (id, object.kind.clone()))
                                         });
+                                    if let Some(value) = state
+                                        .toolbar
+                                        .as_ref()
+                                        .and_then(|toolbar| toolbar.slider_value_at(pt.0))
+                                    {
+                                        state.change_thickness(value, false);
                                     }
-                                    state.persist_editor_preferences();
+                                    state.redraw(hwnd);
+                                }
+                                ToolbarItem::ThicknessValue => {
+                                    state.thickness_input = Some(String::new());
                                     state.redraw(hwnd);
                                 }
                             }
                             return LRESULT(0);
                         }
 
+                        state.thickness_input = None;
                         // If text edit active, commit it when clicked elsewhere
                         if state.text_edit.is_some() {
                             state.commit_text(hwnd);
@@ -1695,9 +1814,49 @@ unsafe extern "system" fn overlay_wnd_proc(
                                         current: pt,
                                     });
                                 }
-                                ToolKind::Pen => {
+                                ToolKind::Pen | ToolKind::Highlight => {
                                     state.drawing_shape =
                                         Some(InProgressDrawing::Pen { points: vec![pt] });
+                                }
+                                ToolKind::Step => {
+                                    let number = state
+                                        .objects
+                                        .iter()
+                                        .filter_map(|object| {
+                                            if let AnnotationKind::Step { number, .. } = object.kind
+                                            {
+                                                Some(number)
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                        .max()
+                                        .unwrap_or(0)
+                                        .saturating_add(1);
+                                    let center = (
+                                        if sel.width() >= 29 {
+                                            pt.0.clamp(sel.left + 14, sel.right - 15)
+                                        } else {
+                                            (sel.left + sel.right) / 2
+                                        },
+                                        if sel.height() >= 29 {
+                                            pt.1.clamp(sel.top + 14, sel.bottom - 15)
+                                        } else {
+                                            (sel.top + sel.bottom) / 2
+                                        },
+                                    );
+                                    let object = AnnotationObject::new(
+                                        state.next_id,
+                                        AnnotationKind::Step {
+                                            pos: center,
+                                            number,
+                                            color: state.active_color,
+                                        },
+                                    );
+                                    state.next_id += 1;
+                                    state.history.record(EditCommand::Add(object.clone()));
+                                    state.objects.push(object);
+                                    state.redraw(hwnd);
                                 }
                                 ToolKind::Text => {
                                     state.text_edit = Some(TextEditState::new(
@@ -1739,6 +1898,22 @@ unsafe extern "system" fn overlay_wnd_proc(
 
                 let _ = unsafe { ReleaseCapture() };
                 let shift_down = (unsafe { GetKeyState(VK_SHIFT.0 as i32) } as u16 & 0x8000) != 0;
+                if state.thickness_dragging {
+                    state.thickness_dragging = false;
+                    if let Some((id, before)) = state.thickness_drag_original.take()
+                        && let Some(object) = state.objects.iter().find(|object| object.id == id)
+                        && before != object.kind
+                    {
+                        state.history.record(EditCommand::Modify {
+                            id,
+                            old_kind: before,
+                            new_kind: object.kind.clone(),
+                        });
+                    }
+                    state.persist_editor_preferences();
+                    state.redraw(hwnd);
+                    return LRESULT(0);
+                }
 
                 match state.mode {
                     OverlayMode::DraggingSelection => {
@@ -1888,10 +2063,18 @@ unsafe extern "system" fn overlay_wnd_proc(
                                     {
                                         Some(AnnotationObject::new(
                                             state.next_id,
-                                            AnnotationKind::Pen {
-                                                points,
-                                                color: state.active_color,
-                                                thickness: state.active_thickness,
+                                            if state.active_tool == ToolKind::Highlight {
+                                                AnnotationKind::Highlight {
+                                                    points,
+                                                    color: state.active_color,
+                                                    thickness: state.active_thickness,
+                                                }
+                                            } else {
+                                                AnnotationKind::Pen {
+                                                    points,
+                                                    color: state.active_color,
+                                                    thickness: state.active_thickness,
+                                                }
                                             },
                                         ))
                                     } else {
@@ -1986,7 +2169,9 @@ unsafe extern "system" fn overlay_wnd_proc(
                         state.redraw(hwnd);
                         return LRESULT(0);
                     }
-                    EscapeAction::DeselectedObject(_) | EscapeAction::CancelledSelection => {
+                    EscapeAction::CancelledThicknessEdit
+                    | EscapeAction::DeselectedObject(_)
+                    | EscapeAction::CancelledSelection => {
                         state.redraw(hwnd);
                         return LRESULT(0);
                     }
