@@ -1,7 +1,7 @@
 //! Shared Win32 lifetime and modal-loop rules. Child windows never quit the UI thread.
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{PCWSTR, Result};
+use windows::core::{PCWSTR, Result, w};
 
 /// Native Windows color picker; cancellation is distinct from a dialog failure.
 pub fn choose_color(owner: HWND, initial: [u8; 4]) -> Result<Option<[u8; 4]>> {
@@ -56,7 +56,7 @@ pub fn ask_for_update(owner: HWND, version: &str) -> Result<UpdateChoice> {
         .chain(Some(0))
         .collect();
     let content: Vec<u16> =
-        "Download and install the verified release after your current work finishes?"
+        "Save your current work first. After verification, isolmaSS will close, install the update, and start again automatically. Continue?"
             .encode_utf16()
             .chain(Some(0))
             .collect();
@@ -196,6 +196,36 @@ pub fn error(owner: HWND, title: &str, message: &str) {
                 PCWSTR(message.as_ptr()),
                 PCWSTR(title.as_ptr()),
                 MB_OK | MB_ICONERROR,
+            );
+        }
+    }
+}
+
+pub fn info(owner: HWND, title: &str, message: &str) {
+    use windows::Win32::UI::Controls::{TD_INFORMATION_ICON, TDCBF_OK_BUTTON, TaskDialog};
+    let _suspend = crate::hotkey::OverlayInputSuspension::new();
+    let title: Vec<u16> = title.encode_utf16().chain(Some(0)).collect();
+    let message: Vec<u16> = message.encode_utf16().chain(Some(0)).collect();
+    if unsafe {
+        TaskDialog(
+            owner,
+            None,
+            w!("isolmaSS"),
+            PCWSTR(title.as_ptr()),
+            PCWSTR(message.as_ptr()),
+            TDCBF_OK_BUTTON,
+            TD_INFORMATION_ICON,
+            None,
+        )
+    }
+    .is_err()
+    {
+        unsafe {
+            let _ = MessageBoxW(
+                owner,
+                PCWSTR(message.as_ptr()),
+                PCWSTR(title.as_ptr()),
+                MB_OK | MB_ICONINFORMATION,
             );
         }
     }

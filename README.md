@@ -1,6 +1,6 @@
 # isolmaSS
 
-Native Windows screenshot editor in Rust. Capture a region or window, draw on it, then copy or save it locally. There is no screenshot upload or telemetry. Version **0.4.1**.
+Native Windows screenshot editor in Rust. Capture a region or window, draw on it, then copy or save it locally. There is no screenshot upload or telemetry. Version **0.4.2**.
 
 ## Use
 
@@ -33,11 +33,11 @@ While editing text, Enter commits; Ctrl+C and Ctrl+S commit before exporting. Te
 
 ## Settings and updates
 
-Settings has **Genel / Düzenleyici / Güncellemeler** tabs, a fixed header and footer, and scrollable content. Appearance can follow Windows or be explicitly light/dark. The general tab contains shortcut recording, capture delay, save location/format, startup and notification preferences. The editor tab contains drawing color, 1–64 px width, window snapping and close-after-action. The updates tab controls checks at startup and offers a manual check.
+Settings has **Genel / Düzenleyici / Güncellemeler** tabs, a compact two-column general page, and a window that fits each tab's content until you resize it yourself. Smaller displays still scroll the content without moving the tabs or Save/Cancel. Appearance follows Windows or can be explicitly light/dark. General contains shortcut recording, capture delay, save location/format, startup and notification preferences. Editor contains drawing color, 1–64 px width, window snapping and close-after-action. Updates shows the check result beside its button and a progress bar below while checking.
 
 Record a shortcut using Ctrl/Alt/Shift/Win with a letter, digit, F1–F24 or PrintScreen; bare PrintScreen also works. Unsupported keys are ignored. An unavailable combination is reported rather than silently replacing the current shortcut. On a startup conflict, the app asks whether to use Ctrl+Shift+S for that session. Settings remain open after a save error.
 
-Update checks use public releases from [`isolmaz/isolmaSS-updates`](https://github.com/isolmaz/isolmaSS-updates). A newer release offers **Yükle / Daha sonra / Bu sürümü atla**; installation always requires an explicit choice. The skipped version stays skipped for automatic checks; a manual check can offer it again. Installation waits for the active editor/settings session and any copy/save action to finish, verifies the signed installer again, then restarts. The installer keeps a rollback executable until the installed app passes a startup check. See [SECURITY.md](SECURITY.md) and [DISTRIBUTION.md](DISTRIBUTION.md).
+Update checks use public releases from [`isolmaz/isolmaSS-updates`](https://github.com/isolmaz/isolmaSS-updates). A manual check in Settings displays a live progress indicator and its result inline; a tray-initiated check immediately announces progress and reports the result in a native dialog. A newer release offers **Yükle / Daha sonra / Bu sürümü atla** and warns before installation that isolmaSS will close and reopen; installation always requires an explicit choice. The skipped version stays skipped for automatic checks; a manual check can offer it again. Installation waits for the active editor/settings session and any copy/save action to finish, verifies the signed installer again, then restarts. The installer keeps a rollback executable until the installed app passes a startup check. See [SECURITY.md](SECURITY.md) and [DISTRIBUTION.md](DISTRIBUTION.md).
 
 The signed-update mechanism begins with version 0.4.0. An installation that predates the pinned verifier needs **one manual installation** of 0.4.0 or later before subsequent in-app updates. The free application-level signature does not remove Windows SmartScreen warnings; do not bypass a warning automatically. Portable ZIPs are for manual use, not in-place updates of an installed copy.
 

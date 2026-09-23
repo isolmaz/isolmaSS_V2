@@ -1,9 +1,12 @@
 use super::*;
+use crate::settings_window::UpdateStatus;
 use std::thread::JoinHandle;
 
 pub(super) static CANCELLED: AtomicBool = AtomicBool::new(false);
 static RUNNING: AtomicBool = AtomicBool::new(false);
 static AUTOMATIC: AtomicBool = AtomicBool::new(false);
+static CHECKING: AtomicBool = AtomicBool::new(false);
+static MANUAL_REQUESTED: AtomicBool = AtomicBool::new(false);
 static WORKER: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
 static EVENT: Mutex<Option<Event>> = Mutex::new(None);
 static READY: Mutex<Option<(PathBuf, bool)>> = Mutex::new(None);
@@ -47,18 +50,23 @@ fn discard_event(event: Event) {
     }
 }
 
-fn start(automatic: bool, work: impl FnOnce() -> Event + Send + 'static) {
+fn start(automatic: bool, checking: bool, work: impl FnOnce() -> Event + Send + 'static) -> bool {
     if RUNNING
         .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .is_err()
     {
         if !automatic {
-            crate::tray::show_notification(
-                "Update in progress",
-                "The current update operation is still running.",
-            );
+            let mut pending = EVENT.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(Event::Checked(_, manual)) = pending.as_mut() {
+                *manual = true;
+                return true;
+            }
+            if CHECKING.load(Ordering::Acquire) {
+                MANUAL_REQUESTED.store(true, Ordering::Release);
+                return true;
+            }
         }
-        return;
+        return false;
     }
     if let Some(previous) = WORKER
         .lock()
@@ -69,12 +77,20 @@ fn start(automatic: bool, work: impl FnOnce() -> Event + Send + 'static) {
     }
     CANCELLED.store(false, Ordering::Release);
     AUTOMATIC.store(automatic, Ordering::Release);
+    CHECKING.store(checking, Ordering::Release);
+    MANUAL_REQUESTED.store(false, Ordering::Release);
     let handle = std::thread::spawn(move || {
-        let event = work();
+        let mut event = work();
         {
             // Publish under the EVENT lock and recheck cancellation there, so a
             // concurrent cancel either discards this result or clears it afterwards.
             let mut pending = EVENT.lock().unwrap_or_else(|error| error.into_inner());
+            if checking
+                && MANUAL_REQUESTED.swap(false, Ordering::AcqRel)
+                && let Event::Checked(_, manual) = &mut event
+            {
+                *manual = true;
+            }
             if CANCELLED.load(Ordering::Acquire) {
                 discard_event(event);
             } else if !event.manual() && pending.as_ref().is_some_and(Event::manual) {
@@ -83,17 +99,23 @@ fn start(automatic: bool, work: impl FnOnce() -> Event + Send + 'static) {
                 *pending = Some(event);
             }
         }
+        CHECKING.store(false, Ordering::Release);
         RUNNING.store(false, Ordering::Release);
         crate::tray::notify_tray_wakeup();
     });
     *WORKER.lock().unwrap_or_else(|error| error.into_inner()) = Some(handle);
+    true
 }
 
-pub fn run_manual_update_check() {
-    start(false, || Event::Checked(check_for_update(), true));
+pub fn is_checking() -> bool {
+    CHECKING.load(Ordering::Acquire)
+}
+
+pub fn run_manual_update_check() -> bool {
+    start(false, true, || Event::Checked(check_for_update(), true))
 }
 pub fn run_automatic_update_check() {
-    start(true, || Event::Checked(check_for_update(), false));
+    let _ = start(true, true, || Event::Checked(check_for_update(), false));
 }
 
 pub fn configure(previous: &crate::settings::Settings, current: &crate::settings::Settings) {
@@ -103,7 +125,10 @@ pub fn configure(previous: &crate::settings::Settings, current: &crate::settings
             // worker publishes with, so nothing stale survives a settings change
             // while pending manual requests are preserved.
             let mut pending = EVENT.lock().unwrap_or_else(|error| error.into_inner());
-            if AUTOMATIC.load(Ordering::Acquire) {
+            if AUTOMATIC.load(Ordering::Acquire)
+                && !MANUAL_REQUESTED.load(Ordering::Acquire)
+                && !pending.as_ref().is_some_and(Event::manual)
+            {
                 CANCELLED.store(true, Ordering::Release);
             }
             let stale = if pending.as_ref().is_some_and(|event| !event.manual()) {
@@ -146,6 +171,9 @@ pub fn poll(owner: HWND, allow_install: bool) {
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .take();
+    if event.is_some() {
+        crate::tray::set_update_activity(None);
+    }
     match event {
         Some(Event::Checked(Ok(Some(update)), manual)) => {
             if !manual {
@@ -162,13 +190,28 @@ pub fn poll(owner: HWND, allow_install: bool) {
                     }
                 }
             }
+            if manual {
+                crate::settings_window::report_update_status(
+                    owner,
+                    &format!("Version {} is available", update.version),
+                    UpdateStatus::Idle,
+                );
+            }
             match crate::ui::ask_for_update(owner, &update.version) {
                 Ok(crate::ui::UpdateChoice::Install) => {
-                    crate::tray::show_notification(
-                        "Downloading update",
-                        "Verifying the signed installer.",
+                    let inline = crate::settings_window::report_update_status(
+                        owner,
+                        "Downloading and verifying installer…",
+                        UpdateStatus::Busy,
                     );
-                    start(!manual, move || {
+                    crate::tray::set_update_activity(Some("isolmaSS - Downloading update…"));
+                    if !inline {
+                        crate::tray::show_update_notification(
+                            "Downloading update",
+                            "Verifying the signed installer. isolmaSS will restart after installation.",
+                        );
+                    }
+                    let _ = start(!manual, false, move || {
                         Event::Downloaded(download_update(&update), !manual)
                     });
                 }
@@ -177,25 +220,50 @@ pub fn poll(owner: HWND, allow_install: bool) {
                         crate::settings::Settings::skip_update_version(&update.version)
                     {
                         crate::ui::error(owner, "Could not skip this version", &error.to_string());
+                    } else {
+                        crate::settings_window::report_update_status(
+                            owner,
+                            "This version was skipped.",
+                            UpdateStatus::Idle,
+                        );
                     }
                 }
-                Ok(crate::ui::UpdateChoice::Later) => {}
+                Ok(crate::ui::UpdateChoice::Later) => {
+                    crate::settings_window::report_update_status(
+                        owner,
+                        "Not installed. Check again whenever you like.",
+                        UpdateStatus::Idle,
+                    );
+                }
                 Err(error) => {
-                    crate::ui::error(owner, "Update prompt could not open", &error.to_string())
+                    crate::settings_window::report_update_status(
+                        owner,
+                        "Could not show update choices. Try again.",
+                        UpdateStatus::Idle,
+                    );
+                    crate::ui::error(owner, "Update prompt could not open", &error.to_string());
                 }
             }
         }
-        Some(Event::Checked(Ok(None), true)) => crate::tray::show_notification(
-            "You're up to date",
-            concat!(
+        Some(Event::Checked(Ok(None), true)) => {
+            let message = concat!(
                 "isolmaSS ",
                 env!("CARGO_PKG_VERSION"),
                 " is the latest release."
-            ),
-        ),
+            );
+            if !crate::settings_window::report_update_status(owner, message, UpdateStatus::Idle) {
+                crate::tray::show_update_notification("You're up to date", message);
+                crate::ui::info(owner, "You're up to date", message);
+            }
+        }
         Some(Event::Checked(Err(error), manual)) => {
             crate::diagnostics::record("update", &error);
             if manual {
+                crate::settings_window::report_update_status(
+                    owner,
+                    "Could not check for updates. Try again.",
+                    UpdateStatus::Idle,
+                );
                 crate::ui::error(owner, "Update check failed", &error);
             }
         }
@@ -207,14 +275,39 @@ pub fn poll(owner: HWND, allow_install: bool) {
             {
                 remove_staged_update(&old);
             }
+            drop(ready);
             if !allow_install {
-                crate::tray::show_notification(
-                    "Update ready",
-                    "Finish your current capture or settings changes to install and restart.",
+                let message = "Verified. Save settings and close to install.";
+                let inline = crate::settings_window::report_update_status(
+                    owner,
+                    message,
+                    UpdateStatus::Ready,
                 );
+                if inline && !automatic {
+                    crate::ui::info(
+                        owner,
+                        "Update ready",
+                        "The signed installer is ready. Save or close Settings; isolmaSS will then close, install, and start again.",
+                    );
+                } else if automatic {
+                    crate::tray::show_notification(
+                        "Update ready",
+                        "Finish your current work to install and restart.",
+                    );
+                } else {
+                    crate::tray::show_update_notification(
+                        "Update ready",
+                        "Finish your current capture to install and restart.",
+                    );
+                }
             }
         }
         Some(Event::Downloaded(Err(error), automatic)) => {
+            crate::settings_window::report_update_status(
+                owner,
+                "Verification failed. Try the update again.",
+                UpdateStatus::Idle,
+            );
             if automatic {
                 crate::diagnostics::record("update", &error);
                 crate::tray::show_notification("Update download failed", &error);
@@ -232,7 +325,13 @@ pub fn poll(owner: HWND, allow_install: bool) {
     } else {
         None
     };
-    if let Some((path, _)) = ready {
+    if let Some((path, automatic)) = ready {
+        if !automatic {
+            crate::tray::show_update_notification(
+                "Installing update",
+                "isolmaSS will close, install the verified release, and start again.",
+            );
+        }
         match launch_installer(&path) {
             Ok(()) => crate::tray::request_exit(),
             Err(error) => {

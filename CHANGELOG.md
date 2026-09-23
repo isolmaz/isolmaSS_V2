@@ -1,6 +1,12 @@
 # Release notes
 
-## 0.4.1 — current
+## 0.4.2 — current
+
+- Reorganized Settings into a compact two-column General page and content-sized Editor/Updates pages; manually resized windows retain their dimensions. Light and dark controls now use the same visual language.
+- Manual update checks show progress and results inside Settings. Tray checks announce activity, expose a checking state and present a visible result dialog.
+- Update consent explains that the app closes and starts again after verified installation; download verification and deferred installation have explicit status feedback.
+
+## 0.4.1
 
 - Compact four-tool rail with a chevron for additional drawing tools; refined vector icons and larger, DPI-scaled settings switches.
 - Eight selection resize grips and draggable dimensions label; three quick colors plus the persisted last-picked custom swatch.

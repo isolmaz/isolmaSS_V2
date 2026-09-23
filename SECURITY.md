@@ -14,7 +14,7 @@ The signature is application-level and does **not** establish Authenticode trust
 
 ## Consent and rollback
 
-Checking for updates never authorizes installation. The native prompt offers **Yükle / Daha sonra / Bu sürümü atla**. A version skipped during automatic checks remains available through a manual check. Download and installer launch happen only after explicit installation consent. The app waits for active editing, settings and synchronous copy/save work to finish before handing control to the installer.
+Checking for updates never authorizes installation. The native prompt offers **Yükle / Daha sonra / Bu sürümü atla**. A version skipped during automatic checks remains available through a manual check. Download and installer launch happen only after explicit installation consent. The consent prompt warns that the app will close for installation and start again; manual checks expose progress and results in Settings or the tray. The app waits for active editing, settings and synchronous copy/save work to finish before handing control to the installer.
 
 The installer stages the new executable beside the installation, retains the rollback executable, waits for the old process, and runs `--health-check` against the installed new executable. That check exercises settings, tray and shortcut startup. The installer confirms the restarted tray is present before deleting the rollback executable. On failure it attempts to restore the executable and display version and surfaces an error. If a process or permission prevents restoration, it leaves the backup on disk and reports its path. The rollback protects executable activation; it is not a backup of screenshots or personal configuration.
 

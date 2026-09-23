@@ -370,7 +370,20 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
                     }
                     tray::capture_finished();
                 }
-                TrayCommand::CheckUpdates => updater::run_manual_update_check(),
+                TrayCommand::CheckUpdates => {
+                    if updater::run_manual_update_check() {
+                        tray::set_update_activity(Some("isolmaSS - Checking for updates…"));
+                        tray::show_update_notification(
+                            "Checking for updates",
+                            "Looking for the latest signed release. You can keep using isolmaSS.",
+                        );
+                    } else {
+                        tray::show_update_notification(
+                            "Update in progress",
+                            "An update is already downloading or installing.",
+                        );
+                    }
+                }
                 TrayCommand::OpenFolder => {
                     let path = save::recent::last_folder()
                         .unwrap_or_else(|| settings.save_directory.clone());

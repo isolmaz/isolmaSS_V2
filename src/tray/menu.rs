@@ -50,7 +50,16 @@ pub(super) fn show(
     append(menu.0, CAPTURE, &capture, MF_STRING)?;
     append(menu.0, SETTINGS, "Settings", MF_STRING)?;
     append(menu.0, OPEN_FOLDER, "Open screenshot folder", MF_STRING)?;
-    append(menu.0, CHECK_UPDATES, "Check for updates", MF_STRING)?;
+    append(
+        menu.0,
+        CHECK_UPDATES,
+        if crate::updater::is_checking() {
+            "Checking for updates…"
+        } else {
+            "Check for updates"
+        },
+        MF_STRING,
+    )?;
     unsafe { AppendMenuW(menu.0, MF_SEPARATOR, 0, PCWSTR::null())? };
     append(menu.0, 0, "Recent captures", MF_STRING | MF_GRAYED)?;
     if recent.is_empty() {

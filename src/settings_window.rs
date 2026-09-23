@@ -26,6 +26,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows::core::{PCWSTR, Result, w};
 
 const SETTINGS_CLASS_NAME: PCWSTR = w!("isolmaSS_SettingsClass");
+const WM_SETTINGS_RESIZE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 214;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsView {
@@ -34,10 +35,20 @@ enum SettingsView {
     Updates,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum UpdateStatus {
+    Idle,
+    Busy,
+    Ready,
+}
+
 pub struct SettingsWindowState {
     settings: Settings,
     saved: bool,
     active_view: SettingsView,
+    update_status: UpdateStatus,
+    update_frame: u8,
+    user_resized: bool,
     recording_hotkey: bool,
     original_hotkey: HotkeyConfig,
     updating_thickness: bool,
@@ -93,6 +104,8 @@ const ID_FOLDER_LABEL: i32 = 104;
 const ID_VIEW_GENERAL: i32 = 105;
 const ID_VIEW_EDITOR: i32 = 106;
 const ID_VIEW_UPDATES: i32 = 107;
+const ID_UPDATE_STATUS: i32 = 108;
+const ID_UPDATE_PROGRESS: i32 = 109;
 const ID_HOTKEY_RECORD: i32 = 200;
 const ID_COLOR_FIRST: i32 = 300;
 const ID_COLOR_CUSTOM: i32 = 308;
@@ -110,11 +123,11 @@ const ID_DELAY_FIRST: i32 = 500;
 const ID_FORMAT_PNG: i32 = 600;
 const ID_FORMAT_JPEG: i32 = 601;
 const ID_QUALITY_FIRST: i32 = 610;
-const SETTINGS_WIDTH: i32 = 700;
-const SETTINGS_HEIGHT: i32 = 580;
-/// Keep the complete card column visible at the minimum width.
-const SETTINGS_MIN_WIDTH: i32 = 700;
-const SETTINGS_MIN_HEIGHT: i32 = 430;
+const SETTINGS_WIDTH: i32 = 660;
+const SETTINGS_HEIGHT: i32 = 466;
+/// Preserve usable controls when the user resizes the dialog.
+const SETTINGS_MIN_WIDTH: i32 = 660;
+const SETTINGS_MIN_HEIGHT: i32 = 384;
 const CONTENT_LEFT: i32 = 20;
 const CONTENT_WIDTH: i32 = 600;
 /// Id of the scroll container child window that owns the settings cards.
@@ -310,16 +323,14 @@ fn set_control_font(hwnd: HWND, id: i32, font: windows::Win32::Graphics::Gdi::HF
     }
 }
 
-/// Card rectangles in scroll-container design pixels: x runs from the card
-/// column's left edge, y from the top of the scrollable content. Every card
-/// carries `theme::CARD_PADDING` (12) of inner padding and a 16 px section
-/// label, so the row rhythm below is 12 / 16 / 6 / 26.
+/// Matching the control grid keeps both columns readable without scrolling at
+/// the default size; the scroll container remains for shorter user-resized windows.
 fn card_rects(view: SettingsView) -> &'static [(i32, i32, i32, i32)] {
     const W: i32 = CONTENT_WIDTH;
     match view {
-        SettingsView::General => &[(0, 0, W, 112), (0, 124, W, 260), (0, 272, W, 420)],
-        SettingsView::Editor => &[(0, 0, W, 112), (0, 124, W, 252)],
-        SettingsView::Updates => &[(0, 0, W, 148)],
+        SettingsView::General => &[(0, 0, 294, 132), (306, 0, W, 132), (0, 142, W, 260)],
+        SettingsView::Editor => &[(0, 0, W, 116), (0, 128, W, 210)],
+        SettingsView::Updates => &[(0, 0, W, 190)],
     }
 }
 
@@ -553,6 +564,46 @@ fn draw_settings_slider(
         } else {
             color_accent()
         },
+    );
+}
+
+fn draw_update_progress(
+    draw: &windows::Win32::UI::Controls::NMCUSTOMDRAW,
+    state: &SettingsWindowState,
+) {
+    let mut rect = RECT::default();
+    unsafe {
+        let _ = GetClientRect(draw.hdr.hwndFrom, &mut rect);
+        let _ = FillRect(draw.hdc, &rect, state.card_brush);
+    }
+    let width = rect.right - rect.left;
+    if width <= 2 {
+        return;
+    }
+    let top = scale(2, state.dpi);
+    let bottom = scale(6, state.dpi);
+    let track = crate::capture::Rect::new(1, top, width - 1, bottom);
+    crate::drawing::rounded(
+        draw.hdc,
+        track,
+        scale(4, state.dpi),
+        color_border(),
+        color_border(),
+    );
+    let segment = (width / 6).max(scale(32, state.dpi)).min(width - 2);
+    let travel = width - 2 - segment;
+    let phase = i32::from(state.update_frame);
+    let offset = if phase < 18 {
+        travel * phase / 18
+    } else {
+        travel * (36 - phase) / 18
+    };
+    crate::drawing::rounded(
+        draw.hdc,
+        crate::capture::Rect::new(1 + offset, top, 1 + offset + segment, bottom),
+        scale(4, state.dpi),
+        color_accent(),
+        color_accent(),
     );
 }
 
@@ -803,26 +854,15 @@ fn draw_settings_button(
 fn control_uses_card(id: i32) -> bool {
     !matches!(
         id,
-        700 | 709
-            | 716
-            | 717
-            | 718
-            | ID_VIEW_GENERAL
-            | ID_VIEW_EDITOR
-            | ID_VIEW_UPDATES
-            | ID_SAVE
-            | ID_CANCEL
+        700 | 718 | ID_VIEW_GENERAL | ID_VIEW_EDITOR | ID_VIEW_UPDATES | ID_SAVE | ID_CANCEL
     )
 }
 
-/// Header band: page margin + title + subtitle + air below.
-const HEADER_BOTTOM: i32 = 124;
-/// Footer band: control row + page margin.
-const FOOTER_HEIGHT: i32 = 42;
-/// Air between the scroll container and the footer band.
-const FOOTER_GAP: i32 = 10;
-/// Property label column inside a card.
-const LABEL_WIDTH: i32 = 92;
+/// Brand and tabs occupy one pinned band; content begins directly below.
+const HEADER_BOTTOM: i32 = 88;
+const FOOTER_HEIGHT: i32 = 46;
+const FOOTER_GAP: i32 = 8;
+const LABEL_WIDTH: i32 = 78;
 
 /// Design-space size of a window's client area (96-DPI pixels).
 fn client_design_size(hwnd: HWND, dpi: u32) -> (i32, i32) {
@@ -842,45 +882,34 @@ fn layout_chrome(hwnd: HWND, dpi: u32) {
     use crate::theme::{CONTROL_HEIGHT, PAGE_MARGIN};
     let (width, height) = client_design_size(hwnd, dpi);
     let right = (width - PAGE_MARGIN).max(CONTENT_LEFT + 160);
-    move_control(hwnd, 700, CONTENT_LEFT, 12, 116, 22, dpi);
-    move_control(
-        hwnd,
-        709,
-        CONTENT_LEFT + 120,
-        14,
-        right - CONTENT_LEFT - 120,
-        18,
-        dpi,
-    );
+    move_control(hwnd, 700, CONTENT_LEFT, 12, 150, 24, dpi);
     move_control(
         hwnd,
         ID_VIEW_GENERAL,
         CONTENT_LEFT,
-        42,
-        128,
+        44,
+        104,
         CONTROL_HEIGHT,
         dpi,
     );
     move_control(
         hwnd,
         ID_VIEW_EDITOR,
-        CONTENT_LEFT + 136,
-        42,
-        128,
+        CONTENT_LEFT + 112,
+        44,
+        124,
         CONTROL_HEIGHT,
         dpi,
     );
     move_control(
         hwnd,
         ID_VIEW_UPDATES,
-        CONTENT_LEFT + 272,
-        42,
-        128,
+        CONTENT_LEFT + 244,
+        44,
+        138,
         CONTROL_HEIGHT,
         dpi,
     );
-    move_control(hwnd, 716, CONTENT_LEFT, 78, right - CONTENT_LEFT, 20, dpi);
-    move_control(hwnd, 717, CONTENT_LEFT, 100, right - CONTENT_LEFT, 16, dpi);
     move_control(
         hwnd,
         718,
@@ -948,7 +977,6 @@ fn layout_content(container: HWND, dpi: u32) {
     let row = CONTROL_HEIGHT;
     let label = LABEL_WIDTH;
     let chips = pad + label + 8;
-    let right = CONTENT_WIDTH - pad;
     let full = CONTENT_WIDTH - 2 * pad;
     let place = |id: i32, x: i32, y: i32, w: i32, h: i32| {
         move_control_with_redraw(container, id, (x, y, w, h), dpi, false)
@@ -957,32 +985,33 @@ fn layout_content(container: HWND, dpi: u32) {
     let row_label = |id: i32, top: i32| place(id, pad, top + 5, label, 16);
 
     heading(710, 12);
-    row_label(701, 34);
-    place(ID_HOTKEY_RECORD, chips, 34, 252, row);
+    row_label(701, 32);
+    place(ID_HOTKEY_RECORD, chips, 32, 184, row);
     row_label(705, 66);
     for index in 0..4 {
-        place(ID_DELAY_FIRST + index, chips + index * 92, 66, 86, row);
+        place(ID_DELAY_FIRST + index, chips + index * 46, 66, 43, row);
     }
-    heading(711, 136);
-    row_label(702, 158);
-    place(ID_FOLDER_LABEL, chips, 162, right - chips - 104, 18);
-    place(ID_BROWSE, right - 96, 158, 96, row);
-    row_label(706, 190);
-    place(ID_FORMAT_PNG, chips, 190, 72, row);
-    place(ID_FORMAT_JPEG, chips + 80, 190, 72, row);
-    row_label(707, 222);
+
+    place(711, 318, 12, 270, 16);
+    place(ID_FOLDER_LABEL, 318, 36, 174, 18);
+    place(ID_BROWSE, 500, 32, 88, row);
+    place(706, 318, 69, label, 16);
+    place(ID_FORMAT_PNG, 398, 64, 66, row);
+    place(ID_FORMAT_JPEG, 470, 64, 66, row);
+    place(707, 318, 101, 84, 16);
     for index in 0..3 {
-        place(ID_QUALITY_FIRST + index, chips + index * 80, 222, 72, row);
+        place(ID_QUALITY_FIRST + index, 408 + index * 58, 96, 54, row);
     }
-    heading(712, 284);
-    place(ID_START_WITH_WINDOWS, pad, 306, full, row);
-    place(ID_NOTIFY_AFTER_SAVE, pad, 338, full, row);
-    row_label(719, 374);
+
+    heading(712, 154);
+    place(719, 318, 154, 270, 16);
+    place(ID_START_WITH_WINDOWS, pad, 178, 274, row);
+    place(ID_NOTIFY_AFTER_SAVE, pad, 210, 274, row);
     for (index, id) in [ID_THEME_SYSTEM, ID_THEME_LIGHT, ID_THEME_DARK]
         .into_iter()
         .enumerate()
     {
-        place(id, chips + index as i32 * 108, 374, 100, row);
+        place(id, 318 + index as i32 * 86, 178, 78, row);
     }
 
     heading(713, 12);
@@ -995,14 +1024,16 @@ fn layout_content(container: HWND, dpi: u32) {
     place(ID_THICKNESS_SLIDER, chips, 70, 278, row);
     place(ID_THICKNESS_EDIT, chips + 290, 70, 52, row);
     place(720, chips + 346, 74, 26, 18);
-    heading(714, 136);
-    place(ID_WINDOW_SNAP, pad, 158, full, row);
-    place(ID_CLOSE_AFTER_ACTION, pad, 190, full, row);
+    heading(714, 140);
+    place(ID_WINDOW_SNAP, pad, 166, 274, row);
+    place(ID_CLOSE_AFTER_ACTION, 318, 166, 270, row);
 
     heading(715, 12);
     place(ID_CHECK_UPDATES, pad, 34, full, row);
-    place(ID_CHECK_UPDATE, pad, 66, 164, row);
-    place(708, pad, 102, full, 32);
+    place(ID_CHECK_UPDATE, pad, 74, 164, row);
+    place(ID_UPDATE_STATUS, 186, 76, 402, 24);
+    place(ID_UPDATE_PROGRESS, pad, 112, full, 8);
+    place(708, pad, 138, full, 40);
 }
 
 /// Sizes the container's scroll bars against the content extent and refreshes
@@ -1153,6 +1184,62 @@ fn control(hwnd: HWND, id: i32) -> Option<HWND> {
     unsafe { GetDlgItem(container, id) }.ok()
 }
 
+pub(crate) fn report_update_status(owner: HWND, message: &str, status: UpdateStatus) -> bool {
+    if control(owner, ID_UPDATE_STATUS).is_none() {
+        return false;
+    }
+    let state_ptr = unsafe { GetWindowLongPtrW(owner, GWLP_USERDATA) } as *mut SettingsWindowState;
+    let Some(state) = (unsafe { state_ptr.as_mut() }) else {
+        return false;
+    };
+    set_update_status(owner, state, message, status);
+    true
+}
+
+fn set_update_status(
+    owner: HWND,
+    state: &mut SettingsWindowState,
+    message: &str,
+    status: UpdateStatus,
+) {
+    let was_busy = state.update_status == UpdateStatus::Busy;
+    state.update_status = status;
+    if status == UpdateStatus::Busy && !was_busy {
+        state.update_frame = 0;
+        if unsafe { windows::Win32::UI::WindowsAndMessaging::SetTimer(owner, 2, 75, None) } == 0 {
+            crate::diagnostics::record(
+                "settings update progress",
+                "Could not start progress animation.",
+            );
+        }
+    } else if status != UpdateStatus::Busy && was_busy {
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(owner, 2);
+        }
+    }
+    let Some(label) = control(owner, ID_UPDATE_STATUS) else {
+        return;
+    };
+    let text = wide_string(message);
+    unsafe {
+        let _ =
+            windows::Win32::UI::WindowsAndMessaging::SetWindowTextW(label, PCWSTR(text.as_ptr()));
+        if let Some(button) = control(owner, ID_CHECK_UPDATE) {
+            let _ = EnableWindow(button, status == UpdateStatus::Idle);
+        }
+        if let Some(progress) = control(owner, ID_UPDATE_PROGRESS) {
+            let _ = ShowWindow(
+                progress,
+                if status == UpdateStatus::Busy && state.active_view == SettingsView::Updates {
+                    SW_SHOW
+                } else {
+                    SW_HIDE
+                },
+            );
+        }
+    }
+}
+
 fn show_controls(hwnd: HWND, ids: &[i32], show: bool) {
     for id in ids {
         if let Some(control) = control(hwnd, *id) {
@@ -1163,13 +1250,12 @@ fn show_controls(hwnd: HWND, ids: &[i32], show: bool) {
     }
 }
 
-fn set_active_view(hwnd: HWND, view: SettingsView) {
+fn set_active_view(hwnd: HWND, view: SettingsView, update_status: UpdateStatus) {
     const GENERAL: &[i32] = &[
         710,
         711,
         712,
         701,
-        702,
         705,
         706,
         707,
@@ -1197,7 +1283,14 @@ fn set_active_view(hwnd: HWND, view: SettingsView) {
         ID_WINDOW_SNAP,
         ID_CLOSE_AFTER_ACTION,
     ];
-    const UPDATES: &[i32] = &[715, 708, ID_CHECK_UPDATES, ID_CHECK_UPDATE];
+    const UPDATES: &[i32] = &[
+        715,
+        708,
+        ID_CHECK_UPDATES,
+        ID_CHECK_UPDATE,
+        ID_UPDATE_STATUS,
+        ID_UPDATE_PROGRESS,
+    ];
     for (controls, section) in [
         (GENERAL, SettingsView::General),
         (EDITOR, SettingsView::Editor),
@@ -1214,6 +1307,11 @@ fn set_active_view(hwnd: HWND, view: SettingsView) {
     for id in ID_COLOR_FIRST..ID_COLOR_FIRST + PRESET_COLORS.len() as i32 {
         show_controls(hwnd, &[id], view == SettingsView::Editor);
     }
+    show_controls(
+        hwnd,
+        &[ID_UPDATE_PROGRESS],
+        view == SettingsView::Updates && update_status == UpdateStatus::Busy,
+    );
     check_radio(
         hwnd,
         ID_VIEW_GENERAL,
@@ -1307,10 +1405,7 @@ fn set_jpeg_quality_enabled(hwnd: HWND, enabled: bool) {
 }
 
 fn initialize_control_values(hwnd: HWND, settings: &Settings) {
-    let shortcut = wide_string(&format!(
-        "{}  ·  Record shortcut",
-        settings.hotkey.description
-    ));
+    let shortcut = wide_string(&format!("{}  ·  Change", settings.hotkey.description));
     if let Some(button) = control(hwnd, ID_HOTKEY_RECORD) {
         unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowTextW(
@@ -1379,7 +1474,7 @@ fn initialize_control_values(hwnd: HWND, settings: &Settings) {
     set_label_note(
         hwnd,
         707,
-        "JPEG quality",
+        "Quality",
         quality_id
             .is_none()
             .then(|| format!("{}%", settings.jpeg_quality)),
@@ -1468,8 +1563,6 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
         |parent: HWND, id, text| create_control(parent, w!("STATIC"), text, Default::default(), id);
 
     label(hwnd, 700, "isolmaSS")?;
-    label(hwnd, 716, "Preferences")?;
-    label(hwnd, 717, "Capture, draw, save and update.")?;
     label(
         hwnd,
         718,
@@ -1479,7 +1572,6 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
             "  ·  Local and private"
         ),
     )?;
-    label(hwnd, 709, "Windows screenshot utility")?;
     create_button(
         hwnd,
         ID_VIEW_GENERAL,
@@ -1508,10 +1600,7 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
         BS_PUSHBUTTON | WS_GROUP.0 as i32 | WS_TABSTOP.0 as i32,
     )?;
     label(content, 705, "Capture delay")?;
-    for (index, name) in ["None", "1 second", "3 seconds", "5 seconds"]
-        .into_iter()
-        .enumerate()
-    {
+    for (index, name) in ["0 s", "1 s", "3 s", "5 s"].into_iter().enumerate() {
         create_button(
             content,
             ID_DELAY_FIRST + index as i32,
@@ -1527,7 +1616,6 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
     }
 
     label(content, 711, "Saving")?;
-    label(content, 702, "Save folder")?;
     create_control(
         content,
         w!("STATIC"),
@@ -1538,7 +1626,7 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
     create_button(
         content,
         ID_BROWSE,
-        "Choose folder",
+        "Browse…",
         BS_PUSHBUTTON | WS_TABSTOP.0 as i32,
     )?;
     label(content, 706, "Image format")?;
@@ -1554,7 +1642,7 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
         "JPEG",
         BS_AUTORADIOBUTTON | WS_TABSTOP.0 as i32,
     )?;
-    label(content, 707, "JPEG quality")?;
+    label(content, 707, "Quality")?;
     for (index, quality) in [80, 90, 100].into_iter().enumerate() {
         let label = quality.to_string();
         create_button(
@@ -1571,17 +1659,17 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
         )?;
     }
 
-    label(content, 712, "Windows and appearance")?;
+    label(content, 712, "Windows")?;
     create_button(
         content,
         ID_WINDOW_SNAP,
-        "Snap to a window with one click",
+        "Snap to window",
         BS_AUTOCHECKBOX | WS_GROUP.0 as i32 | WS_TABSTOP.0 as i32,
     )?;
     create_button(
         content,
         ID_CLOSE_AFTER_ACTION,
-        "Close the editor after saving or copying",
+        "Close after save or copy",
         BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32,
     )?;
 
@@ -1630,17 +1718,17 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
     )?;
     label(content, 720, "px")?;
 
-    label(content, 714, "Editor behavior")?;
+    label(content, 714, "Selection")?;
     create_button(
         content,
         ID_START_WITH_WINDOWS,
-        "Start isolmaSS when I sign in to Windows",
+        "Launch at sign-in",
         BS_AUTOCHECKBOX | WS_GROUP.0 as i32 | WS_TABSTOP.0 as i32,
     )?;
     create_button(
         content,
         ID_NOTIFY_AFTER_SAVE,
-        "Show a notification after saving",
+        "Notify after saving",
         BS_AUTOCHECKBOX | WS_TABSTOP.0 as i32,
     )?;
     label(content, 719, "Appearance")?;
@@ -1676,10 +1764,23 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
         "Check for updates",
         BS_PUSHBUTTON | WS_TABSTOP.0 as i32,
     )?;
+    label(content, ID_UPDATE_STATUS, "Ready to check for updates")?;
+    create_control(
+        content,
+        w!("BUTTON"),
+        "",
+        windows::Win32::UI::WindowsAndMessaging::WINDOW_STYLE(BS_PUSHBUTTON as u32),
+        ID_UPDATE_PROGRESS,
+    )?;
+    if let Some(progress) = control(hwnd, ID_UPDATE_PROGRESS) {
+        unsafe {
+            let _ = ShowWindow(progress, SW_HIDE);
+        }
+    }
     label(
         content,
         708,
-        "Updates are checked on startup. Installation always asks first and verifies the release signature.",
+        "Signed releases only. Save your work first; installation closes and restarts isolmaSS.",
     )?;
 
     create_button(
@@ -1705,12 +1806,24 @@ fn apply_button_action(hwnd: HWND, state: &mut SettingsWindowState, id: i32) {
                 ID_VIEW_UPDATES => SettingsView::Updates,
                 _ => SettingsView::General,
             };
-            set_active_view(hwnd, state.active_view);
+            set_active_view(hwnd, state.active_view, state.update_status);
+            if !state.user_resized
+                && let Err(error) = unsafe {
+                    windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                        hwnd,
+                        WM_SETTINGS_RESIZE,
+                        WPARAM(0),
+                        LPARAM(0),
+                    )
+                }
+            {
+                crate::diagnostics::record("settings resize", &error.to_string());
+            }
         }
         ID_HOTKEY_RECORD => {
             state.recording_hotkey = true;
             if let Some(button) = control(hwnd, ID_HOTKEY_RECORD) {
-                let text = wide_string("Press a shortcut (Esc cancels)");
+                let text = wide_string("Press keys · Esc cancels");
                 unsafe {
                     let _ = windows::Win32::UI::WindowsAndMessaging::SetWindowTextW(
                         button,
@@ -1774,7 +1887,23 @@ fn apply_button_action(hwnd: HWND, state: &mut SettingsWindowState, id: i32) {
         ID_QUALITY_FIRST..=612 => {
             state.settings.jpeg_quality = [80, 90, 100][(id - ID_QUALITY_FIRST) as usize];
         }
-        ID_CHECK_UPDATE => crate::updater::run_manual_update_check(),
+        ID_CHECK_UPDATE => {
+            if crate::updater::run_manual_update_check() {
+                set_update_status(
+                    hwnd,
+                    state,
+                    "Checking the latest signed release…",
+                    UpdateStatus::Busy,
+                );
+            } else {
+                set_update_status(
+                    hwnd,
+                    state,
+                    "An update is already in progress…",
+                    UpdateStatus::Busy,
+                );
+            }
+        }
         ID_CANCEL => unsafe {
             let _ = DestroyWindow(hwnd);
         },
@@ -1892,12 +2021,64 @@ unsafe extern "system" fn settings_wnd_proc(
         windows::Win32::UI::WindowsAndMessaging::WM_NCDESTROY => {
             unsafe {
                 let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(hwnd, 1);
+                let _ = windows::Win32::UI::WindowsAndMessaging::KillTimer(hwnd, 2);
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             }
             unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
         }
         windows::Win32::UI::WindowsAndMessaging::WM_TIMER if wparam.0 == 1 => {
             crate::updater::poll(hwnd, false);
+            LRESULT(0)
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_TIMER if wparam.0 == 2 => {
+            if !state_ptr.is_null() && unsafe { (*state_ptr).update_status == UpdateStatus::Busy } {
+                let state = unsafe { &mut *state_ptr };
+                state.update_frame = (state.update_frame + 1) % 36;
+                if state.active_view == SettingsView::Updates
+                    && let Some(progress) = control(hwnd, ID_UPDATE_PROGRESS)
+                {
+                    unsafe {
+                        let _ = InvalidateRect(progress, None, false);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
+        WM_SETTINGS_RESIZE if !state_ptr.is_null() => {
+            let state = unsafe { &*state_ptr };
+            if !state.user_resized
+                && !unsafe { windows::Win32::UI::WindowsAndMessaging::IsZoomed(hwnd) }.as_bool()
+            {
+                let height = match state.active_view {
+                    SettingsView::General => SETTINGS_HEIGHT,
+                    SettingsView::Editor => 404,
+                    SettingsView::Updates => 384,
+                };
+                let mut rect = RECT::default();
+                if unsafe { GetWindowRect(hwnd, &mut rect) }.is_ok() {
+                    if let Err(error) = unsafe {
+                        windows::Win32::UI::WindowsAndMessaging::SetWindowPos(
+                            hwnd,
+                            None,
+                            rect.left,
+                            rect.top,
+                            rect.right - rect.left,
+                            scale(height, state.dpi),
+                            windows::Win32::UI::WindowsAndMessaging::SWP_NOACTIVATE
+                                | windows::Win32::UI::WindowsAndMessaging::SWP_NOZORDER,
+                        )
+                    } {
+                        crate::diagnostics::record("settings resize", &error.to_string());
+                    }
+                    center_dialog(hwnd, None);
+                }
+            }
+            LRESULT(0)
+        }
+        windows::Win32::UI::WindowsAndMessaging::WM_EXITSIZEMOVE => {
+            if !state_ptr.is_null() {
+                unsafe { (*state_ptr).user_resized = true };
+            }
             LRESULT(0)
         }
         windows::Win32::UI::WindowsAndMessaging::WM_SIZE => {
@@ -1952,11 +2133,11 @@ unsafe extern "system" fn settings_wnd_proc(
                             draw_settings_slider(draw, unsafe { &*state_ptr });
                             return LRESULT(CDRF_SKIPDEFAULT as isize);
                         }
-                        if id != ID_THICKNESS_SLIDER
-                            && (crate::theme::theme() == crate::theme::Theme::Dark
-                                || (ID_COLOR_FIRST..ID_COLOR_FIRST + 8).contains(&id)
-                                || (ID_WINDOW_SNAP..=ID_CHECK_UPDATES).contains(&id))
-                        {
+                        if id == ID_UPDATE_PROGRESS {
+                            draw_update_progress(draw, unsafe { &*state_ptr });
+                            return LRESULT(CDRF_SKIPDEFAULT as isize);
+                        }
+                        if id != ID_THICKNESS_SLIDER {
                             draw_settings_button(draw, unsafe { &*state_ptr });
                             return LRESULT(CDRF_SKIPDEFAULT as isize);
                         }
@@ -2054,7 +2235,7 @@ unsafe extern "system" fn settings_wnd_proc(
                 let _ = SetBkMode(hdc, TRANSPARENT);
                 let color = if !IsWindowEnabled(child).as_bool() {
                     color_disabled()
-                } else if matches!(id, 708 | 709) {
+                } else if id == 708 {
                     color_muted()
                 } else if matches!(id, 701..=707) {
                     color_property()
@@ -2231,10 +2412,10 @@ unsafe extern "system" fn settings_wnd_proc(
                 let old_heading_font = std::mem::replace(&mut state.heading_font, new_heading_font);
                 set_controls_font(hwnd, new_font);
                 set_control_font(hwnd, 700, new_title_font);
-                set_control_font(hwnd, 716, new_title_font);
                 for id in 710..=715 {
                     set_control_font(hwnd, id, new_heading_font);
                 }
+                set_control_font(hwnd, 719, new_heading_font);
                 center_dialog(hwnd, None);
                 layout_chrome(hwnd, state.dpi);
                 position_container(hwnd, state.dpi);
@@ -2416,6 +2597,9 @@ pub fn show_settings_dialog(current: &Settings, owner: Option<HWND>) -> Result<O
         settings: current.clone(),
         saved: false,
         active_view: SettingsView::General,
+        update_status: UpdateStatus::Idle,
+        update_frame: 0,
+        user_resized: false,
         recording_hotkey: false,
         original_hotkey: current.hotkey.clone(),
         updating_thickness: false,
@@ -2498,10 +2682,10 @@ pub fn show_settings_dialog(current: &Settings, owner: Option<HWND>) -> Result<O
     crate::diagnostics::record("settings", "Controls created");
     set_controls_font(hwnd, state.font);
     set_control_font(hwnd, 700, state.title_font);
-    set_control_font(hwnd, 716, state.title_font);
     for id in 710..=715 {
         set_control_font(hwnd, id, state.heading_font);
     }
+    set_control_font(hwnd, 719, state.heading_font);
     unsafe {
         let timer = windows::Win32::UI::WindowsAndMessaging::SetTimer(hwnd, 1, 350, None);
         if timer == 0 {
@@ -2514,7 +2698,7 @@ pub fn show_settings_dialog(current: &Settings, owner: Option<HWND>) -> Result<O
     layout_chrome(hwnd, state.dpi);
     position_container(hwnd, state.dpi);
     initialize_control_values(hwnd, &state.settings);
-    set_active_view(hwnd, state.active_view);
+    set_active_view(hwnd, state.active_view, state.update_status);
     center_dialog(hwnd, owner);
     layout_chrome(hwnd, state.dpi);
     position_container(hwnd, state.dpi);

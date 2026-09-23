@@ -408,7 +408,36 @@ impl Drop for TrayManager {
     }
 }
 
+pub fn set_update_activity(message: Option<&str>) {
+    let raw = TRAY_HWND.load(Ordering::SeqCst);
+    if raw == 0 {
+        return;
+    }
+    let mut data = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: HWND(raw as *mut _),
+        uID: TRAY_ICON_ID,
+        uFlags: NIF_TIP,
+        ..Default::default()
+    };
+    copy_wide(
+        &mut data.szTip,
+        message.unwrap_or("isolmaSS - Screenshot Utility"),
+    );
+    if !unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) }.as_bool() {
+        crate::diagnostics::record("tray update status", "Could not update the tray tooltip.");
+    }
+}
+
 pub fn show_notification(title: &str, message: &str) {
+    show_notification_with_mode(title, message, false);
+}
+
+pub fn show_update_notification(title: &str, message: &str) {
+    show_notification_with_mode(title, message, true);
+}
+
+fn show_notification_with_mode(title: &str, message: &str, user_requested: bool) {
     let raw = TRAY_HWND.load(Ordering::SeqCst);
     if raw == 0 {
         return;
@@ -418,7 +447,11 @@ pub fn show_notification(title: &str, message: &str) {
         hWnd: HWND(raw as *mut _),
         uID: TRAY_ICON_ID,
         uFlags: NIF_INFO,
-        dwInfoFlags: NIIF_INFO | NIIF_RESPECT_QUIET_TIME,
+        dwInfoFlags: if user_requested {
+            NIIF_INFO
+        } else {
+            NIIF_INFO | NIIF_RESPECT_QUIET_TIME
+        },
         ..Default::default()
     };
     copy_wide(&mut data.szInfoTitle, title);

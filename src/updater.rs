@@ -607,7 +607,9 @@ pub fn launch_installer(path: &Path) -> Result<(), String> {
 
 mod job;
 use job::CANCELLED;
-pub use job::{configure, poll, run_automatic_update_check, run_manual_update_check, shutdown};
+pub use job::{
+    configure, is_checking, poll, run_automatic_update_check, run_manual_update_check, shutdown,
+};
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
