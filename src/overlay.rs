@@ -53,6 +53,7 @@ const WM_EDITOR_SETTINGS: u32 = 0x8000 + 301;
 const WM_EDITOR_ERROR: u32 = 0x8000 + 302;
 const WM_EDITOR_SAVE_AS: u32 = 0x8000 + 303;
 const WM_EDITOR_PICK_COLOR: u32 = 0x8000 + 304;
+const WM_EDITOR_CLOUD_SETUP: u32 = 0x8000 + 305;
 thread_local! { static ACTION_ERROR: std::cell::RefCell<Option<(String, String)>> = const { std::cell::RefCell::new(None) }; }
 
 pub fn tool_for_key(vk: u32) -> Option<ToolKind> {
@@ -281,6 +282,7 @@ pub struct OverlayState {
 
     committed_result: bool,
     upload_result: Option<crate::upload::UploadResult>,
+    setup_pending: bool,
     scene_dirty: bool,
     base_cache: Vec<u8>,
     cache_requested: bool,
@@ -369,6 +371,7 @@ impl OverlayState {
             bits_ptr: std::ptr::null_mut(),
             committed_result: false,
             upload_result: None,
+            setup_pending: false,
             scene_dirty: false,
             base_cache: Vec::new(),
             cache_requested: false,
@@ -969,6 +972,22 @@ impl OverlayState {
         let selection = self
             .committed_selection
             .ok_or_else(|| "No screenshot region is selected.".to_string())?;
+        if self.settings.cloud_url.is_none() {
+            if self.setup_pending {
+                return Ok(());
+            }
+            unsafe {
+                windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                    hwnd,
+                    WM_EDITOR_CLOUD_SETUP,
+                    WPARAM(0),
+                    LPARAM(0),
+                )
+            }
+            .map_err(|error| format!("Cloudflare setup could not be opened: {error}"))?;
+            self.setup_pending = true;
+            return Ok(());
+        }
         self.composite_scene_with(CompositionPolicy::EXPORT);
         let width = self.capture.width;
         let height = self.capture.height;
@@ -1263,6 +1282,31 @@ unsafe extern "system" fn overlay_wnd_proc(
                     Err(error) => {
                         crate::ui::error(hwnd, "Settings could not be opened", &error.to_string())
                     }
+                }
+            }
+            LRESULT(0)
+        }
+        WM_EDITOR_CLOUD_SETUP => {
+            if state_ptr.is_null() {
+                return LRESULT(0);
+            }
+            let settings = unsafe { (*state_ptr).settings.clone() };
+            let result = crate::cloud_settings_window::show_for_upload(&settings, hwnd);
+            if !unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(hwnd).as_bool() } {
+                return LRESULT(0);
+            }
+            let state = unsafe { &mut *state_ptr };
+            state.setup_pending = false;
+            match result {
+                Ok(Some(settings)) => {
+                    state.settings = settings;
+                    if let Err(error) = state.upload_selection(hwnd) {
+                        OverlayState::show_action_error(hwnd, "Upload", &error);
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    crate::ui::error(hwnd, "Cloudflare kurulumu açılamadı", &error.to_string())
                 }
             }
             LRESULT(0)

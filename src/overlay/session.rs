@@ -155,6 +155,7 @@ fn run_session(
 
         committed_result: false,
         upload_result: None,
+        setup_pending: false,
         scene_dirty: false,
         base_cache: Vec::new(),
         cache_requested: false,
