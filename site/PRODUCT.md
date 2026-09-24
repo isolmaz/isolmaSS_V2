@@ -20,13 +20,13 @@ Windows users evaluating or using isolmaSS who need download, installation, docu
 
 ## Positioning
 
-Capture → annotate → copy/save locally; upload is an explicit action after the user deploys private Worker/R2/D1 resources in their own Cloudflare account. The publisher hosts no screenshots or login service. Updates use a pinned RSA-3072 signature over SHA-256.
+Capture → annotate → copy/save locally; the first Upload opens guided setup for private Worker/R2/D1 resources in the user's account, and uploads that selection only after successful pairing. The publisher hosts no screenshots or login service. Updates use a pinned RSA-3072 signature over SHA-256.
 
 ## Operating Context
 
-- Public release channel: `github.com/isolmaz/isolmaSS-updates` (public, releases only). Source repo `isolmaz/isolmaSS_V2` is public; its Deploy button requires the v0.5.0 release tag and each user's Cloudflare authorization.
+- Public release channel: `github.com/isolmaz/isolmaSS-updates` (public, releases only). Source repo `isolmaz/isolmaSS_V2` is public; its Deploy button requires the v0.5.1 release tag and each user's Cloudflare authorization.
 - Site hosting decision: Cloudflare Workers Static Assets for `ss.isolmaz.com`; never claim the site is live before its owner deploys it.
-- Source version: 0.5.0 (local-first with opt-in BYO Cloudflare upload); cloud sharing remains inactive until the user pairs their Worker.
+- Source version: 0.5.1 (local-first with opt-in BYO Cloudflare upload); cloud sharing remains inactive until the user pairs their Worker.
 - Local copy/save always works and never depends on cloud configuration.
 
 ## Capabilities and Constraints

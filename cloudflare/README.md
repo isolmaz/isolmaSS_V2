@@ -4,11 +4,10 @@ Bu klasör, her kullanıcının **kendi Cloudflare hesabına** kurduğu, uygulam
 
 ## Kurulum
 
-1. Cloudflare hesabında R2'yi etkinleştirin; Cloudflare hesap/abonelik adımını uygulama sizin yerinize geçemez.
-2. Uygulamada **Ayarlar → Cloudflare** bölümünde iki farklı güvenli anahtar üretin. Bu sırlar Windows'ta kullanıcıya özel DPAPI korumasıyla tutulur; `settings.json` içine yazılmaz.
-3. `v0.5.0` kaynak etiketi yayımlandıktan sonra [Cloudflare'a kur](https://deploy.workers.cloudflare.com/?url=https://github.com/isolmaz/isolmaSS_V2/tree/v0.5.0/cloudflare) bağlantısını açın. Cloudflare hesabınızı, istediğiniz Worker adını ve otomatik oluşturulacak özel R2/D1 kaynaklarını onaylayın. Cloudflare sır formuna `UPLOAD_TOKEN` ve `ADMIN_TOKEN` değerlerini girin. Bu değerleri URL'ye veya kaynak depoya koymayın.
-4. Oluşan `https://...workers.dev` adresini uygulamadaki Worker adresine yazıp **Eşleştir**'e basın. Bu işlem admin anahtarını kullanarak şemayı ilk kez kurar ve servisle eşleşir. Alan adınız Cloudflare'daysa Worker'a ayrıca kendi alan adınızı bağlayabilir, ardından uygulamayı yeni adresle yeniden eşleştirebilirsiniz.
-5. Seçim düzenleyicisinde **Yükle** ya da `Ctrl+U` kullanın. Link yalnızca sunucu başarı yanıtı verdikten sonra panoya yazılır. Üretilen bağlantıyı bilen herkes, şifre ayarlanmadıysa görüntüyü açabilir.
+1. Bir görüntü seçip **Yükle** veya `Ctrl+U`'ya basın. İlk seferde görüntü gönderilmez; kısa kurulum penceresi açılır. İsterseniz **Ayarlar → Cloudflare** üzerinden de aynı kurulumu başlatabilirsiniz.
+2. **Kurulumu başlat** düğmesi iki ayrı anahtarı Windows kullanıcı hesabında DPAPI ile oluşturup korur ve [Cloudflare kurulum sayfasını](https://deploy.workers.cloudflare.com/?url=https://github.com/isolmaz/isolmaSS_V2/tree/v0.5.1/cloudflare) açar. Cloudflare hesabınıza girin; Worker, özel R2 ve D1 kaynaklarını, gerekirse R2/ödeme etkinleştirmesini onaylayın. Uygulama bu izinleri sizin yerinize veremez.
+3. Penceredeki iki **Kopyala** düğmesiyle anahtarları Cloudflare'daki eş adlı `UPLOAD_TOKEN` ve `ADMIN_TOKEN` gizli alanlarına ayrı ayrı yapıştırın. Anahtarları URL'ye veya kaynak depoya yazmayın. Cloudflare'ın verdiği `https://...workers.dev` adresini uygulamaya yapıştırıp **Bağlan ve yükle**'ye basın; düzenleyicide bekleyen aynı görüntü yüklenir, başarılı bağlantı panoya yazılır. Kurulumu Ayarlar'dan açtıysanız düğme yalnızca **Bağlan** der.
+4. Vazgeçerseniz görüntü yerelde kalır; yeniden açtığınızda yarım kalan anahtarlar DPAPI ile korunmuş olarak geri gelir. Sonraki **Yükle** tıklamaları kurulumu tekrarlamadan çalışır. Özel alan adı gerekmez ve otomatik bağlanmaz; isterseniz sonradan Worker'a kendiniz bağlayıp uygulamada yeni adresi eşleştirebilirsiniz. Şifresiz geçerli linki bilen herkes görüntüyü açabilir.
 
 Kurulumu henüz kamuya açık olmayan bir repodan başlatamazsınız; Deploy to Cloudflare yalnızca public GitHub/GitLab kaynaklarıyla çalışır. Cloudflare hesabında canlı kurulum/testler sahibi tarafından yapılacaktır; yayınlanan kod bunları otomatik olarak başka bir hesaba yapmaz.
 

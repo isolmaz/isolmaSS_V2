@@ -1,6 +1,6 @@
 # isolmaSS
 
-Native Windows screenshot editor in Rust. Capture a region or window, draw on it, then copy/save locally or explicitly upload to a Worker in **your own Cloudflare account**. Upload is disabled until configured; isolmaSS operates no shared screenshot service and collects no in-app analytics. Version **0.5.0**.
+Native Windows screenshot editor in Rust. Capture a region or window, draw on it, then copy/save locally or explicitly upload to a Worker in **your own Cloudflare account**. The first Upload opens guided setup if sharing is not configured; isolmaSS operates no shared screenshot service and collects no in-app analytics. Version **0.5.1**.
 
 ## Use
 
@@ -8,7 +8,7 @@ Native Windows screenshot editor in Rust. Capture a region or window, draw on it
 2. Press **PrintScreen**, click the tray icon, or choose **Capture now** from the native tray menu. The capture shortcut and delay are configurable.
 3. Drag a region of at least 8 × 8 pixels, or click a visible window with window snapping enabled. Resize from the four corners or four edge midpoints; drag the dimensions label above the top-left corner to move the entire selection.
 4. Use the four main tools (**Seç/taşı**, **Çerçeve**, arrow, pen) or click the chevron for highlighter, text, numbered steps, blur/pixelation and opaque **Karart**. F10/Apps also exposes every tool. Select a drawing to move, recolor, adjust its width, resize where applicable, or delete it. Undo and redo include edits.
-5. Choose **Copy**, **Save** or **Save as**. Editor chrome, handles, selection frame, caret and unfinished previews do not appear in the exported image. **Upload** is available after pairing your own Cloudflare Worker: it sends only the flattened selection, keeps the editor open during transfer and copies the link after the Worker confirms success. A failed transfer leaves the clipboard unchanged.
+5. Choose **Copy**, **Save** or **Save as**. Editor chrome, handles, selection frame, caret and unfinished previews do not appear in the exported image. The first **Upload** opens a guided Cloudflare setup without sending the screenshot. After pairing your Worker, the same selection uploads automatically; later uploads send the flattened selection directly and copy the link only after the Worker confirms success. Canceling setup leaves the selection available. A failed transfer leaves the clipboard unchanged.
 
 **Karart** replaces covered pixels opaquely and is rendered after other annotations. Blur and highlighter are visual effects, **not** secure redaction. Inspect the exported image before sharing sensitive material.
 
@@ -20,7 +20,7 @@ Native Windows screenshot editor in Rust. Capture a region or window, draw on it
 | V / R / A / P / T / H / N / B / M | Select, rectangle, arrow, pen, text, highlighter, numbered step, blur, opaque redaction |
 | Ctrl+C or Enter | Copy the selection |
 | Ctrl+S / Ctrl+Shift+S | Save / Save as |
-| Ctrl+U | Upload to your paired Cloudflare Worker; copy the successful share URL |
+| Ctrl+U | First use: guided setup; after pairing: upload and copy the successful link |
 | Ctrl+Z / Ctrl+Y | Undo / redo |
 | Ctrl+, | Settings |
 | F10 or Apps | Native toolbar command menu |
@@ -46,7 +46,7 @@ The native tray menu provides Capture now, Settings, Open screenshot folder, Che
 
 ## Optional Cloudflare upload
 
-There is **no central isolmaSS image host or sign-in**. Each user who wants Upload provisions their own Worker/R2/D1 installation. Open **Settings → Cloudflare**, generate separate upload and administrator tokens, open the [Deploy to Cloudflare template](https://deploy.workers.cloudflare.com/?url=https://github.com/isolmaz/isolmaSS_V2/tree/v0.5.0/cloudflare), approve Cloudflare's own account/resource/R2 activation prompts, paste the tokens into Cloudflare's secret fields, then paste the new HTTPS Worker origin back into the app and choose **Eşleştir**. The template uses the public source release tag. Cloudflare prompts and any R2 subscription cannot be bypassed by the app. For custom domains, attach the domain to your Worker and pair the new origin. The native app retains no Cloudflare account-level API key.
+There is **no central isolmaSS image host or sign-in**. Select a screenshot and click **Upload** (`Ctrl+U`): the first click opens a short setup screen, not an upload. Choose **Kurulumu başlat** to create two separate keys locally and open [Deploy to Cloudflare](https://deploy.workers.cloudflare.com/?url=https://github.com/isolmaz/isolmaSS_V2/tree/v0.5.1/cloudflare). In Cloudflare, sign in, approve Worker/private R2/D1 resources and any R2 activation, and paste each key using its labeled Copy button into the matching secret field. Paste the provided `https://...workers.dev` URL back into the app and choose **Bağlan ve yükle**: only then will the selected screenshot upload and its successful link be copied. Canceling or losing the setup window does not upload anything; unfinished keys remain DPAPI-protected for the next attempt. A custom domain is **not required or connected automatically**. Cloudflare account authorization and any subscription cannot be bypassed; the app never holds a Cloudflare account-level API key.
 
 **Cloudflare** offers separate controls for the last N active images (50 initially), per-image bytes, total stored bytes, daily uploads/views, retention days and the warning percentage (90% initially). At that threshold choose *warn*, *block new uploads* or *block new uploads and viewing*. The panel lists recent images for deletion and displays daily/monthly usage, occupied space, daily quota percentages and an illustrative paid-plan estimate. Counts cover this Worker only, not other Cloudflare projects; even rejected Worker requests and R2 billing can incur costs. **No option guarantees a zero invoice.** Daily counters use UTC. Enabling a default image password sends the password over HTTPS with future screenshots; only a salted verifier is stored in D1. Recipients need the password separately. A valid unprotected link is visible to anyone who has it. Background cleanup marks expired or evicted images unavailable immediately and retries R2 deletion; previously downloaded copies cannot be revoked. See [Cloudflare deployment and API](cloudflare/README.md) and [the website](site/README.md).
 
@@ -54,7 +54,7 @@ There is **no central isolmaSS image host or sign-in**. Each user who wants Uplo
 
 - Default output: Windows Pictures known folder → `Screenshots`.
 - Configuration: `%APPDATA%\isolmaSS\settings.json` (64 KiB limit, validated, atomically saved under a cross-process lock). It contains the Worker origin, but **no access token**.
-- Cloudflare upload/admin tokens and optional default image password: `%LOCALAPPDATA%\isolmaSS\cloud-credentials.bin`, protected for the current Windows user with DPAPI. Disconnecting locally does not delete remote images.
+- Cloudflare upload/admin tokens and optional default image password: `%LOCALAPPDATA%\isolmaSS\cloud-credentials.bin`, protected for the current Windows user with DPAPI. Before pairing, the generated tokens are protected in `%LOCALAPPDATA%\isolmaSS\cloud-setup.bin` so setup can resume; pairing clears that pending file when file access permits. Disconnecting locally does not delete remote images.
 - Diagnostics: `%LOCALAPPDATA%\isolmaSS\logs\diagnostic.log` (rotated near 1 MiB). Logs exclude screenshot pixels, annotation text and recorded keystrokes; errors may include local paths.
 - Staged update downloads: `%LOCALAPPDATA%\isolmaSS\updates`.
 

@@ -1,6 +1,12 @@
 # Release notes
 
-## 0.5.0 — current
+## 0.5.1 — current
+
+- First `Upload`/`Ctrl+U` opens a short guided Cloudflare installation instead of failing when unpaired. After approved deployment and pairing, the selected screenshot uploads automatically; canceling leaves it local.
+- Generated setup keys persist encrypted with per-user Windows DPAPI so users can return to an unfinished installation. No custom domain is needed or connected automatically; Cloudflare account/R2 approval still belongs to the user.
+- Updated Turkish/English site and setup instructions to distinguish setup from an actual upload.
+
+## 0.5.0
 
 - Added opt-in `Ctrl+U` screenshot upload and copy-link workflow for each user's own Cloudflare Worker, private R2 bucket and D1 database. Existing local copy/save paths remain unchanged.
 - Added a Cloudflare settings window with per-installation DPAPI-protected credentials, editable retention/usage limits, password-protected links, live per-Worker usage statistics and approximate billing information.
