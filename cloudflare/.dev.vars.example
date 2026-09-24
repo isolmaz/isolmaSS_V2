@@ -1,0 +1,4 @@
+# Generate both values in isolmaSS > Settings > Cloudflare. Paste them only in
+# Cloudflare's deploy form. Never place real tokens in a public repository.
+UPLOAD_TOKEN=
+ADMIN_TOKEN=
