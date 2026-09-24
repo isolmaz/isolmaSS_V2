@@ -1,6 +1,13 @@
 # Release notes
 
-## 0.4.2 — current
+## 0.5.0 — current
+
+- Added opt-in `Ctrl+U` screenshot upload and copy-link workflow for each user's own Cloudflare Worker, private R2 bucket and D1 database. Existing local copy/save paths remain unchanged.
+- Added a Cloudflare settings window with per-installation DPAPI-protected credentials, editable retention/usage limits, password-protected links, live per-Worker usage statistics and approximate billing information.
+- Added deployable self-host Worker source and a bilingual static `ss.isolmaz.com` informational/download/docs/privacy site styled after the owner's SSDownload site. No shared screenshot host or application sign-in.
+- Publisher-side verification is local only; real Cloudflare account installation and interactive desktop acceptance are user-run.
+
+## 0.4.2
 
 - Reorganized Settings into a compact two-column General page and content-sized Editor/Updates pages; manually resized windows retain their dimensions. Light and dark controls now use the same visual language.
 - Manual update checks show progress and results inside Settings. Tray checks announce activity, expose a checking state and present a visible result dialog.
