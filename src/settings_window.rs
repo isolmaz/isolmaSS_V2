@@ -104,6 +104,7 @@ const ID_FOLDER_LABEL: i32 = 104;
 const ID_VIEW_GENERAL: i32 = 105;
 const ID_VIEW_EDITOR: i32 = 106;
 const ID_VIEW_UPDATES: i32 = 107;
+const ID_OPEN_CLOUD: i32 = 110;
 const ID_UPDATE_STATUS: i32 = 108;
 const ID_UPDATE_PROGRESS: i32 = 109;
 const ID_HOTKEY_RECORD: i32 = 200;
@@ -854,7 +855,13 @@ fn draw_settings_button(
 fn control_uses_card(id: i32) -> bool {
     !matches!(
         id,
-        700 | 718 | ID_VIEW_GENERAL | ID_VIEW_EDITOR | ID_VIEW_UPDATES | ID_SAVE | ID_CANCEL
+        700 | 718
+            | ID_VIEW_GENERAL
+            | ID_VIEW_EDITOR
+            | ID_VIEW_UPDATES
+            | ID_OPEN_CLOUD
+            | ID_SAVE
+            | ID_CANCEL
     )
 }
 
@@ -907,6 +914,15 @@ fn layout_chrome(hwnd: HWND, dpi: u32) {
         CONTENT_LEFT + 244,
         44,
         138,
+        CONTROL_HEIGHT,
+        dpi,
+    );
+    move_control(
+        hwnd,
+        ID_OPEN_CLOUD,
+        CONTENT_LEFT + 390,
+        44,
+        130,
         CONTROL_HEIGHT,
         dpi,
     );
@@ -1590,6 +1606,12 @@ fn create_settings_controls(hwnd: HWND) -> Result<()> {
         "Güncellemeler",
         BS_AUTORADIOBUTTON | BS_PUSHLIKE | WS_TABSTOP.0 as i32,
     )?;
+    create_button(
+        hwnd,
+        ID_OPEN_CLOUD,
+        "Cloudflare",
+        BS_PUSHBUTTON | WS_TABSTOP.0 as i32,
+    )?;
 
     label(content, 710, "Capture")?;
     label(content, 701, "Global hotkey")?;
@@ -1820,6 +1842,14 @@ fn apply_button_action(hwnd: HWND, state: &mut SettingsWindowState, id: i32) {
                 crate::diagnostics::record("settings resize", &error.to_string());
             }
         }
+        ID_OPEN_CLOUD => match crate::cloud_settings_window::show(&state.settings, hwnd) {
+            Ok(Some(settings)) => {
+                state.settings = settings;
+                state.saved = true;
+            }
+            Ok(None) => {}
+            Err(error) => crate::ui::error(hwnd, "Cloudflare settings", &error.to_string()),
+        },
         ID_HOTKEY_RECORD => {
             state.recording_hotkey = true;
             if let Some(button) = control(hwnd, ID_HOTKEY_RECORD) {

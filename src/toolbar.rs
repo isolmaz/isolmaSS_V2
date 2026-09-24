@@ -13,6 +13,7 @@ pub enum ToolbarAction {
     Redo,
     Save,
     Copy,
+    Upload,
     Settings,
     Cancel,
 }
@@ -135,7 +136,7 @@ impl Toolbar {
             + colors_width
             + thicknesses_width
             + style_sections * section_gap
-            + 4 * action_step
+            + 5 * action_step
             + scale(48)
             - (action_step - action_button);
         let action_height = scale(Self::ACTION_HEIGHT);
@@ -265,7 +266,7 @@ impl Toolbar {
             visible_count as usize
                 + usize::from(show_color) * (quick_colors.len() + 1)
                 + usize::from(show_thickness) * 2
-                + 4,
+                + 5,
         );
         let mut y = tool_bounds.bottom - pad - tool_button;
         for (item, enabled) in tool_items
@@ -343,6 +344,7 @@ impl Toolbar {
         for action in [
             ToolbarAction::Save,
             ToolbarAction::Copy,
+            ToolbarAction::Upload,
             ToolbarAction::Settings,
             ToolbarAction::Cancel,
         ] {
@@ -617,6 +619,7 @@ impl Toolbar {
                         ToolbarAction::Redo => 0xe7a6,
                         ToolbarAction::Save => 0xe74e,
                         ToolbarAction::Copy => 0xe8c8,
+                        ToolbarAction::Upload => 0xe753,
                         ToolbarAction::Settings => 0xe713,
                         ToolbarAction::Cancel => 0xe711,
                     };
@@ -649,6 +652,7 @@ impl Toolbar {
                     "Save · Ctrl+S | Save as · Ctrl+Shift+S".to_owned()
                 }
                 ToolbarItem::Action(ToolbarAction::Copy) => "Copy · Ctrl+C".to_owned(),
+                ToolbarItem::Action(ToolbarAction::Upload) => "Upload · Ctrl+U".to_owned(),
                 ToolbarItem::Action(ToolbarAction::Settings) => "Settings · Ctrl+,".to_owned(),
                 ToolbarItem::Action(ToolbarAction::Cancel) => "Cancel · Esc".to_owned(),
                 ToolbarItem::Color(_) => "Drawing color".to_owned(),
@@ -864,6 +868,7 @@ pub fn show_command_menu(
             ToolbarItem::Action(ToolbarAction::Redo) => "Redo".to_owned(),
             ToolbarItem::Action(ToolbarAction::Save) => "Save screenshot".to_owned(),
             ToolbarItem::Action(ToolbarAction::Copy) => "Copy to clipboard".to_owned(),
+            ToolbarItem::Action(ToolbarAction::Upload) => "Upload and copy link".to_owned(),
             ToolbarItem::Action(ToolbarAction::Settings) => "Settings".to_owned(),
             ToolbarItem::Action(ToolbarAction::Cancel) => "Cancel".to_owned(),
             ToolbarItem::Color(color) => PRESET_COLORS

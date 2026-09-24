@@ -76,6 +76,8 @@ pub struct Settings {
     #[serde(default)]
     pub skipped_update_version: Option<String>,
     #[serde(default)]
+    pub cloud_url: Option<String>,
+    #[serde(default)]
     pub theme_preference: ThemePreference,
     pub last_tool: ToolKind,
 }
@@ -97,6 +99,7 @@ impl Default for Settings {
             jpeg_quality: default_jpeg_quality(),
             check_updates_automatically: true,
             skipped_update_version: None,
+            cloud_url: None,
             theme_preference: ThemePreference::System,
             last_tool: ToolKind::default(),
         }
@@ -259,6 +262,12 @@ impl Settings {
                     .all(|byte| byte.is_ascii_digit() || byte == b'.')
         }) {
             Some("skipped_update_version must be a dotted numeric version")
+        } else if self
+            .cloud_url
+            .as_ref()
+            .is_some_and(|url| !crate::cloudflare_setup::valid_cloud_origin(url))
+        {
+            Some("cloud_url must be a plain HTTPS origin without a path, credentials, or fragment")
         } else {
             None
         };
@@ -354,6 +363,26 @@ mod tests {
         assert_eq!(loaded.skipped_update_version, None);
         assert!(loaded.enable_window_snap && loaded.close_after_action);
         loaded.validate().expect("migrated settings remain usable");
+    }
+
+    #[test]
+    fn cloud_connection_requires_exact_secure_origin() {
+        let mut settings = Settings {
+            cloud_url: Some("https://screens.example.workers.dev".into()),
+            ..Settings::default()
+        };
+        settings.validate().expect("secure Worker origin");
+        for origin in [
+            "http://screens.example.workers.dev",
+            "https://screens.example.workers.dev/path",
+            "https://screens.example.workers.dev/?token=secret",
+            "https://user@screens.example.workers.dev",
+            "https://screens.example.workers.dev:443",
+            "https://screens.example.workers.dev#fragment",
+        ] {
+            settings.cloud_url = Some(origin.into());
+            assert!(settings.validate().is_err(), "invalid origin: {origin}");
+        }
     }
 
     #[test]

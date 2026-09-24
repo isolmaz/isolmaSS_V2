@@ -154,6 +154,7 @@ fn run_session(
         bits_ptr: bits_ptr as *mut u8,
 
         committed_result: false,
+        upload_result: None,
         scene_dirty: false,
         base_cache: Vec::new(),
         cache_requested: false,

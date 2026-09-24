@@ -220,3 +220,62 @@ pub fn copy_dib_to_clipboard(hwnd: Option<HWND>, dib_data: &[u8]) -> Result<()> 
     // On success, Windows takes ownership of hmem.
     Ok(())
 }
+
+/// Copies a completed share URL as Unicode text. The clipboard is touched only
+/// after the upload has succeeded and the complete text is in movable memory.
+pub fn copy_text_to_clipboard(hwnd: Option<HWND>, text: &str) -> Result<()> {
+    if text.is_empty() || text.contains('\0') {
+        return Err(Error::new(
+            windows::core::HRESULT::from_win32(windows::Win32::Foundation::ERROR_INVALID_DATA.0),
+            "Clipboard text is empty or contains NUL.",
+        ));
+    }
+    let encoded: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
+    let size = encoded
+        .len()
+        .checked_mul(std::mem::size_of::<u16>())
+        .ok_or_else(Error::from_win32)?;
+    let temporary_owner = if hwnd.is_none_or(|owner| owner.is_invalid()) {
+        Some(ClipboardOwner(unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("isolmaSS Clipboard"),
+                WINDOW_STYLE(0),
+                0,
+                0,
+                0,
+                0,
+                HWND_MESSAGE,
+                None,
+                None,
+                None,
+            )?
+        }))
+    } else {
+        None
+    };
+    let owner = temporary_owner
+        .as_ref()
+        .map(|window| window.0)
+        .or(hwnd)
+        .unwrap_or_default();
+    let memory = unsafe { GlobalAlloc(GMEM_MOVEABLE, size)? };
+    let mut allocation = GlobalMemory(memory);
+    let pointer = unsafe { GlobalLock(memory) };
+    if pointer.is_null() {
+        return Err(Error::from_win32());
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(encoded.as_ptr(), pointer.cast::<u16>(), encoded.len());
+        let _ = GlobalUnlock(memory);
+        OpenClipboard(owner)?;
+    }
+    let _clipboard = ClipboardGuard;
+    unsafe {
+        EmptyClipboard()?;
+        SetClipboardData(13, HANDLE(memory.0))?; // CF_UNICODETEXT
+    }
+    allocation.0 = HGLOBAL::default(); // Windows now owns the allocation.
+    Ok(())
+}

@@ -116,6 +116,7 @@ impl Drop for OwnedWindow {
 pub enum WindowKind {
     Overlay,
     Settings,
+    CloudSettings,
 }
 
 pub fn window_loop(hwnd: HWND, kind: WindowKind) -> Result<()> {

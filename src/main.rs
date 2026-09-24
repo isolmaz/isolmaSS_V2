@@ -3,6 +3,8 @@
 mod annotation;
 mod capture;
 mod clipboard;
+mod cloud_settings_window;
+mod cloudflare_setup;
 mod diagnostics;
 mod drawing;
 mod hotkey;
@@ -18,6 +20,7 @@ mod toolbar;
 mod tray;
 mod ui;
 mod updater;
+mod upload;
 mod window_snap;
 
 use capture::CaptureBuffer;

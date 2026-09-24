@@ -43,7 +43,7 @@ Var Restored
 !define MUI_BGCOLOR "F6F8FB"
 !define MUI_TEXTCOLOR "1B212A"
 !define MUI_WELCOMEPAGE_TITLE "A clearer way to capture"
-!define MUI_WELCOMEPAGE_TEXT "Capture, annotate, and save in a few keystrokes.$\r$\n$\r$\nYour screenshots stay on your computer."
+!define MUI_WELCOMEPAGE_TEXT "Capture, annotate, and save in a few keystrokes.$\r$\n$\r$\nScreenshots stay local unless you choose Upload and pair your own Cloudflare account."
 BrandingText "isolmaSS | Capture. Annotate. Done."
 !define MUI_ICON "resources\app.ico"
 !define MUI_UNICON "resources\app.ico"

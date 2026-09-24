@@ -14,6 +14,7 @@ use crate::toolbar::{Toolbar, ToolbarAction, ToolbarItem};
 use crate::window_snap::{WindowInfo, find_window_in_list, get_visible_windows};
 use std::ffi::c_void;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::{
     COLORREF, ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT,
     RECT as WIN_RECT, WPARAM,
@@ -75,7 +76,7 @@ pub fn is_editor_shortcut(vk: u32, modifiers: u32, editing: bool) -> bool {
         return false;
     }
     if modifiers & MOD_CONTROL.0 != 0 {
-        matches!(vk, 0x43 | 0x53 | 0x5a | 0x59 | 0xbc | 37..=40)
+        matches!(vk, 0x43 | 0x53 | 0x55 | 0x5a | 0x59 | 0xbc | 37..=40)
             || editing && matches!(vk, 0x41 | 0x56)
     } else {
         matches!(vk, 8 | 13 | 27 | 35..=40 | 46) || !editing && tool_for_key(vk).is_some()
@@ -279,6 +280,7 @@ pub struct OverlayState {
     bits_ptr: *mut u8,
 
     committed_result: bool,
+    upload_result: Option<crate::upload::UploadResult>,
     scene_dirty: bool,
     base_cache: Vec<u8>,
     cache_requested: bool,
@@ -366,6 +368,7 @@ impl OverlayState {
             old_bmp: HGDIOBJ::default(),
             bits_ptr: std::ptr::null_mut(),
             committed_result: false,
+            upload_result: None,
             scene_dirty: false,
             base_cache: Vec::new(),
             cache_requested: false,
@@ -611,7 +614,7 @@ impl OverlayState {
         // 2. Text editing owns keys, except copy: commit first so the flattened
         // screenshot contains the final text and never includes editor affordances.
         if self.text_edit.is_some() {
-            if ctrl_down && matches!(vk as u8, b'C' | b'S') {
+            if ctrl_down && matches!(vk as u8, b'C' | b'S' | b'U') {
                 self.commit_text(hwnd);
             } else if vk == VK_RETURN.0 as usize {
                 self.commit_text(hwnd);
@@ -681,6 +684,13 @@ impl OverlayState {
                     }
                 }
                 Err(error) => Self::show_action_error(hwnd, "Save", &error),
+            }
+            return LRESULT(0);
+        }
+
+        if self.mode == OverlayMode::SelectionActive && ctrl_down && vk == 'U' as usize {
+            if let Err(error) = self.upload_selection(hwnd) {
+                Self::show_action_error(hwnd, "Upload", &error);
             }
             return LRESULT(0);
         }
@@ -952,6 +962,45 @@ impl OverlayState {
         result
     }
 
+    fn upload_selection(&mut self, hwnd: HWND) -> std::result::Result<(), String> {
+        if self.upload_result.is_some() {
+            return Err("An upload is already in progress.".to_string());
+        }
+        let selection = self
+            .committed_selection
+            .ok_or_else(|| "No screenshot region is selected.".to_string())?;
+        self.composite_scene_with(CompositionPolicy::EXPORT);
+        let width = self.capture.width;
+        let height = self.capture.height;
+        let pixels = unsafe {
+            std::slice::from_raw_parts(self.bits_ptr, width as usize * height as usize * 4)
+        };
+        let result = Arc::new(Mutex::new(None));
+        let started = crate::upload::begin_upload(
+            pixels,
+            width,
+            height,
+            &selection,
+            &self.settings,
+            result.clone(),
+            hwnd,
+        );
+        self.composite_scene();
+        if started.is_ok() {
+            self.upload_result = Some(result);
+            if let Some(toolbar) = self.toolbar.as_mut()
+                && let Some(button) = toolbar
+                    .buttons
+                    .iter_mut()
+                    .find(|button| button.item == ToolbarItem::Action(ToolbarAction::Upload))
+            {
+                button.is_enabled = false;
+            }
+            self.redraw(hwnd);
+        }
+        started
+    }
+
     fn editor_cursor(&self, pt: (i32, i32)) -> PCWSTR {
         if self.mode != OverlayMode::SelectionActive {
             return IDC_CROSS;
@@ -1099,6 +1148,23 @@ unsafe extern "system" fn overlay_wnd_proc(
     {
         return LRESULT(0);
     }
+    if !state_ptr.is_null()
+        && unsafe { (*state_ptr).upload_result.is_some() }
+        && matches!(
+            msg,
+            WM_OVERLAY_KEYDOWN
+                | WM_KEYDOWN
+                | WM_CHAR
+                | WM_LBUTTONDOWN
+                | WM_LBUTTONUP
+                | WM_RBUTTONUP
+                | WM_EDITOR_SAVE_AS
+                | WM_EDITOR_SETTINGS
+                | WM_CLOSE
+        )
+    {
+        return LRESULT(0);
+    }
     if msg == WM_EDITOR_PICK_COLOR {
         if !state_ptr.is_null() {
             let initial = unsafe { (*state_ptr).active_color };
@@ -1197,6 +1263,56 @@ unsafe extern "system" fn overlay_wnd_proc(
                     Err(error) => {
                         crate::ui::error(hwnd, "Settings could not be opened", &error.to_string())
                     }
+                }
+            }
+            LRESULT(0)
+        }
+        crate::upload::WM_UPLOAD_DONE => {
+            if state_ptr.is_null() {
+                return LRESULT(0);
+            }
+            let state = unsafe { &mut *state_ptr };
+            let Some(shared) = state.upload_result.take() else {
+                return LRESULT(0);
+            };
+            let outcome = shared
+                .lock()
+                .map_err(|_| "Upload result could not be read.".to_string())
+                .and_then(|mut slot| {
+                    slot.take()
+                        .ok_or_else(|| "Upload finished without a result.".to_string())
+                });
+            if let Some(toolbar) = state.toolbar.as_mut()
+                && let Some(button) = toolbar
+                    .buttons
+                    .iter_mut()
+                    .find(|button| button.item == ToolbarItem::Action(ToolbarAction::Upload))
+            {
+                button.is_enabled = true;
+            }
+            state.redraw(hwnd);
+            match outcome {
+                Ok(Ok(url)) => {
+                    state.committed_result = true;
+                    match crate::clipboard::copy_text_to_clipboard(Some(hwnd), &url) {
+                        Ok(()) => {
+                            crate::tray::show_notification(
+                                "Screenshot uploaded",
+                                "Link copied to clipboard.",
+                            );
+                            if state.settings.close_after_action {
+                                let _ = unsafe { DestroyWindow(hwnd) };
+                            }
+                        }
+                        Err(error) => OverlayState::show_action_error(
+                            hwnd,
+                            "Link uploaded; clipboard failed",
+                            &format!("{error}\nCopy the link manually: {url}"),
+                        ),
+                    }
+                }
+                Ok(Err(error)) | Err(error) => {
+                    OverlayState::show_action_error(hwnd, "Upload", &error)
                 }
             }
             LRESULT(0)
@@ -1769,6 +1885,11 @@ unsafe extern "system" fn overlay_wnd_proc(
                                         Err(error) => {
                                             OverlayState::show_action_error(hwnd, "Copy", &error)
                                         }
+                                    }
+                                }
+                                ToolbarItem::Action(ToolbarAction::Upload) => {
+                                    if let Err(error) = state.upload_selection(hwnd) {
+                                        OverlayState::show_action_error(hwnd, "Upload", &error);
                                     }
                                 }
                                 ToolbarItem::Action(ToolbarAction::Settings) => unsafe {
