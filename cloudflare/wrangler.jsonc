@@ -3,10 +3,8 @@
   "main": "./worker.mjs",
   "compatibility_date": "2026-09-24",
   "workers_dev": true,
-  "rules": [{ "type": "Text", "globs": ["**/*.sql"] }],
-  "r2_buckets": [{ "binding": "IMAGES" }],
-  "d1_databases": [{ "binding": "DB", "database_name": "isolmass-share" }],
-  "triggers": { "crons": ["*/15 * * * *"] },
+  "durable_objects": { "bindings": [{ "name": "STORE", "class_name": "ShareStore" }] },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["ShareStore"] }],
   "secrets": { "required": ["UPLOAD_TOKEN", "ADMIN_TOKEN"] },
   "observability": {
     "enabled": true,

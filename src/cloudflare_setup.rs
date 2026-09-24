@@ -16,14 +16,6 @@ use windows::core::{PCWSTR, w};
 
 const MAX_JSON_BYTES: usize = 128 * 1024;
 const CREDENTIAL_FILE: &str = "cloud-credentials.bin";
-const PENDING_FILE: &str = "cloud-setup.bin";
-
-#[derive(Serialize, Deserialize)]
-pub struct PendingTokens {
-    pub upload_token: String,
-    pub admin_token: String,
-}
-
 #[derive(Clone, Serialize, Deserialize)]
 pub struct CloudCredentials {
     pub origin: String,
@@ -85,10 +77,6 @@ fn credential_path() -> Result<PathBuf, String> {
         .ok_or_else(|| {
             "%LOCALAPPDATA% is unavailable; upload credentials cannot be protected.".to_string()
         })
-}
-
-fn pending_path() -> Result<PathBuf, String> {
-    Ok(credential_path()?.with_file_name(PENDING_FILE))
 }
 
 fn valid_token(token: &str) -> bool {
@@ -166,7 +154,9 @@ pub fn save_credentials(credentials: &CloudCredentials) -> Result<(), String> {
         || !valid_token(&credentials.admin_token)
         || credentials.upload_token == credentials.admin_token
         || credentials.share_password.as_ref().is_some_and(|password| {
-            password.len() < 12 || password.len() > 128 || password.chars().any(char::is_control)
+            password.chars().count() < 12
+                || password.len() > 128
+                || password.chars().any(char::is_control)
         })
     {
         return Err("Cloudflare address, tokens or image password are invalid.".to_string());
@@ -237,58 +227,6 @@ pub fn load_credentials(origin: &str) -> Result<CloudCredentials, String> {
     Ok(data)
 }
 
-pub fn load_pending_tokens() -> Result<Option<PendingTokens>, String> {
-    load_pending_tokens_at(&pending_path()?)
-}
-
-fn load_pending_tokens_at(path: &Path) -> Result<Option<PendingTokens>, String> {
-    let bytes = match std::fs::read(path) {
-        Ok(bytes) => bytes,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(format!(
-                "Could not read unfinished Cloudflare setup: {error}"
-            ));
-        }
-    };
-    if bytes.len() > 65536 || bytes.is_empty() {
-        return Err("Unfinished Cloudflare setup is damaged; create new keys to restart.".into());
-    }
-    let plain = unprotect(&bytes)?;
-    let tokens: PendingTokens = serde_json::from_slice(&plain)
-        .map_err(|_| "Unfinished Cloudflare setup is damaged; create new keys to restart.")?;
-    if !valid_token(&tokens.upload_token)
-        || !valid_token(&tokens.admin_token)
-        || tokens.upload_token == tokens.admin_token
-    {
-        return Err(
-            "Unfinished Cloudflare setup has invalid keys; create new keys to restart.".into(),
-        );
-    }
-    Ok(Some(tokens))
-}
-
-pub fn create_pending_tokens() -> Result<PendingTokens, String> {
-    create_pending_tokens_at(&pending_path()?)
-}
-
-fn create_pending_tokens_at(path: &Path) -> Result<PendingTokens, String> {
-    let tokens = PendingTokens {
-        upload_token: generate_token()?,
-        admin_token: generate_token()?,
-    };
-    if tokens.upload_token == tokens.admin_token {
-        return Err("Windows generated identical keys; please try again.".into());
-    }
-    let plain = serde_json::to_vec(&tokens).map_err(|error| error.to_string())?;
-    write_protected(path, &plain)?;
-    Ok(tokens)
-}
-
-pub fn forget_pending_tokens() -> Result<(), String> {
-    remove_secret(pending_path()?)
-}
-
 pub fn forget_credentials() -> Result<(), String> {
     remove_secret(credential_path()?)
 }
@@ -343,7 +281,55 @@ pub fn api_request(
     {
         return Err("Cloudflare request contains an invalid address or credential.".to_string());
     }
-    let host = &origin[8..];
+    https_request(
+        &origin[8..],
+        path,
+        method,
+        Some(bearer),
+        content_type,
+        password,
+        body,
+    )
+}
+
+/// Fixed Cloudflare OAuth and management hosts; never send an OAuth bearer to
+/// the user-configured screenshot origin or follow a redirect to another host.
+pub fn control_request(
+    host: &str,
+    path: &str,
+    method: &str,
+    bearer: Option<&str>,
+    content_type: Option<&str>,
+    body: RequestBody<'_>,
+) -> Result<(u32, Vec<u8>), String> {
+    if !((host == "dash.cloudflare.com" && path == "/oauth2/token")
+        || (host == "api.cloudflare.com" && path.starts_with("/client/v4/")))
+        || path.contains(['#', '\\', '\r', '\n'])
+        || path.contains("..")
+        || !matches!(method, "GET" | "POST" | "PUT")
+        || bearer.is_some_and(|value| {
+            value.is_empty()
+                || value.len() > 4096
+                || !value.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric()
+                        || matches!(byte, b'-' | b'_' | b'.' | b'~' | b'+' | b'/' | b'=')
+                })
+        })
+    {
+        return Err("Invalid Cloudflare API destination or access credential.".to_string());
+    }
+    https_request(host, path, method, bearer, content_type, None, body)
+}
+
+fn https_request(
+    host: &str,
+    path: &str,
+    method: &str,
+    bearer: Option<&str>,
+    content_type: Option<&str>,
+    password: Option<&str>,
+    body: RequestBody<'_>,
+) -> Result<(u32, Vec<u8>), String> {
     let mut file = match body {
         RequestBody::File(path) => Some(
             std::fs::File::open(path)
@@ -357,8 +343,8 @@ pub fn api_request(
             .len(),
         RequestBody::Bytes(bytes) => bytes.len() as u64,
     };
-    if size > 104857600 {
-        return Err("Screenshot exceeds the maximum server upload size.".to_string());
+    if size > 10 * 1024 * 1024 {
+        return Err("Screenshot or setup request exceeds the maximum service size.".to_string());
     }
     let agent = wide(&format!("isolmaSS/{}", env!("CARGO_PKG_VERSION")));
     let session = InternetHandle(unsafe {
@@ -420,18 +406,37 @@ pub fn api_request(
         )
     }
     .map_err(|error| format!("Could not disable Cloudflare redirects: {error}"))?;
-    let mut headers = format!("Authorization: Bearer {bearer}\r\nAccept: application/json\r\n");
+    let mut headers = String::from("Accept: application/json\r\n");
+    if let Some(bearer) = bearer {
+        headers.push_str(&format!("Authorization: Bearer {bearer}\r\n"));
+    }
     if let Some(content_type) = content_type {
-        if !matches!(
-            content_type,
-            "application/json" | "image/png" | "image/jpeg"
-        ) {
-            return Err("Unsupported upload content type.".to_string());
+        let multipart = content_type
+            .strip_prefix("multipart/form-data; boundary=isolmass-")
+            .is_some_and(|boundary| {
+                (16..=64).contains(&boundary.len())
+                    && boundary
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            });
+        if !multipart
+            && !matches!(
+                content_type,
+                "application/json"
+                    | "application/x-www-form-urlencoded"
+                    | "image/png"
+                    | "image/jpeg"
+            )
+        {
+            return Err("Unsupported Cloudflare content type.".to_string());
         }
         headers.push_str(&format!("Content-Type: {content_type}\r\n"));
     }
     if let Some(password) = password {
-        if password.len() < 12 || password.len() > 128 || password.chars().any(char::is_control) {
+        if password.chars().count() < 12
+            || password.len() > 128
+            || password.chars().any(char::is_control)
+        {
             return Err("Invalid image password.".to_string());
         }
         const ALPHABET: &[u8; 64] =
@@ -548,10 +553,10 @@ pub fn api_request(
             remaining -= count as usize;
         }
     }
-    if data
-        .windows(bearer.len())
-        .any(|part| part == bearer.as_bytes())
-    {
+    if bearer.is_some_and(|value| {
+        data.windows(value.len())
+            .any(|part| part == value.as_bytes())
+    }) {
         return Err(
             "Cloudflare endpoint returned credential data; response was discarded.".to_string(),
         );
@@ -594,42 +599,6 @@ pub fn admin_json(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn unfinished_setup_keeps_keys_protected_until_pairing() {
-        let folder = std::env::temp_dir().join(format!(
-            "isolmass-setup-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("current time")
-                .as_nanos()
-        ));
-        let path = folder.join("cloud-setup.bin");
-        let first = create_pending_tokens_at(&path).expect("create pending keys");
-        let sealed = std::fs::read(&path).expect("read protected bytes");
-        assert!(
-            !sealed
-                .windows(first.upload_token.len())
-                .any(|window| window == first.upload_token.as_bytes())
-        );
-        let resumed = load_pending_tokens_at(&path)
-            .expect("resume protected setup")
-            .expect("saved keys");
-        assert_eq!(resumed.upload_token, first.upload_token);
-        assert_eq!(resumed.admin_token, first.admin_token);
-        std::fs::write(&path, b"damaged").expect("damage pending setup");
-        assert!(load_pending_tokens_at(&path).is_err());
-        let restarted = create_pending_tokens_at(&path).expect("restart with new keys");
-        assert_ne!(restarted.upload_token, first.upload_token);
-        remove_secret(path.clone()).expect("clear paired setup");
-        assert!(
-            load_pending_tokens_at(&path)
-                .expect("check cleanup")
-                .is_none()
-        );
-        std::fs::remove_dir_all(&folder).expect("remove own test folder");
-    }
 
     #[test]
     fn windows_protects_pairing_credentials() {

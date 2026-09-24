@@ -1,41 +1,31 @@
 # isolmaSS Cloudflare paylaşımı
 
-Bu klasör, her kullanıcının **kendi Cloudflare hesabına** kurduğu, uygulamanın yerel kayıt/kopyalama akışından bağımsız resim paylaşım servisidir. `ss.isolmaz.com` resim depolamaz. Kod bağımlılık gerektirmeyen bir Worker, özel R2 deposu ve D1 veritabanı kullanır.
+**Sürüm:** 0.5.2. OAuth kurulumunun gerçek Cloudflare hesabındaki uçtan uca testi kullanıcıya aittir; yerel Worker denemesi canlı hesap başarısı anlamına gelmez.
 
-## Kurulum
+Bu servis, her kullanıcının **kendi Cloudflare hesabındaki** özel Worker ve SQLite tabanlı Durable Object içinde çalışır. Yayıncının `ss.isolmaz.com` sitesi görüntü barındırmaz, Cloudflare hesabınıza giriş yapmaz veya yükleme anahtarı tutmaz. R2, D1, Git deposu ve kişisel alan adı gerekmez.
 
-1. Bir görüntü seçip **Yükle** veya `Ctrl+U`'ya basın. İlk seferde görüntü gönderilmez; kısa kurulum penceresi açılır. İsterseniz **Ayarlar → Cloudflare** üzerinden de aynı kurulumu başlatabilirsiniz.
-2. **Kurulumu başlat** düğmesi iki ayrı anahtarı Windows kullanıcı hesabında DPAPI ile oluşturup korur ve [Cloudflare kurulum sayfasını](https://deploy.workers.cloudflare.com/?url=https://github.com/isolmaz/isolmaSS_V2/tree/v0.5.1/cloudflare) açar. Cloudflare hesabınıza girin; Worker, özel R2 ve D1 kaynaklarını, gerekirse R2/ödeme etkinleştirmesini onaylayın. Uygulama bu izinleri sizin yerinize veremez.
-3. Penceredeki iki **Kopyala** düğmesiyle anahtarları Cloudflare'daki eş adlı `UPLOAD_TOKEN` ve `ADMIN_TOKEN` gizli alanlarına ayrı ayrı yapıştırın. Anahtarları URL'ye veya kaynak depoya yazmayın. Cloudflare'ın verdiği `https://...workers.dev` adresini uygulamaya yapıştırıp **Bağlan ve yükle**'ye basın; düzenleyicide bekleyen aynı görüntü yüklenir, başarılı bağlantı panoya yazılır. Kurulumu Ayarlar'dan açtıysanız düğme yalnızca **Bağlan** der.
-4. Vazgeçerseniz görüntü yerelde kalır; yeniden açtığınızda yarım kalan anahtarlar DPAPI ile korunmuş olarak geri gelir. Sonraki **Yükle** tıklamaları kurulumu tekrarlamadan çalışır. Özel alan adı gerekmez ve otomatik bağlanmaz; isterseniz sonradan Worker'a kendiniz bağlayıp uygulamada yeni adresi eşleştirebilirsiniz. Şifresiz geçerli linki bilen herkes görüntüyü açabilir.
+## Kullanım ve kurulum
 
-Kurulumu henüz kamuya açık olmayan bir repodan başlatamazsınız; Deploy to Cloudflare yalnızca public GitHub/GitLab kaynaklarıyla çalışır. Cloudflare hesabında canlı kurulum/testler sahibi tarafından yapılacaktır; yayınlanan kod bunları otomatik olarak başka bir hesaba yapmaz.
+Bir görüntü seçip **Yükle** veya `Ctrl+U`'ya basın. Kurulum yoksa görüntü gönderilmez; **Ayarlar → Cloudflare → Cloudflare ile devam et** yolundan tarayıcıda Cloudflare hesabınıza giriş yapıp gerekli izinleri verin. Birden çok hesabınız varsa kurulacak hesabı uygulamada seçersiniz. Kurulum Worker ve depolamayı seçilen hesapta oluşturur, `https://<worker>.<hesap>.workers.dev` adresini otomatik bağlar ve işlemi tamamlar. URL, GitHub hesabı, sır veya anahtar yapıştırma yoktur. İlk Yükle'de bekleyen görüntü başarıdan sonra yüklenir; vazgeçerseniz yerelde kalır.
 
-## API
+Uygulama OAuth Authorization Code + PKCE kullanır. Hesap yönetimi için yalnız üyelikleri okuma ve Worker kurmak için Workers Scripts Write izni gerekir. OAuth erişim anahtarı yalnız kurulum sırasında bellekte kullanılır; yüklemeler için ayrı Worker sırları Windows DPAPI ile korunur. Bağlantıyı kaldırmak yalnız bu bilgisayardaki sırları siler; Cloudflare'daki mevcut Worker veya görüntülere dokunmaz. Hesap izni Cloudflare profilinizde ayrıca iptal edilebilir.
 
-`POST /api/setup`, `GET/PUT /api/settings`, `GET /api/stats`, `GET /api/images?limit=50&offset=0`, `DELETE /api/images/:id`: `Authorization: Bearer <ADMIN_TOKEN>`.
+Yeni Worker'ın adı rastgele üretilir; başka Worker'ların üzerine yazılmaz. Kurulum API ile yalnız kendi Worker'ını dağıtır; Cloudflare hesabınızdaki mevcut siteleri, alan adlarını veya diğer Worker'ları değiştirmez. İlk `workers.dev` alt alanı olmayan hesaplarda uygulama boşta olan bir alt alan oluşturabilir; mevcut bir alt alan adını yeniden adlandırmaz.
 
-`POST /api/upload`: `Authorization: Bearer <UPLOAD_TOKEN>`, `Content-Type: image/png` veya `image/jpeg`, gövde yalnızca görüntü baytları. İsteğe bağlı `X-Image-Password`: UTF-8 şifrenin base64url (padding'siz) karşılığı; en az 12 karakter. Başarı `201 {"id":"<192-bit-id>","url":"https://<worker>/i/<id>"}`. Şifreler kaynağa URL üzerinden gönderilmez.
+Cloudflare OAuth istemcisi yayıncı hesabında kayıtlıdır; kullanıcı onayıyla Public yapılmış ve yayıncı alan adı doğrulanmıştır. Public görünürlük geri alınamaz. Free hesapların Durable Objects/Workers ürün erişimi veya hesap yönetici kısıtlamaları değişebilir; Cloudflare API bir işlemi engellerse uygulama bunu başarı gibi göstermez. **Gerçek yeni hesapta uçtan uca dağıtım ayrıca kullanıcı tarafından sınanmalıdır.**
 
-`GET /i/:id`: şifresiz görüntüyü döndürür, şifreli görüntüde şifre formunu gösterir. `POST /i/:id/unlock` doğrulanan şifreyle görüntüyü döndürür; saatte 20 yanlış girişten sonra geçici engel. Linkler 32 karakterlik kriptografik rastgele kimliklerdir; R2 bucket herkese açık olmaz. Geçerli linki bilen biri şifresiz görüntüye erişebilir. Servis SVG/HTML kabul etmez, görüntüleri `nosniff`, CSP ve `no-store` ile sunar. Başka birinin kaydettiği resimler uzaktan geri alınamaz.
+## HTTP sözleşmesi
 
-## Ayarlar ve sayaçlar
+- `POST /api/setup`, `GET/PUT /api/settings`, `GET /api/stats`, `GET /api/images?limit=50&offset=0`, `DELETE /api/images/:id`: ayrı `ADMIN_TOKEN` bearer sırrı.
+- `POST /api/upload`: ayrı `UPLOAD_TOKEN` bearer sırrı, `Content-Type: image/png` veya `image/jpeg`, gövde görüntü baytları. İsteğe bağlı `X-Image-Password`, UTF-8 şifrenin padding'siz base64url karşılığıdır (en az 12 karakter, en fazla 128 UTF-8 bayt). Başarı: `201 {"id":"<192-bit-id>","url":"https://<worker>/i/<id>"}`.
+- `GET /i/:id`: bağlantıyı bilen herkes şifresiz görüntüye erişebilir. Şifreli bağlantı form gösterir; `POST /i/:id/unlock` şifreyi doğrular, saatte 20 yanlış denemeyi sınırlar. Şifre URL'ye konmaz. Silinen/sona eren bağlantı `404` verir. Erişim ve çıktı `no-store`, `nosniff`, CSP ve `no-referrer` ile kısıtlıdır.
 
-`GET /api/settings` değerleri; `PUT /api/settings` verilen alanları günceller:
+Görüntü kimlikleri tahmin edilebilir sıralı numaralar değil 192-bit rastgele değerlerdir. Linkin kendisi şifresiz dosyaya erişim yetkisidir; gizli görüntülerinizi paylaşırken ayrıca şifre kullanın. Bir alıcı görüntüyü indirdikten sonra uzaktan geri alınamaz.
 
-| Alan | Başlangıç | Aralık |
-| --- | ---: | ---: |
-| `max_active` | 50 | 1–100000 |
-| `max_image_bytes` | 10485760 | 1024–104857600 |
-| `max_storage_bytes` | 1000000000 | 1048576–1000000000000 |
-| `daily_upload_limit` | 20 | 1–100000 |
-| `daily_view_limit` | 1000 | 1–100000000 |
-| `retention_days` | 30 | 1–3650 |
-| `warning_percent` | 90 | 1–100 |
-| `limit_action` | `warn` | `warn`, `block_upload`, `block_all` |
+## Saklama ve ücretsiz plan sınırları
 
-Sınırlar **bu kurulumun kendi trafiği** üzerinden, UTC günlük sayaçlarla yaklaşık ölçülür. `warn` yalnızca uyarı; `block_upload` yüklemeleri, `block_all` yükleme ve görüntülemeleri seçilen eşikten sonra durdurur. Mevcut linklerin de durması `block_all` için bilinçli davranıştır. Başka Cloudflare projeleri, Cloudflare'ın kendi sayaç gecikmesi ve engellenen isteklerin Worker maliyeti bu sayaca dahil değildir; **sıfır fatura garantisi yoktur**. İstatistikler başarılı resim yanıtları ve yüklemeler üzerinden, `daily`, `monthly`, `totals`, `images`, `warning`, `estimates` alanlarıyla döner; IP veya kullanıcı profili depolanmaz. Maliyet tahminleri fatura değildir.
+Varsayılan: son 50 görüntü, görüntü başına en çok 10 MiB, 30 gün saklama, 800 MB uygulama depolama üst sınırı, günlük 20 yükleme ve 1000 görüntüleme için uyarı. İsteğe bağlı `warn`, `block_upload` veya `block_all` eşiği ve yüzdesi ayarlardan değiştirilebilir. Worker tüm görüntüleri <=1 MB SQLite BLOB parçalarında saklar; limiti aşan en eski bağlantıyı işlem içinde siler. Sona erenler istekte ve Durable Object alarmında temizlenir.
 
-Yeni yükleme son aktif resim sınırını aşarsa en eski erişilebilir link atomik olarak devre dışı kalır; R2 dosyasının fiziksel silinmesi 15 dakikada bir çalışan zamanlanmış işte tamamlanır. Silinen/sona ermiş görüntü adresi `404` verir. Başarısız yükleme ve yarım kalmış silme kayıtları aynı işlemle temizlenir. Önbellekleme kapalı tutulur; silme/kota kararları CDN'de baypas edilmez. Tercih değişikliğinde mevcut aktif resimlerin son kullanma tarihi güncellenir; silinmiş resimler geri gelmez.
+Free planda Durable Object hesabı için toplam 5 GB, bir nesne için 1 GB ve tek SQLite BLOB için 2 MB sınırı vardır. Uygulamanın 800 MB tavanı bunların altında kalmayı hedefler; başka projelerin depolaması ve hesabın genel Workers kotaları uygulamanın sayaçlarında görünmez. **Sınırsız ücretsiz kullanım veya bütün hesap için sıfır fatura garantisi yoktur.** Kota aşılırsa işlem durur ve açık hata verir; R2 aboneliği istenmez. Güncel koşullar: [Workers limitleri](https://developers.cloudflare.com/workers/platform/limits/), [Durable Objects limitleri](https://developers.cloudflare.com/durable-objects/platform/limits/) ve [Free fiyatlandırma](https://developers.cloudflare.com/durable-objects/platform/pricing/).
 
-Kaynaklar ücretsiz plan limitleriyle başlatılabilir, ancak R2 etkinleştirmesi ve geçerli hesaptaki gerçek kullanımlar ücret doğurabilir. Güncel sınırlar: [Workers](https://developers.cloudflare.com/workers/platform/pricing/), [R2](https://developers.cloudflare.com/r2/pricing/), [D1](https://developers.cloudflare.com/d1/platform/pricing/).
+Kaynak dosya `worker.mjs` tek modüldür; `wrangler.jsonc` aynı `STORE` binding'i ve `ShareStore` SQLite sınıfını içerir. Geliştirme için `.dev.vars.example` şablondur; gerçek sırları depoya koymayın. Site Worker'ı `isolmass-site` bu paylaşım Worker'ından ayrıdır.

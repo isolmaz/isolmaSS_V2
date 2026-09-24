@@ -1,4 +1,4 @@
-# Windows distribution — 0.5.1
+# Windows distribution — 0.5.2
 
 The public source repository builds the program and supplies the Cloudflare self-host template; the separate **public** [`isolmaz/isolmaSS-updates`](https://github.com/isolmaz/isolmaSS-updates) repository contains release metadata and binaries only. A release tag is `vMAJOR.MINOR.PATCH` and must match `Cargo.toml`, the Rust PE resource and the NSIS installer version. Do not publish source archives, secrets or a private signing key to the update repository.
 
@@ -19,9 +19,9 @@ For a manual portable download, archive the same release executable as `isolmass
 
 ## Public release contract
 
-Publish exactly one each of `isolmass-setup.exe`, `isolmass-setup.exe.sig` (raw 384-byte detached signature) and `isolmass-portable-windows-x64.zip` to the `v0.5.1` GitHub Release. Record the installer's lowercase SHA-256 in the release notes and repository release manifest. Keep the GitHub asset digest available; the app refuses a missing/invalid digest, duplicate asset, draft/prerelease, unexpected release URL, mismatched version or invalid signature. Release builds are immutable once published; a correction uses a **new version** rather than replacing a signed artifact under an existing tag.
+Publish exactly one each of `isolmass-setup.exe`, `isolmass-setup.exe.sig` (raw 384-byte detached signature) and `isolmass-portable-windows-x64.zip` to the `v0.5.2` GitHub Release. Record the installer's lowercase SHA-256 in the release notes and repository release manifest. Keep the GitHub asset digest available; the app refuses a missing/invalid digest, duplicate asset, draft/prerelease, unexpected release URL, mismatched version or invalid signature. Release builds are immutable once published; a correction uses a **new version** rather than replacing a signed artifact under an existing tag.
 
-The signature covers the UTF-8 bytes `isolmaSS-update-v1\n0.5.1\n<INSTALLER-SHA256-LOWERCASE-HEX>\n`. `scripts/sign-update.ps1` implements the version-general form. HTTPS delivery and SHA-256 establish transport/integrity; only the pinned publisher signature establishes update authenticity. The app re-verifies the staged file immediately before launch.
+The signature covers the UTF-8 bytes `isolmaSS-update-v1\n0.5.2\n<INSTALLER-SHA256-LOWERCASE-HEX>\n`. `scripts/sign-update.ps1` implements the version-general form. HTTPS delivery and SHA-256 establish transport/integrity; only the pinned publisher signature establishes update authenticity. The app re-verifies the staged file immediately before launch.
 
 An existing installation whose executable lacks this pinned-key verifier needs a **one-time manual installer** for 0.4.0 or later. The installer is not paid-code-signed; Windows SmartScreen may display a reputation warning. Never automate bypassing or acceptance of that warning. Installation asks for consent in the app before download and launch; `--check-update` only checks availability.
 
@@ -33,7 +33,9 @@ The rollback covers application activation, **not** user screenshots or settings
 
 ## Cloudflare and site deployment
 
-The source release tag contains `cloudflare/` (private R2 + D1 Worker) and `site/` (static `ss.isolmaz.com` information/download pages). Public source visibility is required for the Deploy to Cloudflare template. Cloudflare account authorization, R2 subscription, Worker secrets and custom-domain DNS changes are **not** executed by `release.bat` or by the updater; each account owner approves and tests these in their own account. See [cloudflare/README.md](cloudflare/README.md) and [site/README.md](site/README.md). No real Cloudflare account was used in publisher-side tests; local syntax and a simulated D1/R2 end-to-end scenario are not proof of a live deployment. `ss.isolmaz.com` cannot be claimed live until its account owner deploys the static site.
+The source release tag contains `cloudflare/` (a Worker with SQLite Durable Object storage) and `site/` (static information/download pages). The Windows app uses the publisher's verified Public OAuth client with Workers Scripts Write and Memberships Read scopes, but exchanges the code on the user's computer and installs only into the account that the user authorizes and selects. GitHub login, R2/D1 activation, secret pasting and a custom domain are unnecessary. `release.bat` and the updater do **not** touch Cloudflare resources; each account owner explicitly authorizes installation. See [cloudflare/README.md](cloudflare/README.md) and [site/README.md](site/README.md). `ss.isolmaz.com` runs as the separate `isolmass-site` Worker and hosts no screenshots.
+
+The owner reserved live cross-account authorization, Worker installation and screenshot upload acceptance testing. Local Worker HTTP exercise, Rust tests and a signed package are **not** proof that Cloudflare will accept a real third-party installation. Release notes must disclose this limit; publish a corrected new version instead of mutating signed assets if real-account testing finds a defect.
 
 ## Verification boundaries
 

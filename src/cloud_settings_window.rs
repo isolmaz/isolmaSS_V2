@@ -1,6 +1,8 @@
-use crate::cloudflare_setup::{self, CloudCredentials, RequestBody};
+use crate::cloudflare_oauth::{self, Account, Authorization};
+use crate::cloudflare_setup::{self, CloudCredentials};
 use crate::settings::Settings;
 use serde_json::{Value, json};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::{
     ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM,
@@ -8,33 +10,27 @@ use windows::Win32::Foundation::{
 use windows::Win32::Graphics::Gdi::{CreateFontW, DeleteObject, HFONT, HGDIOBJ, InvalidateRect};
 use windows::Win32::UI::Controls::SetScrollInfo;
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, SetActiveWindow};
-use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, Result, w};
 
 const CLASS: PCWSTR = w!("isolmaSS_CloudSettings");
 const WM_CLOUD_RESULT: u32 = WM_APP + 215;
-const PAGE_HEIGHT: i32 = 1032;
-const DEPLOY_URL: &str = "https://deploy.workers.cloudflare.com/?url=https://github.com/isolmaz/isolmaSS_V2/tree/v0.5.1/cloudflare";
-const ID_GENERATE: i32 = 1001;
-const ID_DEPLOY: i32 = 1002;
-const ID_ORIGIN: i32 = 1003;
-const ID_UPLOAD_TOKEN: i32 = 1004;
-const ID_ADMIN_TOKEN: i32 = 1005;
-const ID_PASSWORD: i32 = 1006;
-const ID_COPY_UPLOAD: i32 = 1007;
-const ID_COPY_ADMIN: i32 = 1008;
-const ID_PAIR: i32 = 1009;
-const ID_FORGET: i32 = 1010;
-const ID_REFRESH: i32 = 1011;
-const ID_STATUS: i32 = 1012;
-const ID_STATS: i32 = 1013;
+const PAGE_HEIGHT: i32 = 940;
+const ID_CONNECT: i32 = 1001;
+const ID_ACCOUNT: i32 = 1002;
+const ID_INSTALL: i32 = 1003;
+const ID_FORGET: i32 = 1004;
+const ID_REFRESH: i32 = 1005;
+const ID_STATUS: i32 = 1006;
+const ID_STATS: i32 = 1007;
 const ID_LIMIT_FIRST: i32 = 1020;
 const ID_MODE: i32 = 1027;
 const ID_SAVE_LIMITS: i32 = 1028;
 const ID_IMAGES: i32 = 1029;
 const ID_DELETE: i32 = 1030;
 const ID_CLOSE: i32 = 1031;
+const ID_PASSWORD: i32 = 1032;
+const ID_SAVE_PASSWORD: i32 = 1033;
 
 const LIMITS: [(&str, &str, u64); 7] = [
     ("Saklanan son resim", "max_active", 1),
@@ -49,10 +45,11 @@ const LIMITS: [(&str, &str, u64); 7] = [
 struct State {
     settings: Settings,
     saved: bool,
-    guided: bool,
     for_upload: bool,
-    setup_started: bool,
     pending: bool,
+    authorizing: bool,
+    cancel: Arc<AtomicBool>,
+    authorization: Option<Authorization>,
     loaded: bool,
     scroll: i32,
     images: Vec<String>,
@@ -69,31 +66,31 @@ impl Drop for State {
     }
 }
 enum Completion {
-    Pair(std::result::Result<CloudCredentials, String>),
+    Authorization(std::result::Result<Authorization, String>),
+    Install(std::result::Result<CloudCredentials, String>),
     Refresh(std::result::Result<(Value, Value), String>),
     Limits(std::result::Result<Value, String>),
     Delete(std::result::Result<String, String>),
 }
-
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
 }
 fn control(hwnd: HWND, id: i32) -> Option<HWND> {
     unsafe { GetDlgItem(hwnd, id).ok() }
 }
-fn set_text(hwnd: HWND, id: i32, value: &str) {
+fn set_text(hwnd: HWND, id: i32, text: &str) {
     if let Some(child) = control(hwnd, id) {
-        let value = wide(value);
+        let value = wide(text);
         unsafe {
             let _ = SetWindowTextW(child, PCWSTR(value.as_ptr()));
         }
     }
 }
 fn get_text(hwnd: HWND, id: i32) -> std::result::Result<String, String> {
-    let child = control(hwnd, id).ok_or_else(|| "Missing Cloudflare field.".to_string())?;
+    let child = control(hwnd, id).ok_or("Cloudflare field is missing.")?;
     let size = unsafe { GetWindowTextLengthW(child) };
     if !(0..=512).contains(&size) {
-        return Err("Cloudflare field is too long.".to_string());
+        return Err("Cloudflare field is too long.".into());
     }
     let mut buffer = vec![0u16; size as usize + 1];
     let count = unsafe { GetWindowTextW(child, &mut buffer) };
@@ -120,6 +117,18 @@ fn create(hwnd: HWND, class: PCWSTR, id: i32, text: &str, style: WINDOW_STYLE) -
         )
     }
 }
+fn button(hwnd: HWND, id: i32, text: &str) -> Result<HWND> {
+    create(
+        hwnd,
+        w!("BUTTON"),
+        id,
+        text,
+        WINDOW_STYLE(WS_TABSTOP.0 | BS_PUSHBUTTON as u32),
+    )
+}
+fn label(hwnd: HWND, id: i32, text: &str) -> Result<HWND> {
+    create(hwnd, w!("STATIC"), id, text, WINDOW_STYLE(0))
+}
 fn edit(hwnd: HWND, id: i32, password: bool) -> Result<HWND> {
     create(
         hwnd,
@@ -133,18 +142,6 @@ fn edit(hwnd: HWND, id: i32, password: bool) -> Result<HWND> {
                 | if password { ES_PASSWORD as u32 } else { 0 },
         ),
     )
-}
-fn button(hwnd: HWND, id: i32, text: &str) -> Result<HWND> {
-    create(
-        hwnd,
-        w!("BUTTON"),
-        id,
-        text,
-        WINDOW_STYLE(WS_TABSTOP.0 | BS_PUSHBUTTON as u32),
-    )
-}
-fn label(hwnd: HWND, id: i32, text: &str) -> Result<HWND> {
-    create(hwnd, w!("STATIC"), id, text, WINDOW_STYLE(0))
 }
 fn place(hwnd: HWND, id: i32, rect: (i32, i32, i32, i32), dpi: u32, scroll: i32) {
     let Some(child) = control(hwnd, id) else {
@@ -168,36 +165,19 @@ fn layout(hwnd: HWND, state: &mut State) {
     unsafe {
         let _ = GetClientRect(hwnd, &mut client);
     }
-    if state.guided {
-        let right = (client.right * 96 / dpi as i32 - 20).max(300);
-        let wide = right - 20;
-        let rows: &[(i32, Position)] = if state.setup_started {
-            &[
-                (1100, (20, 15, wide, 30)),
-                (1101, (20, 53, wide, 47)),
-                (ID_DEPLOY, (20, 106, 225, 32)),
-                (1103, (20, 153, wide, 24)),
-                (ID_UPLOAD_TOKEN, (20, 180, wide - 96, 30)),
-                (ID_COPY_UPLOAD, (right - 88, 180, 88, 30)),
-                (1104, (20, 218, wide, 24)),
-                (ID_ADMIN_TOKEN, (20, 245, wide - 96, 30)),
-                (ID_COPY_ADMIN, (right - 88, 245, 88, 30)),
-                (1102, (20, 287, wide, 24)),
-                (ID_ORIGIN, (20, 313, wide, 30)),
-                (ID_STATUS, (20, 361, wide, 84)),
-                (ID_PAIR, (20, 461, 187, 34)),
-                (ID_CLOSE, (right - 116, 461, 116, 34)),
-            ]
-        } else {
-            &[
-                (1100, (20, 18, wide, 30)),
-                (1101, (20, 60, wide, 62)),
-                (ID_DEPLOY, (20, 136, 270, 36)),
-                (ID_STATUS, (20, 185, wide, 61)),
-                (ID_CLOSE, (right - 116, 255, 116, 32)),
-            ]
-        };
-        for &(id, rect) in rows {
+    let right = (client.right * 96 / dpi as i32 - 20).max(300);
+    let width = right - 20;
+    if state.settings.cloud_url.is_none() {
+        for (id, rect) in [
+            (1100, (20, 15, width, 34)),
+            (1101, (20, 56, width, 66)),
+            (ID_CONNECT, (20, 131, 260, 36)),
+            (1102, (20, 178, width, 25)),
+            (ID_ACCOUNT, (20, 206, width, 180)),
+            (ID_INSTALL, (20, 247, 260, 36)),
+            (ID_STATUS, (20, 294, width, 66)),
+            (ID_CLOSE, (right - 114, 370, 114, 32)),
+        ] {
             place(hwnd, id, rect, dpi, 0);
         }
         return;
@@ -216,48 +196,32 @@ fn layout(hwnd: HWND, state: &mut State) {
     unsafe {
         SetScrollInfo(hwnd, SB_VERT, &info, true);
     }
-    let right = (client.right * 96 / dpi as i32 - 20).max(300);
-    let wide = right - 20;
-    type Position = (i32, i32, i32, i32);
-    let rows: &[(i32, Position)] = &[
-        (1100, (20, 14, wide, 28)),
-        (ID_GENERATE, (20, 50, 208, 30)),
-        (ID_DEPLOY, (238, 50, 202, 30)),
-        (1101, (20, 91, wide, 22)),
-        (1102, (20, 123, 120, 22)),
-        (ID_ORIGIN, (145, 120, wide - 125, 28)),
-        (1103, (20, 159, 120, 22)),
-        (ID_UPLOAD_TOKEN, (145, 156, wide - 235, 28)),
-        (ID_COPY_UPLOAD, (right - 82, 156, 82, 28)),
-        (1104, (20, 195, 120, 22)),
-        (ID_ADMIN_TOKEN, (145, 192, wide - 235, 28)),
-        (ID_COPY_ADMIN, (right - 82, 192, 82, 28)),
-        (1105, (20, 231, 120, 22)),
-        (ID_PASSWORD, (145, 228, wide - 125, 28)),
-        (ID_PAIR, (20, 270, 138, 30)),
-        (ID_FORGET, (169, 270, 138, 30)),
-        (ID_STATUS, (20, 306, wide, 42)),
-        (1106, (20, 360, wide, 26)),
-        (ID_REFRESH, (right - 115, 358, 115, 28)),
-        (ID_STATS, (20, 392, wide, 96)),
-        (1107, (20, 503, wide, 26)),
-        (1108, (20, 674, 135, 24)),
-        (ID_MODE, (158, 670, 290, 150)),
-        (ID_SAVE_LIMITS, (right - 153, 708, 153, 30)),
-        (1110, (20, 754, wide, 26)),
-        (ID_IMAGES, (20, 784, wide, 130)),
-        (ID_DELETE, (20, 922, 180, 30)),
-        (1109, (20, 960, wide, 25)),
-        (ID_CLOSE, (right - 112, 990, 112, 30)),
-    ];
-    for &(id, rect) in rows {
+    for (id, rect) in [
+        (1100, (20, 14, width, 30)),
+        (1101, (20, 52, width, 43)),
+        (ID_FORGET, (20, 101, 194, 30)),
+        (ID_STATUS, (20, 146, width, 48)),
+        (1103, (20, 207, width, 26)),
+        (ID_REFRESH, (right - 113, 203, 113, 30)),
+        (ID_STATS, (20, 245, width, 113)),
+        (1104, (20, 370, width, 26)),
+        (ID_PASSWORD, (20, 406, width - 166, 29)),
+        (ID_SAVE_PASSWORD, (right - 155, 406, 155, 29)),
+        (1105, (20, 459, width, 27)),
+        (1106, (20, 630, 130, 24)),
+        (ID_MODE, (158, 626, 290, 150)),
+        (ID_SAVE_LIMITS, (right - 153, 664, 153, 30)),
+        (1107, (20, 709, width, 27)),
+        (ID_IMAGES, (20, 741, width, 100)),
+        (ID_DELETE, (20, 848, 180, 30)),
+        (1108, (20, 885, width, 22)),
+        (ID_CLOSE, (right - 112, 908, 112, 30)),
+    ] {
         place(hwnd, id, rect, dpi, state.scroll);
     }
     for (index, _) in LIMITS.iter().enumerate() {
-        let col = index % 2;
-        let row = index / 2;
-        let x = 20 + col as i32 * 310;
-        let y = 532 + row as i32 * 34;
+        let x = 20 + (index % 2) as i32 * 310;
+        let y = 493 + (index / 2) as i32 * 33;
         place(
             hwnd,
             1200 + index as i32,
@@ -277,53 +241,14 @@ fn layout(hwnd: HWND, state: &mut State) {
         let _ = InvalidateRect(hwnd, None, true);
     }
 }
-fn show_guided_step(hwnd: HWND, state: &mut State) {
-    for id in [
-        1102,
-        ID_ORIGIN,
-        1103,
-        ID_UPLOAD_TOKEN,
-        ID_COPY_UPLOAD,
-        1104,
-        ID_ADMIN_TOKEN,
-        ID_COPY_ADMIN,
-        ID_PAIR,
-    ] {
+fn account_controls(hwnd: HWND, visible: bool) {
+    for id in [1102, ID_ACCOUNT, ID_INSTALL] {
         if let Some(child) = control(hwnd, id) {
             unsafe {
-                let _ = ShowWindow(
-                    child,
-                    if state.setup_started {
-                        SW_SHOW
-                    } else {
-                        SW_HIDE
-                    },
-                );
+                let _ = ShowWindow(child, if visible { SW_SHOW } else { SW_HIDE });
             }
         }
     }
-    set_text(
-        hwnd,
-        ID_DEPLOY,
-        if state.setup_started {
-            "Cloudflare sayfasını aç"
-        } else {
-            "Kurulumu başlat"
-        },
-    );
-    let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd) }.max(96);
-    unsafe {
-        let _ = SetWindowPos(
-            hwnd,
-            None,
-            0,
-            0,
-            560 * dpi as i32 / 96,
-            (if state.setup_started { 570 } else { 330 }) * dpi as i32 / 96,
-            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
-        );
-    }
-    layout(hwnd, state);
 }
 fn set_status(hwnd: HWND, text: &str) {
     set_text(hwnd, ID_STATUS, text);
@@ -331,17 +256,17 @@ fn set_status(hwnd: HWND, text: &str) {
 fn set_busy(hwnd: HWND, state: &mut State, busy: bool) {
     state.pending = busy;
     for id in [
-        ID_PAIR,
+        ID_CONNECT,
+        ID_INSTALL,
         ID_REFRESH,
         ID_SAVE_LIMITS,
+        ID_SAVE_PASSWORD,
         ID_DELETE,
         ID_FORGET,
-        ID_DEPLOY,
-        ID_GENERATE,
     ] {
-        if let Some(control) = control(hwnd, id) {
+        if let Some(child) = control(hwnd, id) {
             unsafe {
-                let _ = EnableWindow(control, !busy);
+                let _ = EnableWindow(child, !busy);
             }
         }
     }
@@ -351,17 +276,18 @@ fn start(hwnd: HWND, state: &mut State, task: impl FnOnce() -> Completion + Send
         return;
     }
     set_busy(hwnd, state, true);
-    let result = state.response.clone();
+    let output = state.response.clone();
     let window = hwnd.0 as usize;
-    match std::thread::Builder::new()
+    if let Err(error) = std::thread::Builder::new()
         .name("isolmass-cloud-settings".into())
         .spawn(move || {
-            let outcome = task();
-            if let Ok(mut slot) = result.lock() {
-                *slot = Some(outcome);
-            } else {
-                crate::diagnostics::record("cloud settings", "Cloud response lock failed.");
-                return;
+            let completion = task();
+            match output.lock() {
+                Ok(mut slot) => *slot = Some(completion),
+                Err(_) => {
+                    crate::diagnostics::record("cloud settings", "Cloud response lock failed.");
+                    return;
+                }
             }
             if let Err(error) = unsafe {
                 PostMessageW(
@@ -376,79 +302,53 @@ fn start(hwnd: HWND, state: &mut State, task: impl FnOnce() -> Completion + Send
                     &format!("Cloud response notification failed: {error}"),
                 );
             }
-        }) {
-        Ok(_) => {}
-        Err(error) => {
-            set_busy(hwnd, state, false);
-            set_status(hwnd, &format!("Could not start request: {error}"));
-        }
+        })
+    {
+        set_busy(hwnd, state, false);
+        set_status(
+            hwnd,
+            &format!("Could not start Cloudflare request: {error}"),
+        );
     }
 }
-fn connect(hwnd: HWND, state: &mut State) {
-    let data = (|| {
-        let credentials = CloudCredentials {
-            origin: get_text(hwnd, ID_ORIGIN)?,
-            upload_token: get_text(hwnd, ID_UPLOAD_TOKEN)?,
-            admin_token: get_text(hwnd, ID_ADMIN_TOKEN)?,
-            share_password: if state.guided {
-                None
-            } else {
-                match get_text(hwnd, ID_PASSWORD)?.as_str() {
-                    "" => None,
-                    text => Some(text.to_string()),
-                }
-            },
-        };
-        if !cloudflare_setup::valid_cloud_origin(&credentials.origin) {
-            return Err("Cloudflare kurulumunda verilen https://...workers.dev adresini yapıştırın; alan adı gerekmez.".to_string());
-        }
-        Ok(credentials)
-    })();
-    let credentials = match data {
-        Ok(data) => data,
-        Err(error) => {
-            crate::ui::error(hwnd, "Cloudflare setup", &error);
-            return;
-        }
-    };
-    set_status(hwnd, "Connecting to your Worker…");
+fn begin_authorization(hwnd: HWND, state: &mut State) {
+    state.cancel.store(false, Ordering::Relaxed);
+    state.authorizing = true;
+    set_status(
+        hwnd,
+        "Tarayıcıda Cloudflare'a giriş yapıp izin verin. Görüntü bu sırada yüklenmez.",
+    );
+    let cancel = state.cancel.clone();
     start(hwnd, state, move || {
-        let result = cloudflare_setup::api_request(
-            &credentials.origin,
-            "/api/setup",
-            "POST",
-            &credentials.admin_token,
-            None,
-            None,
-            RequestBody::Bytes(&[]),
-        )
-        .and_then(|(status, data)| {
-            if status == 200 {
-                Ok(credentials)
-            } else if status == 401 {
-                Err("ADMIN_TOKEN Cloudflare'daki gizli alanla eşleşmiyor. Buradaki Kopyala düğmesiyle doğru anahtarı Worker sırrına girin.".to_string())
-            } else {
-                let message = serde_json::from_slice::<Value>(&data)
-                    .ok()
-                    .and_then(|value| {
-                        value
-                            .get("error")
-                            .and_then(Value::as_str)
-                            .map(str::to_owned)
-                    })
-                    .unwrap_or_else(|| format!("Worker returned HTTP {status}."));
-                Err(message)
-            }
-        });
-        Completion::Pair(result)
+        Completion::Authorization(cloudflare_oauth::authorize(&cancel))
+    });
+}
+fn begin_install(hwnd: HWND, state: &mut State, account: Account) {
+    let Some(auth) = state.authorization.take() else {
+        return;
+    };
+    state.authorizing = false;
+    set_status(
+        hwnd,
+        &format!(
+            "{} hesabına yeni Worker kuruluyor; pencereyi kapatmayın…",
+            account.name
+        ),
+    );
+    let cancel = state.cancel.clone();
+    start(hwnd, state, move || {
+        Completion::Install(cloudflare_oauth::install(
+            &auth.access_token,
+            &account,
+            &cancel,
+        ))
     });
 }
 fn refresh(hwnd: HWND, state: &mut State) {
     let Some(origin) = state.settings.cloud_url.clone() else {
-        set_status(hwnd, "Pair a Worker before loading statistics.");
         return;
     };
-    set_status(hwnd, "Loading statistics and images…");
+    set_status(hwnd, "İstatistikler ve resimler yükleniyor…");
     start(hwnd, state, move || {
         Completion::Refresh(
             cloudflare_setup::admin_json(&origin, "/api/stats", "GET", None).and_then(|stats| {
@@ -460,92 +360,75 @@ fn refresh(hwnd: HWND, state: &mut State) {
 }
 fn save_limits(hwnd: HWND, state: &mut State) {
     let Some(origin) = state.settings.cloud_url.clone() else {
-        crate::ui::error(hwnd, "Cloudflare", "Connect your Worker first.");
         return;
     };
     if !state.loaded {
         crate::ui::error(
             hwnd,
             "Cloudflare",
-            "Load the current limits before changing them.",
+            "Önce güncel sınırları Yenile ile yükleyin.",
         );
         return;
     }
-    let mut object = serde_json::Map::new();
-    for (index, (_label, field, multiplier)) in LIMITS.iter().enumerate() {
-        let text = match get_text(hwnd, ID_LIMIT_FIRST + index as i32) {
-            Ok(text) => text,
-            Err(error) => {
-                crate::ui::error(hwnd, "Invalid limit", &error);
-                return;
-            }
-        };
-        let Some(value) = text
-            .parse::<u64>()
+    let mut values = serde_json::Map::new();
+    for (index, (_, field, multiplier)) in LIMITS.iter().enumerate() {
+        let parsed = get_text(hwnd, ID_LIMIT_FIRST + index as i32)
             .ok()
-            .and_then(|number| number.checked_mul(*multiplier))
-        else {
+            .and_then(|text| text.parse::<u64>().ok())
+            .and_then(|number| number.checked_mul(*multiplier));
+        let Some(number) = parsed else {
             crate::ui::error(
                 hwnd,
-                "Invalid limit",
-                "Enter whole positive numbers for every limit.",
+                "Geçersiz sınır",
+                "Bütün alanlara pozitif tam sayı girin.",
             );
             return;
         };
-        object.insert((*field).to_string(), json!(value));
+        values.insert((*field).into(), json!(number));
     }
-    let mode = if let Some(combo) = control(hwnd, ID_MODE) {
-        unsafe { SendMessageW(combo, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0 }
-    } else {
-        -1
-    };
-    let action = match mode {
+    let choice = control(hwnd, ID_MODE)
+        .map(|combo| unsafe { SendMessageW(combo, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0 })
+        .unwrap_or(-1);
+    let action = match choice {
         0 => "warn",
         1 => "block_upload",
         2 => "block_all",
         _ => {
-            crate::ui::error(hwnd, "Cloudflare", "Select a limit action.");
+            crate::ui::error(hwnd, "Cloudflare", "Sınırda davranışı seçin.");
             return;
         }
     };
-    object.insert("limit_action".into(), json!(action));
-    let value = Value::Object(object);
-    set_status(hwnd, "Saving Worker limits…");
+    values.insert("limit_action".into(), json!(action));
+    set_status(hwnd, "Sınırlar kaydediliyor…");
     start(hwnd, state, move || {
         Completion::Limits(cloudflare_setup::admin_json(
             &origin,
             "/api/settings",
             "PUT",
-            Some(&value),
+            Some(&Value::Object(values)),
         ))
     });
 }
 fn show_stats(hwnd: HWND, state: &mut State, stats: &Value, images: &Value) {
-    let integer = |record: &Value, key: &str| record.get(key).and_then(Value::as_u64).unwrap_or(0);
+    let count = |value: &Value, key: &str| value.get(key).and_then(Value::as_u64).unwrap_or(0);
     let daily = &stats["daily"];
     let monthly = &stats["monthly"];
     let stored = &stats["images"];
-    let active = integer(stored, "active");
-    let bytes = integer(stored, "stored_bytes");
-    let estimate = integer(&stats["estimates"], "worker_requests");
-    let max_uploads = integer(&stats["settings"], "daily_upload_limit").max(1);
-    let max_views = integer(&stats["settings"], "daily_view_limit").max(1);
-    let upload_percent = integer(daily, "uploads").saturating_mul(100) / max_uploads;
-    let view_percent = integer(daily, "views").saturating_mul(100) / max_views;
-    let paid_usd = stats["estimates"]["paid_usd"].as_f64().unwrap_or(0.0);
+    let usage = stored["stored_bytes"].as_u64().unwrap_or(0);
     set_text(
         hwnd,
         ID_STATS,
         &format!(
-            "Bugün: {} yükleme · {} görüntülenme     Bu ay: {} yükleme · {} görüntülenme\r\nAktif: {active} resim · {:.1} MB     İstek (ay): {estimate}\r\nGünlük sınır: yükleme %{upload_percent} · görüntüleme %{view_percent}\r\nÜcretli plan tahmini: ${paid_usd:.2} / ay; Free plan ve gerçek fatura farklı olabilir.",
-            integer(daily, "uploads"),
-            integer(daily, "views"),
-            integer(monthly, "uploads"),
-            integer(monthly, "views"),
-            bytes as f64 / 1_048_576.0
+            "Bugün: {} yükleme · {} görüntülenme\r\nBu ay: {} yükleme · {} görüntülenme\r\nAktif resim: {} · {:.1} MB\r\nCloudflare Free hesabının genel kullanımını kendi panelinizden izleyin.",
+            count(daily, "uploads"),
+            count(daily, "views"),
+            count(monthly, "uploads"),
+            count(monthly, "views"),
+            count(stored, "active"),
+            usage as f64 / 1_048_576.0
         ),
     );
-    for (index, (_label, field, multiplier)) in LIMITS.iter().enumerate() {
+    for (index, (_, field, multiplier)) in LIMITS.iter().enumerate() {
         if let Some(number) = stats["settings"][field].as_u64() {
             set_text(
                 hwnd,
@@ -554,7 +437,7 @@ fn show_stats(hwnd: HWND, state: &mut State, stats: &Value, images: &Value) {
             );
         }
     }
-    let choice = match stats["settings"]["limit_action"].as_str() {
+    let mode = match stats["settings"]["limit_action"].as_str() {
         Some("warn") => 0,
         Some("block_upload") => 1,
         Some("block_all") => 2,
@@ -562,7 +445,7 @@ fn show_stats(hwnd: HWND, state: &mut State, stats: &Value, images: &Value) {
     };
     if let Some(combo) = control(hwnd, ID_MODE) {
         unsafe {
-            SendMessageW(combo, CB_SETCURSEL, WPARAM(choice as usize), LPARAM(0));
+            SendMessageW(combo, CB_SETCURSEL, WPARAM(mode as usize), LPARAM(0));
         }
     }
     state.loaded = true;
@@ -575,17 +458,17 @@ fn show_stats(hwnd: HWND, state: &mut State, stats: &Value, images: &Value) {
             for record in records {
                 if let Some(id) = record["id"].as_str() {
                     state.images.push(id.to_string());
-                    let text = wide(&format!(
+                    let label = wide(&format!(
                         "{}… · {} görüntülenme",
                         &id[..8.min(id.len())],
-                        integer(record, "views")
+                        count(record, "views")
                     ));
                     unsafe {
                         SendMessageW(
                             list,
                             LB_ADDSTRING,
                             WPARAM(0),
-                            LPARAM(text.as_ptr() as isize),
+                            LPARAM(label.as_ptr() as isize),
                         );
                     }
                 }
@@ -604,7 +487,7 @@ fn delete_image(hwnd: HWND, state: &mut State) {
     let index = unsafe { SendMessageW(list, LB_GETCURSEL, WPARAM(0), LPARAM(0)).0 };
     let Some(id) = usize::try_from(index)
         .ok()
-        .and_then(|index| state.images.get(index))
+        .and_then(|i| state.images.get(i))
         .cloned()
     else {
         crate::ui::error(hwnd, "Resim sil", "Önce listeden bir resim seçin.");
@@ -613,7 +496,7 @@ fn delete_image(hwnd: HWND, state: &mut State) {
     if !crate::ui::confirm(
         hwnd,
         "Resmi sil",
-        "Bu bağlantı geçersiz olacak. İşlem geri alınamaz. Devam edilsin mi?",
+        "Bağlantı geri alınamaz biçimde kapanacak. Devam edilsin mi?",
     ) {
         return;
     }
@@ -625,152 +508,110 @@ fn delete_image(hwnd: HWND, state: &mut State) {
         )
     });
 }
-fn start_guided_setup(hwnd: HWND, state: &mut State) -> std::result::Result<bool, String> {
-    let tokens = match cloudflare_setup::load_pending_tokens() {
-        Ok(Some(tokens)) => tokens,
-        Ok(None) => cloudflare_setup::create_pending_tokens()?,
-        Err(error) => {
-            if !crate::ui::confirm(
+fn save_password(hwnd: HWND, state: &mut State) {
+    let Some(origin) = state.settings.cloud_url.as_deref() else {
+        return;
+    };
+    let password = match get_text(hwnd, ID_PASSWORD) {
+        Ok(value) if value.is_empty() => None,
+        Ok(value)
+            if value.chars().count() >= 12
+                && value.len() <= 128
+                && !value.chars().any(char::is_control) =>
+        {
+            Some(value)
+        }
+        Ok(_) => {
+            crate::ui::error(
                 hwnd,
-                "Kurulumu baştan başlat",
-                &format!(
-                    "{error}\nEski Cloudflare anahtarları artık çalışmayacak. Yeni anahtar oluşturulsun mu?"
-                ),
-            ) {
-                return Ok(false);
-            }
-            cloudflare_setup::create_pending_tokens()?
+                "Resim şifresi",
+                "Şifre en az 12 karakter ve en fazla 128 UTF-8 bayt olmalı; isterseniz boş bırakın.",
+            );
+            return;
+        }
+        Err(error) => {
+            crate::ui::error(hwnd, "Resim şifresi", &error);
+            return;
         }
     };
-    set_text(hwnd, ID_UPLOAD_TOKEN, &tokens.upload_token);
-    set_text(hwnd, ID_ADMIN_TOKEN, &tokens.admin_token);
-    state.setup_started = true;
-    show_guided_step(hwnd, state);
-    set_status(
-        hwnd,
-        "Cloudflare'da giriş yapıp R2'yi onaylayın. İki anahtarı ayrı sır alanlarına yapıştırın. Kurulum bitince Worker adresini aşağıya girin.",
-    );
-    Ok(true)
+    match cloudflare_setup::load_credentials(origin).and_then(|mut credentials| {
+        credentials.share_password = password;
+        cloudflare_setup::save_credentials(&credentials)
+    }) {
+        Ok(()) => set_status(
+            hwnd,
+            "Yeni yüklemelerin şifresi bu bilgisayarda korumalı saklandı.",
+        ),
+        Err(error) => crate::ui::error(hwnd, "Resim şifresi", &error),
+    }
 }
-
+fn disconnect(hwnd: HWND, state: &mut State) {
+    if !crate::ui::confirm(
+        hwnd,
+        "Bağlantıyı kaldır",
+        "Yalnızca bu bilgisayardaki Cloudflare bağlantısı silinecek; buluttaki Worker ve resimler kalacak. Devam edilsin mi?",
+    ) {
+        return;
+    }
+    let mut changed = state.settings.clone();
+    changed.cloud_url = None;
+    if let Err(error) = changed.save() {
+        crate::ui::error(hwnd, "Ayarlar kaydedilemedi", &error.to_string());
+        return;
+    }
+    if let Err(error) = cloudflare_setup::forget_credentials() {
+        crate::ui::error(hwnd, "Kimlik bilgileri silinemedi", &error);
+        return;
+    }
+    state.settings = changed;
+    state.saved = true;
+    unsafe {
+        let _ = DestroyWindow(hwnd);
+    }
+}
 fn command(hwnd: HWND, state: &mut State, id: i32) {
     if state.pending && id != ID_CLOSE {
         return;
     }
     match id {
-        ID_GENERATE => match (
-            cloudflare_setup::generate_token(),
-            cloudflare_setup::generate_token(),
-        ) {
-            (Ok(upload), Ok(admin)) => {
-                set_text(hwnd, ID_UPLOAD_TOKEN, &upload);
-                set_text(hwnd, ID_ADMIN_TOKEN, &admin);
-                set_status(
-                    hwnd,
-                    "Yeni anahtarlar hazır. Cloudflare formuna iki anahtarı yapıştırın; ardından Worker adresini eşleştirin.",
-                );
-            }
-            (Err(error), _) | (_, Err(error)) => {
-                crate::ui::error(hwnd, "Anahtar üretilemedi", &error)
-            }
-        },
-        ID_COPY_UPLOAD | ID_COPY_ADMIN => {
-            match get_text(
-                hwnd,
-                if id == ID_COPY_UPLOAD {
-                    ID_UPLOAD_TOKEN
-                } else {
-                    ID_ADMIN_TOKEN
-                },
-            )
-            .and_then(|token| {
-                if token.is_empty() {
-                    Err("Önce anahtar oluşturun veya yazın.".to_string())
-                } else {
-                    Ok(token)
-                }
-            })
-            .and_then(|token| {
-                crate::clipboard::copy_text_to_clipboard(Some(hwnd), &token)
-                    .map_err(|error| error.to_string())
-            }) {
-                Ok(()) => set_status(
-                    hwnd,
-                    "Anahtar panoda. Yalnızca Cloudflare sır alanına yapıştırın.",
-                ),
-                Err(error) => crate::ui::error(hwnd, "Pano", &error),
+        ID_CONNECT => begin_authorization(hwnd, state),
+        ID_INSTALL => {
+            let selection = control(hwnd, ID_ACCOUNT)
+                .map(|combo| unsafe { SendMessageW(combo, CB_GETCURSEL, WPARAM(0), LPARAM(0)).0 });
+            let selected = selection
+                .and_then(|i| usize::try_from(i).ok())
+                .and_then(|i| state.authorization.as_ref()?.accounts.get(i))
+                .cloned();
+            if let Some(account) = selected {
+                begin_install(hwnd, state, account);
+            } else {
+                crate::ui::error(hwnd, "Cloudflare", "Kurulum yapılacak hesabı seçin.");
             }
         }
-        ID_DEPLOY => {
-            if state.guided {
-                match start_guided_setup(hwnd, state) {
-                    Ok(true) => {}
-                    Ok(false) => return,
-                    Err(error) => {
-                        crate::ui::error(hwnd, "Kurulum başlatılamadı", &error);
-                        return;
-                    }
-                }
-            }
-            let url = wide(DEPLOY_URL);
-            unsafe {
-                let result = ShellExecuteW(
-                    hwnd,
-                    w!("open"),
-                    PCWSTR(url.as_ptr()),
-                    PCWSTR::null(),
-                    PCWSTR::null(),
-                    SW_SHOWNORMAL,
-                );
-                if result.0 as isize <= 32 {
-                    crate::ui::error(
-                        hwnd,
-                        "Cloudflare kurulumu",
-                        "Tarayıcı açılamadı. Kurulum bağlantısını dokümanlardan açın.",
-                    );
-                }
-            }
-        }
-        ID_PAIR => connect(hwnd, state),
         ID_REFRESH => refresh(hwnd, state),
         ID_SAVE_LIMITS => save_limits(hwnd, state),
+        ID_SAVE_PASSWORD => save_password(hwnd, state),
         ID_DELETE => delete_image(hwnd, state),
-        ID_FORGET => {
-            if !crate::ui::confirm(
-                hwnd,
-                "Bağlantıyı kaldır",
-                "Yalnızca bu bilgisayardaki Cloudflare bağlantısı silinecek; buluttaki resimler kalacak. Devam edilsin mi?",
-            ) {
-                return;
-            }
-            match cloudflare_setup::forget_credentials() {
-                Ok(()) => {
-                    let mut changed = state.settings.clone();
-                    changed.cloud_url = None;
-                    if let Err(error) = changed.save() {
-                        crate::ui::error(hwnd, "Ayarlar kaydedilemedi", &error.to_string());
-                        return;
-                    }
-                    state.settings = changed;
-                    state.saved = true;
-                    state.loaded = false;
-                    set_status(
-                        hwnd,
-                        "Yerel bağlantı kaldırıldı. Buluttaki resimler değişmedi.",
-                    );
-                    set_text(hwnd, ID_ORIGIN, "");
-                    set_text(hwnd, ID_UPLOAD_TOKEN, "");
-                    set_text(hwnd, ID_ADMIN_TOKEN, "");
-                    set_text(hwnd, ID_PASSWORD, "");
-                    set_text(hwnd, ID_STATS, "Bağlı bir Worker yok.");
-                }
-                Err(error) => crate::ui::error(hwnd, "Bağlantı silinemedi", &error),
-            }
-        }
-        ID_CLOSE => unsafe {
-            let _ = DestroyWindow(hwnd);
-        },
+        ID_FORGET => disconnect(hwnd, state),
+        ID_CLOSE => close(hwnd, state),
         _ => {}
+    }
+}
+fn close(hwnd: HWND, state: &mut State) {
+    if state.pending {
+        if state.authorizing {
+            state.cancel.store(true, Ordering::Relaxed);
+            set_status(hwnd, "Cloudflare giriş isteği iptal ediliyor…");
+        } else {
+            set_status(
+                hwnd,
+                "Cloudflare işlemi bitmeden pencere kapatılamaz; birkaç saniye bekleyin.",
+            );
+        }
+        return;
+    }
+    unsafe {
+        let _ = DestroyWindow(hwnd);
     }
 }
 unsafe extern "system" fn wnd_proc(
@@ -784,31 +625,79 @@ unsafe extern "system" fn wnd_proc(
         WM_CLOUD_RESULT if !pointer.is_null() => {
             let state = unsafe { &mut *pointer };
             set_busy(hwnd, state, false);
-            let completion = state.response.lock().ok().and_then(|mut slot| slot.take());
-            match completion {
-                Some(Completion::Pair(Ok(credentials))) => {
+            state.authorizing = false;
+            let response = state.response.lock().ok().and_then(|mut slot| slot.take());
+            match response {
+                Some(Completion::Authorization(Ok(auth)))
+                    if state.cancel.load(Ordering::Relaxed) =>
+                {
+                    drop(auth);
+                    set_status(
+                        hwnd,
+                        "Cloudflare bağlantısı iptal edildi; görüntü yerelde kaldı.",
+                    );
+                }
+                Some(Completion::Authorization(Ok(auth))) => {
+                    let only = auth.accounts.len() == 1;
+                    if let Some(combo) = control(hwnd, ID_ACCOUNT) {
+                        unsafe {
+                            SendMessageW(combo, CB_RESETCONTENT, WPARAM(0), LPARAM(0));
+                        }
+                        for account in &auth.accounts {
+                            let text = wide(&format!("{} · {}", account.name, &account.id[24..]));
+                            unsafe {
+                                SendMessageW(
+                                    combo,
+                                    CB_ADDSTRING,
+                                    WPARAM(0),
+                                    LPARAM(text.as_ptr() as isize),
+                                );
+                            }
+                        }
+                        unsafe {
+                            SendMessageW(combo, CB_SETCURSEL, WPARAM(0), LPARAM(0));
+                        }
+                    }
+                    state.authorization = Some(auth);
+                    if only {
+                        if let Some(account) = state
+                            .authorization
+                            .as_ref()
+                            .and_then(|auth| auth.accounts.first())
+                            .cloned()
+                        {
+                            begin_install(hwnd, state, account);
+                        }
+                    } else {
+                        account_controls(hwnd, true);
+                        set_status(
+                            hwnd,
+                            "Hesabı seçin; yalnızca seçilen hesabınızda yeni Worker oluşturulur.",
+                        );
+                    }
+                }
+                Some(Completion::Install(Ok(credentials))) => {
                     let mut updated = state.settings.clone();
                     updated.cloud_url = Some(credentials.origin.clone());
                     if let Err(error) = cloudflare_setup::save_credentials(&credentials)
                         .and_then(|()| updated.save().map_err(|error| error.to_string()))
                     {
+                        set_status(hwnd, "Worker kuruldu ama yerel bağlantı kaydedilemedi.");
                         crate::ui::error(hwnd, "Kurulum kaydedilemedi", &error);
                     } else {
                         state.settings = updated;
                         state.saved = true;
-                        if let Err(error) = cloudflare_setup::forget_pending_tokens() {
-                            crate::diagnostics::record("Cloudflare setup cleanup", &error);
-                        }
-                        if state.guided {
-                            unsafe {
-                                let _ = DestroyWindow(hwnd);
-                            }
-                        } else {
-                            set_status(
-                                hwnd,
-                                "Cloudflare kurulumu bağlandı; istatistikler yükleniyor…",
-                            );
-                            refresh(hwnd, state);
+                        crate::ui::info(
+                            hwnd,
+                            "Cloudflare hazır",
+                            if state.for_upload {
+                                "Bağlantı kuruldu. Görüntü şimdi yükleniyor."
+                            } else {
+                                "Bağlantı kuruldu. Artık Yükle düğmesini kullanabilirsiniz."
+                            },
+                        );
+                        unsafe {
+                            let _ = DestroyWindow(hwnd);
                         }
                     }
                 }
@@ -820,23 +709,28 @@ unsafe extern "system" fn wnd_proc(
                     refresh(hwnd, state);
                 }
                 Some(Completion::Delete(Ok(_))) => {
-                    set_status(hwnd, "Bağlantı silindi.");
+                    set_status(hwnd, "Resim silindi.");
                     refresh(hwnd, state);
                 }
-                Some(Completion::Pair(Err(error)))
+                Some(Completion::Install(Err(error))) => {
+                    account_controls(hwnd, false);
+                    set_status(
+                        hwnd,
+                        "Kurulum tamamlanamadı. Yeniden Cloudflare ile devam edin.",
+                    );
+                    crate::ui::error(hwnd, "Cloudflare", &error);
+                }
+                Some(Completion::Authorization(Err(error)))
                 | Some(Completion::Refresh(Err(error)))
                 | Some(Completion::Limits(Err(error)))
                 | Some(Completion::Delete(Err(error))) => {
-                    set_status(hwnd, "İşlem başarısız. Ayrıntı için uyarıya bakın.");
+                    set_status(hwnd, "Cloudflare işlemi başarısız; ayrıntı uyarıda.");
                     crate::ui::error(hwnd, "Cloudflare", &error);
                 }
-                None => {
-                    set_status(hwnd, "Sunucudan yanıt alınamadı.");
-                    crate::diagnostics::record(
-                        "cloud settings",
-                        "Completion message without response.",
-                    );
-                }
+                None => crate::diagnostics::record(
+                    "cloud settings",
+                    "Completion message without response.",
+                ),
             }
             LRESULT(0)
         }
@@ -875,10 +769,8 @@ unsafe extern "system" fn wnd_proc(
             command(hwnd, unsafe { &mut *pointer }, (wparam.0 & 0xffff) as i32);
             LRESULT(0)
         }
-        WM_CLOSE => {
-            unsafe {
-                let _ = DestroyWindow(hwnd);
-            }
+        WM_CLOSE if !pointer.is_null() => {
+            close(hwnd, unsafe { &mut *pointer });
             LRESULT(0)
         }
         WM_NCDESTROY => unsafe {
@@ -889,8 +781,8 @@ unsafe extern "system" fn wnd_proc(
     }
 }
 fn register() -> Result<()> {
-    static REGISTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    if REGISTERED.load(std::sync::atomic::Ordering::Acquire) {
+    static REGISTERED: AtomicBool = AtomicBool::new(false);
+    if REGISTERED.load(Ordering::Acquire) {
         return Ok(());
     }
     let class = WNDCLASSEXW {
@@ -909,96 +801,63 @@ fn register() -> Result<()> {
     {
         return Err(windows::core::Error::from_win32());
     }
-    REGISTERED.store(true, std::sync::atomic::Ordering::Release);
+    REGISTERED.store(true, Ordering::Release);
     Ok(())
 }
 fn build_controls(hwnd: HWND, state: &State) -> Result<()> {
-    if state.guided {
-        label(hwnd, 1100, "Görüntü paylaşımını aç")?;
+    if state.settings.cloud_url.is_none() {
+        label(hwnd, 1100, "Cloudflare hesabını bağla")?;
         label(
             hwnd,
             1101,
-            "Cloudflare kendi hesabınızda özel depolama kurar. Alan adı gerekmez; hesap ve R2 onayı sizdedir.",
+            "Görüntüler yalnızca kendi Cloudflare hesabınızdaki Worker'da saklanır. GitHub, alan adı ve anahtar kopyalama gerekmez. Cloudflare Free limitleri hesabın tamamına uygulanır.",
         )?;
-        button(hwnd, ID_DEPLOY, "Kurulumu başlat")?;
-        label(hwnd, 1103, "1. UPLOAD_TOKEN alanına yapıştırın")?;
-        let upload = edit(hwnd, ID_UPLOAD_TOKEN, true)?;
-        unsafe {
-            SendMessageW(
-                upload,
-                windows::Win32::UI::Controls::EM_SETREADONLY,
-                WPARAM(1),
-                LPARAM(0),
-            );
-        }
-        button(hwnd, ID_COPY_UPLOAD, "Kopyala")?;
-        label(hwnd, 1104, "2. ADMIN_TOKEN alanına yapıştırın")?;
-        let admin = edit(hwnd, ID_ADMIN_TOKEN, true)?;
-        unsafe {
-            SendMessageW(
-                admin,
-                windows::Win32::UI::Controls::EM_SETREADONLY,
-                WPARAM(1),
-                LPARAM(0),
-            );
-        }
-        button(hwnd, ID_COPY_ADMIN, "Kopyala")?;
-        label(
+        button(hwnd, ID_CONNECT, "Cloudflare ile devam et")?;
+        label(hwnd, 1102, "Kurulum yapılacak hesap")?;
+        create(
             hwnd,
-            1102,
-            "3. Cloudflare'ın verdiği Worker adresini yapıştırın",
+            w!("COMBOBOX"),
+            ID_ACCOUNT,
+            "",
+            WINDOW_STYLE(WS_TABSTOP.0 | CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0),
         )?;
-        edit(hwnd, ID_ORIGIN, false)?;
+        button(hwnd, ID_INSTALL, "Bu hesaba kur")?;
         label(
             hwnd,
             ID_STATUS,
-            "Başlamak için düğmeye basın. Görüntünüz kurulum sırasında yüklenmez.",
-        )?;
-        button(
-            hwnd,
-            ID_PAIR,
-            if state.for_upload {
-                "Bağlan ve yükle"
-            } else {
-                "Bağlan"
-            },
+            "Devam ederek Cloudflare giriş ve yetki ekranını açın. Görüntü henüz yüklenmez.",
         )?;
         button(hwnd, ID_CLOSE, "Vazgeç")?;
+        account_controls(hwnd, false);
     } else {
         label(hwnd, 1100, "Cloudflare ile paylaşım")?;
-        button(hwnd, ID_GENERATE, "Anahtar üret")?;
-        button(hwnd, ID_DEPLOY, "Cloudflare'da kur")?;
         label(
             hwnd,
             1101,
-            "Kendi hesabınızdaki Worker'a kurun; bu uygulama resimleri bizim sunucumuza göndermez.",
+            state.settings.cloud_url.as_deref().unwrap_or(""),
         )?;
-        label(hwnd, 1102, "Worker adresi")?;
-        edit(hwnd, ID_ORIGIN, false)?;
-        label(hwnd, 1103, "Yükleme anahtarı")?;
-        edit(hwnd, ID_UPLOAD_TOKEN, true)?;
-        button(hwnd, ID_COPY_UPLOAD, "Kopyala")?;
-        label(hwnd, 1104, "Yönetici anahtarı")?;
-        edit(hwnd, ID_ADMIN_TOKEN, true)?;
-        button(hwnd, ID_COPY_ADMIN, "Kopyala")?;
-        label(hwnd, 1105, "Resim şifresi")?;
-        edit(hwnd, ID_PASSWORD, true)?;
-        button(hwnd, ID_PAIR, "Eşleştir")?;
         button(hwnd, ID_FORGET, "Bağlantıyı kaldır")?;
         label(
             hwnd,
             ID_STATUS,
-            "Yükleme kapalı. Anahtar üretip Cloudflare'a kurun; sonra Worker adresini eşleştirin.",
+            "Bağlı Worker hazır. İstatistikleri Yenile ile yükleyin.",
         )?;
-        label(hwnd, 1106, "İstatistikler")?;
+        label(hwnd, 1103, "İstatistikler")?;
         button(hwnd, ID_REFRESH, "Yenile")?;
-        label(hwnd, ID_STATS, "Bağlı bir Worker yok.")?;
-        label(hwnd, 1107, "Kota ve saklama ayarları")?;
-        for (index, (label_text, _, _)) in LIMITS.iter().enumerate() {
-            label(hwnd, 1200 + index as i32, label_text)?;
+        label(hwnd, ID_STATS, "Henüz veri yüklenmedi.")?;
+        label(
+            hwnd,
+            1104,
+            "Yeni yüklemeler için resim şifresi · Boş bırakılırsa şifresiz",
+        )?;
+        edit(hwnd, ID_PASSWORD, true)?;
+        button(hwnd, ID_SAVE_PASSWORD, "Şifreyi kaydet")?;
+        label(hwnd, 1105, "Kota ve saklama ayarları")?;
+        for (index, (name, _, _)) in LIMITS.iter().enumerate() {
+            label(hwnd, 1200 + index as i32, name)?;
             edit(hwnd, ID_LIMIT_FIRST + index as i32, false)?;
         }
-        label(hwnd, 1108, "Sınırda davranış")?;
+        label(hwnd, 1106, "Sınırda davranış")?;
         let combo = create(
             hwnd,
             w!("COMBOBOX"),
@@ -1006,25 +865,25 @@ fn build_controls(hwnd: HWND, state: &State) -> Result<()> {
             "",
             WINDOW_STYLE(WS_TABSTOP.0 | CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0),
         )?;
-        for item in [
+        for text in [
             "Yalnızca uyar",
             "Yeni yüklemeleri durdur",
             "Yükleme ve görüntülemeyi durdur",
         ] {
-            let wide = wide(item);
+            let value = wide(text);
             unsafe {
                 SendMessageW(
                     combo,
                     CB_ADDSTRING,
                     WPARAM(0),
-                    LPARAM(wide.as_ptr() as isize),
+                    LPARAM(value.as_ptr() as isize),
                 );
             }
         }
         button(hwnd, ID_SAVE_LIMITS, "Sınırları kaydet")?;
         label(
             hwnd,
-            1110,
+            1107,
             "Son resimler · Silinen bağlantılar hemen kapanır",
         )?;
         create(
@@ -1037,34 +896,22 @@ fn build_controls(hwnd: HWND, state: &State) -> Result<()> {
         button(hwnd, ID_DELETE, "Seçili resmi sil")?;
         label(
             hwnd,
-            1109,
-            "Sırrınızı paylaşmayın. Ücret uyarıları tahmindir; Cloudflare faturasını garanti etmez.",
+            1108,
+            "Ücret uyarıları tahmindir; Cloudflare faturasını garanti etmez.",
         )?;
         button(hwnd, ID_CLOSE, "Kapat")?;
-        set_text(
-            hwnd,
-            ID_ORIGIN,
-            state.settings.cloud_url.as_deref().unwrap_or(""),
-        );
         if let Some(origin) = state.settings.cloud_url.as_deref()
             && let Ok(credentials) = cloudflare_setup::load_credentials(origin)
         {
-            set_text(hwnd, ID_UPLOAD_TOKEN, &credentials.upload_token);
-            set_text(hwnd, ID_ADMIN_TOKEN, &credentials.admin_token);
             set_text(
                 hwnd,
                 ID_PASSWORD,
                 credentials.share_password.as_deref().unwrap_or(""),
             );
-            set_text(
-                hwnd,
-                ID_STATUS,
-                "Bağlı Worker hazır. İstatistikleri yüklemek için Yenile'ye basın.",
-            );
         }
     }
     if !state.font.is_invalid() {
-        for id in 1001..=1206 {
+        for id in 1000..=1206 {
             if let Some(child) = control(hwnd, id) {
                 unsafe {
                     SendMessageW(child, WM_SETFONT, WPARAM(state.font.0 as usize), LPARAM(1));
@@ -1086,26 +933,20 @@ impl Drop for OwnerGuard {
 pub fn show(current: &Settings, owner: HWND) -> Result<Option<Settings>> {
     show_impl(current, owner, false)
 }
-
 pub fn show_for_upload(current: &Settings, owner: HWND) -> Result<Option<Settings>> {
     show_impl(current, owner, true)
 }
-
 fn show_impl(current: &Settings, owner: HWND, for_upload: bool) -> Result<Option<Settings>> {
     register()?;
     let guided = current.cloud_url.is_none();
-    let pending_tokens = if guided {
-        cloudflare_setup::load_pending_tokens()
-    } else {
-        Ok(None)
-    };
     let mut state = Box::new(State {
         settings: current.clone(),
         saved: false,
-        guided,
         for_upload,
-        setup_started: matches!(&pending_tokens, Ok(Some(_))),
         pending: false,
+        authorizing: false,
+        cancel: Arc::new(AtomicBool::new(false)),
+        authorization: None,
         loaded: false,
         scroll: 0,
         images: Vec::new(),
@@ -1122,8 +963,8 @@ fn show_impl(current: &Settings, owner: HWND, for_upload: bool) -> Result<Option
                 | if guided { WINDOW_STYLE(0) } else { WS_VSCROLL },
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            760,
-            660,
+            if guided { 570 } else { 760 },
+            if guided { 475 } else { 660 },
             owner,
             None,
             HINSTANCE::default(),
@@ -1158,26 +999,7 @@ fn show_impl(current: &Settings, owner: HWND, for_upload: bool) -> Result<Option
         )
     };
     build_controls(hwnd, &state)?;
-    if guided {
-        match pending_tokens {
-            Ok(Some(tokens)) => {
-                set_text(hwnd, ID_UPLOAD_TOKEN, &tokens.upload_token);
-                set_text(hwnd, ID_ADMIN_TOKEN, &tokens.admin_token);
-                set_status(
-                    hwnd,
-                    "Kurulum yaptıysanız tekrar kurmayın: mevcut Worker adresini girin. Kurulum bitmediyse Cloudflare sayfasında iki anahtarı yapıştırın.",
-                );
-            }
-            Ok(None) => {}
-            Err(error) => set_status(
-                hwnd,
-                &format!("Yarım kurulum açılamadı: {error} Kurulumu başlat ile yeniden oluşturun."),
-            ),
-        }
-        show_guided_step(hwnd, &mut state);
-    } else {
-        layout(hwnd, &mut state);
-    }
+    layout(hwnd, &mut state);
     unsafe {
         crate::theme::apply_window_theme(
             hwnd,

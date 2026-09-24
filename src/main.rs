@@ -4,6 +4,7 @@ mod annotation;
 mod capture;
 mod clipboard;
 mod cloud_settings_window;
+mod cloudflare_oauth;
 mod cloudflare_setup;
 mod diagnostics;
 mod drawing;

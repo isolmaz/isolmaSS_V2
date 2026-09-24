@@ -1,10 +1,14 @@
 # Product status and roadmap
 
-## Current release: 0.5.1
+## Current release: 0.5.2
 
 isolmaSS is a local, native Windows tray capture editor. Its current interface has three compact, content-sized settings tabs with a two-column General view, inline update progress/results, System/Light/Dark appearance, recorded keyboard shortcuts with conflict handling, native color selection with three quick colors and a persistent custom swatch, 1–64 px width controls with numeric entry and wheel steps, eight selection handles and movable dimensions label, a four-tool rail with expandable drawing tools, translucent highlighter, numbered steps, opaque redaction, copy/save/export and a native tray menu. The updater checks a public releases-only repository, asks before every installation, pins a publisher signature, waits for active work, and retains an executable rollback until startup health is checked.
 
 0.5.0 adds an optional Upload action (`Ctrl+U`) for each user's own Cloudflare Worker/R2/D1 installation. The separate Cloudflare settings window provisions pairing tokens, daily limits and retention, exposes upload/view/storage statistics and approximate cost, and allows manual image deletion. The static `site/` serves download/docs/privacy material without hosting user screenshots. In 0.5.1 the first Upload starts guided setup and resumes the same selected upload only after pairing; interrupted setup keys remain DPAPI-protected. No domain is required or connected automatically. Default capture and save remain local. Build and trust requirements are in [README.md](README.md), [SECURITY.md](SECURITY.md) and [DISTRIBUTION.md](DISTRIBUTION.md). The source repository is public for self-host templates; the separate updates repository exposes release metadata and artifacts only.
+
+## Cloudflare sharing in 0.5.2
+
+Version 0.5.2 replaces manual deployment with PKCE login, explicit choice when multiple Cloudflare accounts exist, a new isolated Worker and SQLite Durable Object storage with automatic workers.dev setup. GitHub login, R2 and D1 subscription are not required for this installation. The publisher's domain-verified OAuth client is Public with the owner's approval. Local Worker and Windows checks pass; real deployment and upload in another Cloudflare account remain user-run acceptance tests, not claimed production proof.
 
 ## Acceptance checks
 
