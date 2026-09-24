@@ -24,7 +24,7 @@ Capture → annotate → copy/save locally; upload is an explicit action after t
 
 ## Operating Context
 
-- Public release channel: `github.com/isolmaz/isolmaSS-updates` (public, releases only). Source repo `isolmaz/isolmaSS_V2` must become public before its Deploy button works.
+- Public release channel: `github.com/isolmaz/isolmaSS-updates` (public, releases only). Source repo `isolmaz/isolmaSS_V2` is public; its Deploy button requires the v0.5.0 release tag and each user's Cloudflare authorization.
 - Site hosting decision: Cloudflare Workers Static Assets for `ss.isolmaz.com`; never claim the site is live before its owner deploys it.
 - Source version: 0.5.0 (local-first with opt-in BYO Cloudflare upload); cloud sharing remains inactive until the user pairs their Worker.
 - Local copy/save always works and never depends on cloud configuration.

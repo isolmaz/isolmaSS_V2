@@ -1,6 +1,6 @@
 # Windows distribution — 0.5.0
 
-The source repository builds the program and may be public for Cloudflare self-host deployment; the separate **public** [`isolmaz/isolmaSS-updates`](https://github.com/isolmaz/isolmaSS-updates) repository contains release metadata and binaries only. A release tag is `vMAJOR.MINOR.PATCH` and must match `Cargo.toml`, the Rust PE resource and the NSIS installer version. Do not publish source archives, secrets or a private signing key to the update repository.
+The public source repository builds the program and supplies the Cloudflare self-host template; the separate **public** [`isolmaz/isolmaSS-updates`](https://github.com/isolmaz/isolmaSS-updates) repository contains release metadata and binaries only. A release tag is `vMAJOR.MINOR.PATCH` and must match `Cargo.toml`, the Rust PE resource and the NSIS installer version. Do not publish source archives, secrets or a private signing key to the update repository.
 
 ## Build and sign on the publisher workstation
 

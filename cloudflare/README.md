@@ -6,7 +6,7 @@ Bu klasör, her kullanıcının **kendi Cloudflare hesabına** kurduğu, uygulam
 
 1. Cloudflare hesabında R2'yi etkinleştirin; Cloudflare hesap/abonelik adımını uygulama sizin yerinize geçemez.
 2. Uygulamada **Ayarlar → Cloudflare** bölümünde iki farklı güvenli anahtar üretin. Bu sırlar Windows'ta kullanıcıya özel DPAPI korumasıyla tutulur; `settings.json` içine yazılmaz.
-3. Kaynak depo yayımlandıktan sonra [Cloudflare'a kur](https://deploy.workers.cloudflare.com/?url=https://github.com/isolmaz/isolmaSS_V2/tree/v0.5.0/cloudflare) bağlantısını açın. Cloudflare hesabınızı, istediğiniz Worker adını ve otomatik oluşturulacak özel R2/D1 kaynaklarını onaylayın. Cloudflare sır formuna `UPLOAD_TOKEN` ve `ADMIN_TOKEN` değerlerini girin. Bu değerleri URL'ye veya kaynak depoya koymayın.
+3. `v0.5.0` kaynak etiketi yayımlandıktan sonra [Cloudflare'a kur](https://deploy.workers.cloudflare.com/?url=https://github.com/isolmaz/isolmaSS_V2/tree/v0.5.0/cloudflare) bağlantısını açın. Cloudflare hesabınızı, istediğiniz Worker adını ve otomatik oluşturulacak özel R2/D1 kaynaklarını onaylayın. Cloudflare sır formuna `UPLOAD_TOKEN` ve `ADMIN_TOKEN` değerlerini girin. Bu değerleri URL'ye veya kaynak depoya koymayın.
 4. Oluşan `https://...workers.dev` adresini uygulamadaki Worker adresine yazıp **Eşleştir**'e basın. Bu işlem admin anahtarını kullanarak şemayı ilk kez kurar ve servisle eşleşir. Alan adınız Cloudflare'daysa Worker'a ayrıca kendi alan adınızı bağlayabilir, ardından uygulamayı yeni adresle yeniden eşleştirebilirsiniz.
 5. Seçim düzenleyicisinde **Yükle** ya da `Ctrl+U` kullanın. Link yalnızca sunucu başarı yanıtı verdikten sonra panoya yazılır. Üretilen bağlantıyı bilen herkes, şifre ayarlanmadıysa görüntüyü açabilir.
 
