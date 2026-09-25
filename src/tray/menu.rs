@@ -43,27 +43,27 @@ pub(super) fn show(
     let _suspension = crate::hotkey::OverlayInputSuspension::new();
     let menu = PopupMenu(unsafe { CreatePopupMenu()? });
     let capture = if hotkey.is_empty() {
-        "Capture now".to_owned()
+        "Ekran görüntüsü al".to_owned()
     } else {
-        format!("Capture now\t{hotkey}")
+        format!("Ekran görüntüsü al\t{hotkey}")
     };
     append(menu.0, CAPTURE, &capture, MF_STRING)?;
-    append(menu.0, SETTINGS, "Settings", MF_STRING)?;
-    append(menu.0, OPEN_FOLDER, "Open screenshot folder", MF_STRING)?;
+    append(menu.0, SETTINGS, "Ayarlar", MF_STRING)?;
+    append(menu.0, OPEN_FOLDER, "Ekran görüntüsü klasörü", MF_STRING)?;
     append(
         menu.0,
         CHECK_UPDATES,
         if crate::updater::is_checking() {
-            "Checking for updates…"
+            "Güncellemeler denetleniyor…"
         } else {
-            "Check for updates"
+            "Güncellemeleri denetle"
         },
         MF_STRING,
     )?;
     unsafe { AppendMenuW(menu.0, MF_SEPARATOR, 0, PCWSTR::null())? };
-    append(menu.0, 0, "Recent captures", MF_STRING | MF_GRAYED)?;
+    append(menu.0, 0, "Son görüntüler", MF_STRING | MF_GRAYED)?;
     if recent.is_empty() {
-        append(menu.0, 0, "No recent captures", MF_STRING | MF_GRAYED)?;
+        append(menu.0, 0, "Henüz görüntü yok", MF_STRING | MF_GRAYED)?;
     } else {
         for (index, path) in recent.iter().take(5).enumerate() {
             let label = path
@@ -75,7 +75,7 @@ pub(super) fn show(
         }
     }
     unsafe { AppendMenuW(menu.0, MF_SEPARATOR, 0, PCWSTR::null())? };
-    append(menu.0, EXIT, "Quit isolmaSS", MF_STRING)?;
+    append(menu.0, EXIT, "isolmaSS uygulamasından çık", MF_STRING)?;
 
     unsafe {
         let _ = SetForegroundWindow(owner);

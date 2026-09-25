@@ -66,9 +66,9 @@ fn start_hotkey_runtime(config: HotkeyConfig) -> Result<HotkeyRuntime, Box<dyn s
     tray::set_active_hotkey(&handle.active_description);
     if handle.active_description != requested {
         tray::show_notification(
-            "Capture shortcut changed",
+            "Yakalama kısayolu değişti",
             &format!(
-                "{requested} is in use. Capturing with {} for this session.",
+                "{requested} kullanılıyor. Bu oturumda {} ile yakalanacak.",
                 handle.active_description
             ),
         );
@@ -88,7 +88,7 @@ fn rollback_hotkey_setting(settings: &mut Settings, previous: &HotkeyConfig) -> 
     settings.hotkey = previous.clone();
     settings
         .save()
-        .map_err(|error| format!("Could not restore the previous saved hotkey: {error}"))
+        .map_err(|error| format!("Önceki kısayol kaydedilemedi: {error}"))
 }
 
 fn open_recent_capture(path: &Path) -> Result<(), String> {
@@ -105,7 +105,7 @@ fn open_recent_capture(path: &Path) -> Result<(), String> {
         )
     };
     if result.0 as isize <= 32 {
-        Err(format!("Windows could not open '{}'.", path.display()))
+        Err(format!("Windows '{}' dosyasını açamadı.", path.display()))
     } else {
         Ok(())
     }
@@ -150,9 +150,9 @@ fn apply_settings(
                 let requested = latest.hotkey.description.clone();
                 let keep_previous = ui::confirm(
                     tray::window_handle(),
-                    "Shortcut conflict",
+                    "Kısayol çakışması",
                     &format!(
-                        "'{requested}' is unavailable: {error}\nKeep the previous '{}' shortcut? Choose No to capture from the tray until you record another shortcut.",
+                        "'{requested}' kullanılamıyor: {error}\nÖnceki '{}' kısayolu korunsun mu? Hayır seçerseniz yeni bir kısayol kaydedene kadar tepsiden yakalayabilirsiniz.",
                         settings.hotkey.description
                     ),
                 );
@@ -163,30 +163,27 @@ fn apply_settings(
                             if let Err(rollback) =
                                 rollback_hotkey_setting(&mut latest, &settings.hotkey)
                             {
-                                tray::show_notification(
-                                    "Shortcut preference not restored",
-                                    &rollback,
-                                );
+                                tray::show_notification("Kısayol geri yüklenemedi", &rollback);
                             }
                         }
                         Err(restart_error) => {
                             *runtime = None;
                             tray::set_active_hotkey("");
                             let mut detail =
-                                format!("Previous shortcut also failed: {restart_error}");
+                                format!("Önceki kısayol da kullanılamıyor: {restart_error}");
                             if let Err(rollback) =
                                 rollback_hotkey_setting(&mut latest, &settings.hotkey)
                             {
                                 detail.push_str(&format!(" {rollback}"));
                             }
-                            tray::show_notification("Shortcut unavailable", &detail);
+                            tray::show_notification("Kısayol kullanılamıyor", &detail);
                         }
                     }
                 } else {
                     *runtime = None;
                     tray::set_active_hotkey("");
                     if let Err(rollback) = rollback_hotkey_setting(&mut latest, &settings.hotkey) {
-                        tray::show_notification("Shortcut preference not restored", &rollback);
+                        tray::show_notification("Kısayol geri yüklenemedi", &rollback);
                     }
                 }
             }
@@ -203,7 +200,7 @@ fn capture(triggered: Instant) {
         .and_then(|capture| show_overlay_session(Rc::new(capture), triggered))
     {
         Ok(_) => {}
-        Err(error) => tray::show_notification("Capture failed", &error.to_string()),
+        Err(error) => tray::show_notification("Yakalama başarısız", &error.to_string()),
     }
     tray::capture_finished();
 }
@@ -244,7 +241,7 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
     let services = BackgroundServices;
     tray::refresh_preferences(&settings);
     if let Some(warning) = warning {
-        tray::show_notification("Settings recovered", &warning);
+        tray::show_notification("Ayarlar kurtarıldı", &warning);
     }
     let mut runtime = match start_hotkey_runtime(settings.hotkey.clone()) {
         Ok(active) => Some(active),
@@ -253,9 +250,9 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
             if settings.hotkey != fallback
                 && ui::confirm(
                     tray::window_handle(),
-                    "Shortcut unavailable",
+                    "Kısayol kullanılamıyor",
                     &format!(
-                        "{error}\nUse {} for this session instead?",
+                        "{error}\nBu oturumda bunun yerine {} kullanılsın mı?",
                         fallback.description
                     ),
                 )
@@ -265,7 +262,7 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
                     Err(fallback_error) => {
                         tray::set_active_hotkey("");
                         tray::show_notification(
-                            "Shortcut unavailable",
+                            "Kısayol kullanılamıyor",
                             &fallback_error.to_string(),
                         );
                         None
@@ -274,9 +271,9 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
             } else {
                 tray::set_active_hotkey("");
                 tray::show_notification(
-                    "Shortcut unavailable",
+                    "Kısayol kullanılamıyor",
                     &format!(
-                        "{error} Capture from the tray or choose another shortcut in Settings."
+                        "{error} Tepsiden yakalayın veya Ayarlar'dan başka bir kısayol seçin."
                     ),
                 );
                 None
@@ -335,14 +332,14 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
                             scheduled = None;
                             tray::capture_finished();
                             tray::show_notification(
-                                "Capture failed",
-                                "The countdown timer could not start.",
+                                "Yakalama başarısız",
+                                "Yakalama sayacı başlatılamadı.",
                             );
                         } else {
                             tray::show_notification(
-                                "Capture countdown",
+                                "Yakalama sayacı",
                                 &format!(
-                                    "Capturing in {} seconds. Press Esc to cancel.",
+                                    "{} saniye sonra yakalanacak. İptal için Esc tuşuna basın.",
                                     settings.capture_delay_ms as f64 / 1000.0
                                 ),
                             );
@@ -368,23 +365,25 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
                     match show_settings_dialog(&settings, Some(tray::window_handle())) {
                         Ok(Some(latest)) => apply_settings(&mut settings, latest, &mut runtime),
                         Ok(None) => {}
-                        Err(error) => {
-                            ui::error(tray::window_handle(), "Settings failed", &error.to_string())
-                        }
+                        Err(error) => ui::error(
+                            tray::window_handle(),
+                            "Ayarlar açılamadı",
+                            &error.to_string(),
+                        ),
                     }
                     tray::capture_finished();
                 }
                 TrayCommand::CheckUpdates => {
                     if updater::run_manual_update_check() {
-                        tray::set_update_activity(Some("isolmaSS - Checking for updates…"));
+                        tray::set_update_activity(Some("isolmaSS · Güncellemeler denetleniyor…"));
                         tray::show_update_notification(
-                            "Checking for updates",
-                            "Looking for the latest signed release. You can keep using isolmaSS.",
+                            "Güncellemeler denetleniyor",
+                            "En yeni imzalı sürüm aranıyor. isolmaSS'yi kullanmaya devam edebilirsiniz.",
                         );
                     } else {
                         tray::show_update_notification(
-                            "Update in progress",
-                            "An update is already downloading or installing.",
+                            "Güncelleme sürüyor",
+                            "Bir güncelleme zaten indiriliyor veya kuruluyor.",
                         );
                     }
                 }
@@ -392,12 +391,12 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
                     let path = save::recent::last_folder()
                         .unwrap_or_else(|| settings.save_directory.clone());
                     if let Err(error) = open_recent_capture(&path) {
-                        tray::show_notification("Folder could not be opened", &error);
+                        tray::show_notification("Klasör açılamadı", &error);
                     }
                 }
                 TrayCommand::OpenRecent(path) => {
                     if let Err(error) = open_recent_capture(&path) {
-                        tray::show_notification("Could not open screenshot", &error);
+                        tray::show_notification("Görüntü açılamadı", &error);
                     }
                 }
                 TrayCommand::Exit => {
@@ -410,15 +409,15 @@ fn run_interactive_session(open_settings: bool) -> Result<(), Box<dyn std::error
             match Settings::load_with_warning() {
                 Ok((latest, warning)) => {
                     if let Some(warning) = warning {
-                        tray::show_notification("Settings recovered", &warning);
+                        tray::show_notification("Ayarlar kurtarıldı", &warning);
                     }
                     apply_settings(&mut settings, latest, &mut runtime);
                 }
                 Err(error) => {
                     diagnostics::record("settings", &error.to_string());
                     tray::show_notification(
-                        "Settings not reloaded",
-                        &format!("Keeping the current settings. {error}"),
+                        "Ayarlar yenilenemedi",
+                        &format!("Geçerli ayarlar korunuyor. {error}"),
                     );
                 }
             }
@@ -591,7 +590,7 @@ fn main() {
         }) {
             ui::error(
                 windows::Win32::Foundation::HWND::default(),
-                "isolmaSS could not complete the operation",
+                "isolmaSS işlemi tamamlayamadı",
                 &error.to_string(),
             );
         }

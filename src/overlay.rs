@@ -87,8 +87,8 @@ pub fn is_editor_shortcut(vk: u32, modifiers: u32, editing: bool) -> bool {
 fn capture_hud_bounds(capture: &CaptureBuffer, selection: Rect, dpi: u32) -> Rect {
     let viewport = selection_work_viewport(capture, selection);
     let scale = |value: i32| (value * dpi as i32 / 96).max(1);
-    let width = scale(104).min(viewport.width().max(1));
-    let height = scale(20);
+    let width = scale(136).min(viewport.width().max(1));
+    let height = scale(28);
     let x = selection
         .left
         .clamp(viewport.left, (viewport.right - width).max(viewport.left));
@@ -676,7 +676,7 @@ impl OverlayState {
                 Ok(path) => {
                     if self.settings.notify_after_save {
                         crate::tray::show_notification(
-                            "Screenshot saved",
+                            "Görüntü kaydedildi",
                             &path.display().to_string(),
                         );
                     }
@@ -1199,7 +1199,7 @@ unsafe extern "system" fn overlay_wnd_proc(
                     state.redraw(hwnd);
                 }
                 Ok(_) => {}
-                Err(error) => crate::ui::error(hwnd, "Color picker failed", &error.to_string()),
+                Err(error) => crate::ui::error(hwnd, "Renk seçici açılamadı", &error.to_string()),
             }
         }
         return LRESULT(0);
@@ -1257,7 +1257,7 @@ unsafe extern "system" fn overlay_wnd_proc(
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    crate::ui::error(hwnd, "Save could not be opened", &error.to_string())
+                    crate::ui::error(hwnd, "Kaydet penceresi açılamadı", &error.to_string())
                 }
             }
             LRESULT(0)
@@ -1279,9 +1279,7 @@ unsafe extern "system" fn overlay_wnd_proc(
                         state.redraw(hwnd);
                     }
                     Ok(None) => {}
-                    Err(error) => {
-                        crate::ui::error(hwnd, "Settings could not be opened", &error.to_string())
-                    }
+                    Err(error) => crate::ui::error(hwnd, "Ayarlar açılamadı", &error.to_string()),
                 }
             }
             LRESULT(0)
@@ -1341,8 +1339,8 @@ unsafe extern "system" fn overlay_wnd_proc(
                     match crate::clipboard::copy_text_to_clipboard(Some(hwnd), &url) {
                         Ok(()) => {
                             crate::tray::show_notification(
-                                "Screenshot uploaded",
-                                "Link copied to clipboard.",
+                                "Görüntü yüklendi",
+                                "Bağlantı panoya kopyalandı.",
                             );
                             if state.settings.close_after_action {
                                 let _ = unsafe { DestroyWindow(hwnd) };
@@ -1902,7 +1900,7 @@ unsafe extern "system" fn overlay_wnd_proc(
                                         Ok(path) => {
                                             if state.settings.notify_after_save {
                                                 crate::tray::show_notification(
-                                                    "Screenshot saved",
+                                                    "Görüntü kaydedildi",
                                                     &path.display().to_string(),
                                                 );
                                             }

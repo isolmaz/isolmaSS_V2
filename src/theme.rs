@@ -231,12 +231,11 @@ pub fn tokens_for(theme: Theme) -> Tokens {
 
 // ---------------------------------------------------------------------------
 // Typography — Segoe UI Variable pixel sizes and weights (GDI takes pixels).
-// The compact scale keeps a 15 px page title over 12 px body text, so every
-// surface stays dense without losing the Fluent hierarchy.
+// A clear native hierarchy: page title, readable body, and section labels.
 // ---------------------------------------------------------------------------
-pub const FONT_TITLE_PX: i32 = 15;
-pub const FONT_BODY_PX: i32 = 12;
-pub const FONT_SECTION_PX: i32 = 11;
+pub const FONT_TITLE_PX: i32 = 22;
+pub const FONT_BODY_PX: i32 = 14;
+pub const FONT_SECTION_PX: i32 = 15;
 pub const FONT_WEIGHT_TITLE: i32 = 600;
 pub const FONT_WEIGHT_SECTION: i32 = 600;
 
@@ -258,6 +257,34 @@ pub fn ui_face() -> &'static str {
         }
     });
     *FACE
+}
+
+/// Creates a DPI-aware Segoe UI Variable font for native dialogs. The owner
+/// must delete the returned GDI handle when its window closes.
+pub fn create_ui_font(dpi: u32, pixels: i32, weight: i32) -> windows::Win32::Graphics::Gdi::HFONT {
+    use windows::Win32::Graphics::Gdi::{
+        CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, CreateFontW, DEFAULT_CHARSET, DEFAULT_PITCH,
+        OUT_DEFAULT_PRECIS,
+    };
+    let face: Vec<u16> = ui_face().encode_utf16().chain(Some(0)).collect();
+    unsafe {
+        CreateFontW(
+            -(pixels * dpi as i32 / 96),
+            0,
+            0,
+            0,
+            weight,
+            0,
+            0,
+            0,
+            DEFAULT_CHARSET.0 as u32,
+            OUT_DEFAULT_PRECIS.0 as u32,
+            CLIP_DEFAULT_PRECIS.0 as u32,
+            CLEARTYPE_QUALITY.0 as u32,
+            DEFAULT_PITCH.0 as u32,
+            windows::core::PCWSTR(face.as_ptr()),
+        )
+    }
 }
 
 /// True when `face` resolves to itself on this system. GDI returns the
@@ -314,15 +341,15 @@ fn face_installed(face: &str) -> bool {
 // Metrics — compact Fluent layout grid, all values in 96-DPI pixels.
 // ---------------------------------------------------------------------------
 /// Corner radius for cards and panels.
-pub const RADIUS_CARD: i32 = 6;
+pub const RADIUS_CARD: i32 = 10;
 /// Base spacing grid.
 pub const GRID: i32 = 4;
-/// Standard compact control height (buttons, inputs, chips).
-pub const CONTROL_HEIGHT: i32 = 26;
+/// Standard minimum height for keyboard- and pointer-friendly controls.
+pub const CONTROL_HEIGHT: i32 = 36;
 /// Page margin around window content.
-pub const PAGE_MARGIN: i32 = 16;
+pub const PAGE_MARGIN: i32 = 24;
 /// Inner padding inside a card.
-pub const CARD_PADDING: i32 = 12;
+pub const CARD_PADDING: i32 = 20;
 
 // ---------------------------------------------------------------------------
 // Cache control — live theme flips and accent broadcasts.

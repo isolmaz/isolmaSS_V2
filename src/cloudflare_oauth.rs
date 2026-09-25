@@ -14,6 +14,7 @@ use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 use windows::core::{PCWSTR, w};
 
 const CLIENT_ID: &str = "aab1858e7c76bac3d9a341eef60d0bea";
+const REQUIRED_SCOPES: &str = "memberships.read workers-scripts.write";
 const REDIRECT_URI: &str = "http://127.0.0.1:38481/oauth/callback";
 const CALLBACK_PORT: u16 = 38481;
 const MAX_ACCOUNTS: usize = 200;
@@ -305,8 +306,9 @@ pub fn authorize(cancel: &AtomicBool) -> Result<Authorization, String> {
     let state = cloudflare_setup::generate_token()?;
     let challenge = base64url(&sha256(verifier.as_bytes())?);
     let url = format!(
-        "https://dash.cloudflare.com/oauth2/auth?client_id={CLIENT_ID}&response_type=code&redirect_uri={}&code_challenge={challenge}&code_challenge_method=S256&state={state}",
-        percent_encode(REDIRECT_URI)
+        "https://dash.cloudflare.com/oauth2/auth?client_id={CLIENT_ID}&response_type=code&redirect_uri={}&scope={}&code_challenge={challenge}&code_challenge_method=S256&state={state}",
+        percent_encode(REDIRECT_URI),
+        percent_encode(REQUIRED_SCOPES)
     );
     let wide: Vec<u16> = url.encode_utf16().chain(Some(0)).collect();
     let launched = unsafe {

@@ -5,7 +5,7 @@ use windows::Win32::Foundation::{COLORREF, HWND, POINT};
 use windows::Win32::Graphics::Gdi::{HDC, PS_SOLID, Polyline};
 /// Corner radius (96-dpi px, scaled at each use site) for toolbar buttons and
 /// color swatches. Panel radii use `crate::theme::RADIUS_CARD` instead.
-const RADIUS_CONTROL: i32 = 4;
+const RADIUS_CONTROL: i32 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolbarAction {
@@ -51,17 +51,17 @@ pub struct Toolbar {
 }
 
 impl Toolbar {
-    pub const TOOL_BUTTON: i32 = 28;
-    pub const ACTION_HEIGHT: i32 = 34;
+    pub const TOOL_BUTTON: i32 = 32;
+    pub const ACTION_HEIGHT: i32 = 42;
     /// Air between the panels and the edge of the work area.
-    pub const OUTER_PAD: i32 = 6;
+    pub const OUTER_PAD: i32 = 8;
     /// Air between the selection and the panels when they sit outside it.
-    pub const GAP: i32 = 6;
+    pub const GAP: i32 = 8;
     /// Air between the selection edge and the panels when they sit inside it.
-    pub const INNER_PAD: i32 = 8;
+    pub const INNER_PAD: i32 = 10;
 
-    /// Builds a Lightshot-style tool rail beside the selection and a compact
-    /// action strip below it. Each panel flips to the opposite edge as needed.
+    /// Builds a floating tool rail and action strip. Each panel flips to the
+    /// opposite edge when the selection reaches a monitor boundary.
     #[allow(clippy::too_many_arguments)]
     pub fn layout(
         selection: &Rect,
@@ -81,7 +81,7 @@ impl Toolbar {
         let outer_pad = scale(Self::OUTER_PAD);
         let gap = scale(Self::GAP);
         let inner_pad = scale(Self::INNER_PAD);
-        let pad = scale(4);
+        let pad = scale(6);
         let tool_button = scale(Self::TOOL_BUTTON);
         let tool_items = [
             (ToolbarItem::Tool(ToolKind::Select), true),
@@ -114,12 +114,12 @@ impl Toolbar {
         let tool_height =
             pad * 2 + visible_count * tool_button + (visible_count - 1) * scale(2) + scale(12);
 
-        let color_size = scale(18);
-        let color_step = scale(22);
-        let thickness_width = scale(100);
-        let value_width = scale(40);
-        let action_button = scale(28);
-        let action_step = scale(32);
+        let color_size = scale(22);
+        let color_step = scale(28);
+        let thickness_width = scale(112);
+        let value_width = scale(50);
+        let action_button = scale(32);
+        let action_step = scale(38);
         let section_gap = scale(8);
         let colors_width = if show_color {
             4 * color_step - (color_step - color_size) + scale(30)
@@ -137,7 +137,7 @@ impl Toolbar {
             + thicknesses_width
             + style_sections * section_gap
             + 5 * action_step
-            + scale(48)
+            + scale(152)
             - (action_step - action_button);
         let action_height = scale(Self::ACTION_HEIGHT);
         let safe = Rect::new(
@@ -351,7 +351,7 @@ impl Toolbar {
             let y = action_bounds.top + (action_height - action_button) / 2;
             let button_width = action_button
                 + if matches!(action, ToolbarAction::Save | ToolbarAction::Copy) {
-                    scale(24)
+                    scale(76)
                 } else {
                     0
                 };
@@ -623,7 +623,36 @@ impl Toolbar {
                         ToolbarAction::Settings => 0xe713,
                         ToolbarAction::Cancel => 0xe711,
                     };
-                    icon(hdc, button.rect, codepoint, scale(14), ink, true);
+                    if matches!(action, ToolbarAction::Save | ToolbarAction::Copy)
+                        && button.rect.width() >= scale(90)
+                    {
+                        let symbol = Rect::new(
+                            button.rect.left + scale(6),
+                            button.rect.top,
+                            button.rect.left + scale(38),
+                            button.rect.bottom,
+                        );
+                        icon(hdc, symbol, codepoint, scale(16), ink, true);
+                        label(
+                            hdc,
+                            Rect::new(
+                                symbol.right,
+                                button.rect.top,
+                                button.rect.right - scale(5),
+                                button.rect.bottom,
+                            ),
+                            if action == ToolbarAction::Save {
+                                "Kaydet"
+                            } else {
+                                "Kopyala"
+                            },
+                            scale(13),
+                            ink,
+                            true,
+                        );
+                    } else {
+                        icon(hdc, button.rect, codepoint, scale(16), ink, true);
+                    }
                 }
             }
         }
@@ -631,41 +660,43 @@ impl Toolbar {
             && let Some(button) = self.buttons.iter().find(|button| button.item == item)
         {
             let tip = match item {
-                ToolbarItem::Tool(ToolKind::Select) => "Seç/taşı · V".to_owned(),
-                ToolbarItem::Tool(ToolKind::Rectangle) => "Çerçeve · R".to_owned(),
-                ToolbarItem::Tool(ToolKind::Arrow) => "Arrow · A".to_owned(),
-                ToolbarItem::Tool(ToolKind::Pen) => "Pen · P".to_owned(),
-                ToolbarItem::Tool(ToolKind::Highlight) => "Highlighter · H".to_owned(),
-                ToolbarItem::Tool(ToolKind::Step) => "Numbered step · N".to_owned(),
-                ToolbarItem::Tool(ToolKind::Text) => "Text · T".to_owned(),
-                ToolbarItem::Tool(ToolKind::Blur) => "Blur · B (not secure redaction)".to_owned(),
-                ToolbarItem::Tool(ToolKind::Redact) => "Karart · M (opaque)".to_owned(),
+                ToolbarItem::Tool(ToolKind::Select) => "Seç ve taşı · V".to_owned(),
+                ToolbarItem::Tool(ToolKind::Rectangle) => "Dikdörtgen · R".to_owned(),
+                ToolbarItem::Tool(ToolKind::Arrow) => "Ok · A".to_owned(),
+                ToolbarItem::Tool(ToolKind::Pen) => "Kalem · P".to_owned(),
+                ToolbarItem::Tool(ToolKind::Highlight) => "Vurgulayıcı · H".to_owned(),
+                ToolbarItem::Tool(ToolKind::Step) => "Numaralandır · N".to_owned(),
+                ToolbarItem::Tool(ToolKind::Text) => "Metin · T".to_owned(),
+                ToolbarItem::Tool(ToolKind::Blur) => {
+                    "Bulanıklaştır · B (güvenli gizleme değil)".to_owned()
+                }
+                ToolbarItem::Tool(ToolKind::Redact) => "Karart · M (opak)".to_owned(),
                 ToolbarItem::MoreTools => if self.expanded {
-                    "Hide extra tools"
+                    "Diğer araçları gizle"
                 } else {
-                    "More tools"
+                    "Diğer araçlar"
                 }
                 .to_owned(),
-                ToolbarItem::Action(ToolbarAction::Undo) => "Undo · Ctrl+Z".to_owned(),
-                ToolbarItem::Action(ToolbarAction::Redo) => "Redo · Ctrl+Y".to_owned(),
+                ToolbarItem::Action(ToolbarAction::Undo) => "Geri al · Ctrl+Z".to_owned(),
+                ToolbarItem::Action(ToolbarAction::Redo) => "Yinele · Ctrl+Y".to_owned(),
                 ToolbarItem::Action(ToolbarAction::Save) => {
-                    "Save · Ctrl+S | Save as · Ctrl+Shift+S".to_owned()
+                    "Kaydet · Ctrl+S | Farklı kaydet · Ctrl+Shift+S".to_owned()
                 }
-                ToolbarItem::Action(ToolbarAction::Copy) => "Copy · Ctrl+C".to_owned(),
-                ToolbarItem::Action(ToolbarAction::Upload) => "Upload · Ctrl+U".to_owned(),
-                ToolbarItem::Action(ToolbarAction::Settings) => "Settings · Ctrl+,".to_owned(),
-                ToolbarItem::Action(ToolbarAction::Cancel) => "Cancel · Esc".to_owned(),
-                ToolbarItem::Color(_) => "Drawing color".to_owned(),
-                ToolbarItem::ColorPicker => "More colors...".to_owned(),
+                ToolbarItem::Action(ToolbarAction::Copy) => "Kopyala · Ctrl+C".to_owned(),
+                ToolbarItem::Action(ToolbarAction::Upload) => "Yükle · Ctrl+U".to_owned(),
+                ToolbarItem::Action(ToolbarAction::Settings) => "Ayarlar · Ctrl+,".to_owned(),
+                ToolbarItem::Action(ToolbarAction::Cancel) => "İptal · Esc".to_owned(),
+                ToolbarItem::Color(_) => "Çizim rengi".to_owned(),
+                ToolbarItem::ColorPicker => "Diğer renkler…".to_owned(),
                 ToolbarItem::ThicknessSlider => {
-                    format!("Drag or scroll for stroke · {} px", self.active_thickness)
+                    format!("Kaydırın veya sürükleyin · {} px", self.active_thickness)
                 }
-                ToolbarItem::ThicknessValue => "Type 1–64 px · Enter to apply".to_owned(),
+                ToolbarItem::ThicknessValue => "1–64 px yazın · Enter ile uygula".to_owned(),
             };
             let margin = scale(4);
-            let width = (crate::drawing::measure_text(&tip, scale(11)).0 + scale(16))
+            let width = (crate::drawing::measure_text(&tip, scale(13)).0 + scale(20))
                 .min((self.viewport.width() - margin * 2).max(1));
-            let height = scale(24);
+            let height = scale(30);
             let x = button.rect.left.clamp(
                 self.viewport.left + margin,
                 (self.viewport.right - width - margin).max(self.viewport.left + margin),
@@ -682,7 +713,7 @@ impl Toolbar {
                 tokens.card,
                 tokens.stroke,
             );
-            label(hdc, bounds, &tip, scale(11), tokens.text, true);
+            label(hdc, bounds, &tip, scale(13), tokens.text, true);
         }
     }
 }

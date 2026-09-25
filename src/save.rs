@@ -27,12 +27,12 @@ pub fn choose_output_path(
     let filter: Vec<u16> = format!("*.{}\0", format.extension())
         .encode_utf16()
         .collect();
-    let description: Vec<u16> = format!("{} image\0", format.extension().to_uppercase())
+    let description: Vec<u16> = format!("{} görüntüsü\0", format.extension().to_uppercase())
         .encode_utf16()
         .collect();
     unsafe {
         dialog.SetOptions(dialog.GetOptions()? | FOS_FORCEFILESYSTEM | FOS_OVERWRITEPROMPT)?;
-        dialog.SetTitle(windows::core::w!("Save your screenshot"))?;
+        dialog.SetTitle(windows::core::w!("Ekran görüntüsünü kaydet"))?;
         dialog.SetFileName(PCWSTR(name.as_ptr()))?;
         dialog.SetDefaultExtension(PCWSTR(extension.as_ptr()))?;
         dialog.SetFileTypes(&[COMDLG_FILTERSPEC {

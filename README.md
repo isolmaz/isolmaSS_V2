@@ -1,6 +1,6 @@
 # isolmaSS
 
-Native Windows screenshot editor in Rust. Capture a region or window, draw on it, then copy/save locally or explicitly upload to a Worker in **your own Cloudflare account**. The first Upload opens guided setup if sharing is not configured; isolmaSS operates no shared screenshot service and collects no in-app analytics. Version **0.5.2**.
+Native Windows screenshot editor in Rust. Capture a region or window, draw on it, then copy/save locally or explicitly upload to a Worker in **your own Cloudflare account**. The first Upload opens guided setup if sharing is not configured; isolmaSS operates no shared screenshot service and collects no in-app analytics. Version **0.5.3**.
 
 ## Use
 
@@ -34,7 +34,7 @@ While editing text, Enter commits; Ctrl+C, Ctrl+S and Ctrl+U commit before expor
 
 ## Settings and updates
 
-Settings has **Genel / Düzenleyici / Güncellemeler** tabs and a dedicated **Cloudflare** settings window, a compact two-column general page, and a window that fits each original tab's content until you resize it yourself. Smaller displays still scroll the content without moving the tabs or Save/Cancel. Appearance follows Windows or can be explicitly light/dark. General contains shortcut recording, capture delay, save location/format, startup and notification preferences. Editor contains drawing color, 1–64 px width, window snapping and close-after-action. Updates shows the check result beside its button and a progress bar below while checking.
+Settings uses a Windows 11-style sidebar for **Genel / Düzenleyici / Güncellemeler / Cloudflare**. The content column scrolls independently of navigation and Save/Cancel; the window can be resized without switching sizes between pages. Appearance follows Windows or can be explicitly light/dark, including the separate Cloudflare window. General groups shortcut, delay, save format/location, startup, notifications and appearance. Editor groups drawing color, 1–64 px width, window snapping and close-after-action. Updates places the check result and progress in a dedicated status row.
 
 Record a shortcut using Ctrl/Alt/Shift/Win with a letter, digit, F1–F24 or PrintScreen; bare PrintScreen also works. Unsupported keys are ignored. An unavailable combination is reported rather than silently replacing the current shortcut. On a startup conflict, the app asks whether to use Ctrl+Shift+S for that session. Settings remain open after a save error.
 
@@ -42,11 +42,11 @@ Update checks use public releases from [`isolmaz/isolmaSS-updates`](https://gith
 
 An installation without the pinned verifier needs **one manual installation** of a signed-update-capable release before in-app updates can work. The free application-level signature does not remove Windows SmartScreen warnings; do not bypass a warning automatically. Portable ZIPs are for manual use, not in-place updates of an installed copy.
 
-The native tray menu provides Capture now, Settings, Open screenshot folder, Check for updates, recent captures and Quit. Quit waits until an active edit/settings session ends.
+The native tray menu provides **Ekran görüntüsü al**, **Ayarlar**, **Ekran görüntüsü klasörü**, **Güncellemeleri denetle**, recent captures and **isolmaSS uygulamasından çık**. Quit waits until an active edit/settings session ends.
 
 ## Optional Cloudflare upload
 
-There is **no central isolmaSS image host or sign-in**. Select a screenshot and click **Upload** (`Ctrl+U`): first use opens the Cloudflare connection window, without sending the screenshot. Choose **Cloudflare ile devam et**, approve the required Workers Scripts Write and Memberships Read permissions in your browser, and select an account if you have more than one. The app generates distinct Worker keys, installs a new Worker backed by a SQLite Durable Object in the chosen account, enables its `workers.dev` URL and stores the connection locally. Only after setup succeeds does the selected screenshot upload and its successful link reach the clipboard. No GitHub account, key pasting, R2 activation or custom domain is needed. Closing setup leaves the selection local. Cloudflare authorization remains explicit, and the OAuth access token is not persisted. Disconnecting locally does not delete the remote Worker or images.
+There is **no central isolmaSS image host or sign-in**. Select a screenshot and click **Upload** (`Ctrl+U`): first use opens the Cloudflare connection window, without sending the screenshot. Choose **Cloudflare ile devam et**. The app explicitly requests `workers-scripts.write` and `memberships.read` from its registered public OAuth client; review these two required permissions in the browser, then select an account if you have more than one. If the consent page still shows zero permissions, verify the publisher OAuth client's configured scopes before approving anything. The app generates distinct Worker keys, installs a new Worker backed by a SQLite Durable Object in the chosen account, enables its `workers.dev` URL and stores the connection locally. Only after setup succeeds does the selected screenshot upload and its successful link reach the clipboard. No GitHub account, key pasting, R2 activation or custom domain is needed. Closing setup leaves the selection local. Cloudflare authorization remains explicit, and the OAuth access token is not persisted. Disconnecting locally does not delete the remote Worker or images.
 
 **Cloudflare** controls the active image count (50 initially), per-image and total bytes, daily uploads/views, retention and warning percentage (90% initially). At that threshold choose *warn*, *block new uploads* or *block new uploads and viewing*. Recent images can be deleted; daily/monthly counters and occupied storage describe this Worker only, not other Cloudflare projects. **No option guarantees a zero invoice.** Daily counters use UTC. An optional password applies to future screenshots over HTTPS; only a per-image salted verifier is stored in the Durable Object. Share passwords separately. A valid unprotected link is viewable by anyone who has it. Expired or deleted images become unavailable; previously downloaded copies cannot be revoked.
 

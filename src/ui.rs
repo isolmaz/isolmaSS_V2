@@ -50,13 +50,16 @@ pub fn ask_for_update(owner: HWND, version: &str) -> Result<UpdateChoice> {
         TASKDIALOG_BUTTON, TASKDIALOGCONFIG, TDF_ALLOW_DIALOG_CANCELLATION, TaskDialogIndirect,
     };
     let _suspend = crate::hotkey::OverlayInputSuspension::new();
-    let title: Vec<u16> = "isolmaSS update".encode_utf16().chain(Some(0)).collect();
-    let heading: Vec<u16> = format!("isolmaSS {version} is available")
+    let title: Vec<u16> = "isolmaSS güncelleme"
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let heading: Vec<u16> = format!("isolmaSS {version} hazır")
         .encode_utf16()
         .chain(Some(0))
         .collect();
     let content: Vec<u16> =
-        "Save your current work first. After verification, isolmaSS will close, install the update, and start again automatically. Continue?"
+        "Önce çalışmanızı kaydedin. Doğrulamadan sonra isolmaSS kapanır, güncelleme kurulur ve uygulama yeniden başlatılır. Devam edilsin mi?"
             .encode_utf16()
             .chain(Some(0))
             .collect();

@@ -25,7 +25,7 @@ impl OverlayState {
                 tokens.stroke
             },
         );
-        crate::drawing::label(self.mem_dc, bounds, &label, scale(11), tokens.text, true);
+        crate::drawing::label(self.mem_dc, bounds, &label, scale(13), tokens.text, true);
     }
 
     pub(super) fn composite_scene(&mut self) {

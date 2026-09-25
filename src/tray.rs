@@ -279,8 +279,8 @@ unsafe extern "system" fn tray_wnd_proc(
                 || capture_pending()
             {
                 show_notification(
-                    "Close requested",
-                    "isolmaSS will quit as soon as the current capture or window finishes.",
+                    "Çıkış istendi",
+                    "Geçerli yakalama veya pencere kapandıktan sonra isolmaSS sonlanacak.",
                 );
             }
             LRESULT(0)
@@ -332,7 +332,7 @@ fn show_context_menu(hwnd: HWND, anchor: Option<POINT>) {
         Ok(Some(TrayCommand::Capture(triggered))) => queue_capture(triggered),
         Ok(Some(command)) => queue_command(command),
         Ok(None) => {}
-        Err(error) => crate::ui::error(hwnd, "Menu could not be opened", &error.to_string()),
+        Err(error) => crate::ui::error(hwnd, "Tepsi menüsü açılamadı", &error.to_string()),
     }
 }
 

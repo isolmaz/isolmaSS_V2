@@ -193,7 +193,7 @@ pub fn poll(owner: HWND, allow_install: bool) {
             if manual {
                 crate::settings_window::report_update_status(
                     owner,
-                    &format!("Version {} is available", update.version),
+                    &format!("{} sürümü hazır", update.version),
                     UpdateStatus::Idle,
                 );
             }
@@ -201,14 +201,14 @@ pub fn poll(owner: HWND, allow_install: bool) {
                 Ok(crate::ui::UpdateChoice::Install) => {
                     let inline = crate::settings_window::report_update_status(
                         owner,
-                        "Downloading and verifying installer…",
+                        "Kurulum dosyası indiriliyor ve doğrulanıyor…",
                         UpdateStatus::Busy,
                     );
-                    crate::tray::set_update_activity(Some("isolmaSS - Downloading update…"));
+                    crate::tray::set_update_activity(Some("isolmaSS · Güncelleme indiriliyor…"));
                     if !inline {
                         crate::tray::show_update_notification(
-                            "Downloading update",
-                            "Verifying the signed installer. isolmaSS will restart after installation.",
+                            "Güncelleme indiriliyor",
+                            "İmzalı kurulum doğrulanıyor. Kurulum sonrası isolmaSS yeniden başlatılır.",
                         );
                     }
                     let _ = start(!manual, false, move || {
@@ -219,11 +219,11 @@ pub fn poll(owner: HWND, allow_install: bool) {
                     if let Err(error) =
                         crate::settings::Settings::skip_update_version(&update.version)
                     {
-                        crate::ui::error(owner, "Could not skip this version", &error.to_string());
+                        crate::ui::error(owner, "Bu sürüm atlanamadı", &error.to_string());
                     } else {
                         crate::settings_window::report_update_status(
                             owner,
-                            "This version was skipped.",
+                            "Bu sürüm atlandı.",
                             UpdateStatus::Idle,
                         );
                     }
@@ -231,17 +231,17 @@ pub fn poll(owner: HWND, allow_install: bool) {
                 Ok(crate::ui::UpdateChoice::Later) => {
                     crate::settings_window::report_update_status(
                         owner,
-                        "Not installed. Check again whenever you like.",
+                        "Kurulmadı. İstediğiniz zaman yeniden denetleyebilirsiniz.",
                         UpdateStatus::Idle,
                     );
                 }
                 Err(error) => {
                     crate::settings_window::report_update_status(
                         owner,
-                        "Could not show update choices. Try again.",
+                        "Güncelleme seçenekleri açılamadı. Yeniden deneyin.",
                         UpdateStatus::Idle,
                     );
-                    crate::ui::error(owner, "Update prompt could not open", &error.to_string());
+                    crate::ui::error(owner, "Güncelleme penceresi açılamadı", &error.to_string());
                 }
             }
         }
@@ -249,11 +249,11 @@ pub fn poll(owner: HWND, allow_install: bool) {
             let message = concat!(
                 "isolmaSS ",
                 env!("CARGO_PKG_VERSION"),
-                " is the latest release."
+                " en güncel sürümdür."
             );
             if !crate::settings_window::report_update_status(owner, message, UpdateStatus::Idle) {
-                crate::tray::show_update_notification("You're up to date", message);
-                crate::ui::info(owner, "You're up to date", message);
+                crate::tray::show_update_notification("Uygulama güncel", message);
+                crate::ui::info(owner, "Uygulama güncel", message);
             }
         }
         Some(Event::Checked(Err(error), manual)) => {
@@ -261,10 +261,10 @@ pub fn poll(owner: HWND, allow_install: bool) {
             if manual {
                 crate::settings_window::report_update_status(
                     owner,
-                    "Could not check for updates. Try again.",
+                    "Güncellemeler denetlenemedi. Yeniden deneyin.",
                     UpdateStatus::Idle,
                 );
-                crate::ui::error(owner, "Update check failed", &error);
+                crate::ui::error(owner, "Güncelleme denetlenemedi", &error);
             }
         }
         Some(Event::Downloaded(Ok(path), automatic)) => {
@@ -277,7 +277,7 @@ pub fn poll(owner: HWND, allow_install: bool) {
             }
             drop(ready);
             if !allow_install {
-                let message = "Verified. Save settings and close to install.";
+                let message = "Doğrulandı. Kurulum için ayarları kaydedip pencereyi kapatın.";
                 let inline = crate::settings_window::report_update_status(
                     owner,
                     message,
@@ -286,18 +286,18 @@ pub fn poll(owner: HWND, allow_install: bool) {
                 if inline && !automatic {
                     crate::ui::info(
                         owner,
-                        "Update ready",
-                        "The signed installer is ready. Save or close Settings; isolmaSS will then close, install, and start again.",
+                        "Güncelleme hazır",
+                        "İmzalı kurulum dosyası hazır. Ayarları kaydedin veya kapatın; isolmaSS kurulup yeniden açılacak.",
                     );
                 } else if automatic {
                     crate::tray::show_notification(
-                        "Update ready",
-                        "Finish your current work to install and restart.",
+                        "Güncelleme hazır",
+                        "Kurulum ve yeniden başlatma için açık işlemi tamamlayın.",
                     );
                 } else {
                     crate::tray::show_update_notification(
-                        "Update ready",
-                        "Finish your current capture to install and restart.",
+                        "Güncelleme hazır",
+                        "Kurulum için açık yakalamayı tamamlayın.",
                     );
                 }
             }
@@ -305,14 +305,14 @@ pub fn poll(owner: HWND, allow_install: bool) {
         Some(Event::Downloaded(Err(error), automatic)) => {
             crate::settings_window::report_update_status(
                 owner,
-                "Verification failed. Try the update again.",
+                "Doğrulama başarısız. Güncellemeyi yeniden deneyin.",
                 UpdateStatus::Idle,
             );
             if automatic {
                 crate::diagnostics::record("update", &error);
-                crate::tray::show_notification("Update download failed", &error);
+                crate::tray::show_notification("Güncelleme indirilemedi", &error);
             } else {
-                crate::ui::error(owner, "Update could not be installed", &error);
+                crate::ui::error(owner, "Güncelleme kurulamadı", &error);
             }
         }
         _ => {}
@@ -328,14 +328,14 @@ pub fn poll(owner: HWND, allow_install: bool) {
     if let Some((path, automatic)) = ready {
         if !automatic {
             crate::tray::show_update_notification(
-                "Installing update",
-                "isolmaSS will close, install the verified release, and start again.",
+                "Güncelleme kuruluyor",
+                "isolmaSS kapanır, doğrulanmış sürümü kurar ve yeniden açılır.",
             );
         }
         match launch_installer(&path) {
             Ok(()) => crate::tray::request_exit(),
             Err(error) => {
-                crate::ui::error(owner, "Update could not be started", &error);
+                crate::ui::error(owner, "Kurulum başlatılamadı", &error);
                 remove_staged_update(&path);
             }
         }
