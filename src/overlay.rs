@@ -568,7 +568,7 @@ impl OverlayState {
                     }
                 }
                 Ok(None) => {}
-                Err(error) => Self::show_action_error(hwnd, "Command menu", &error.to_string()),
+                Err(error) => Self::show_action_error(hwnd, "Komut menüsü", &error.to_string()),
             }
             return LRESULT(0);
         }
@@ -631,7 +631,7 @@ impl OverlayState {
                             }
                         }
                         Err(error) => {
-                            Self::show_action_error(hwnd, "Paste text", &error.to_string())
+                            Self::show_action_error(hwnd, "Metin yapıştırma", &error.to_string())
                         }
                     }
                 } else if let Some(edit) = &mut self.text_edit {
@@ -686,14 +686,14 @@ impl OverlayState {
                         self.redraw(hwnd);
                     }
                 }
-                Err(error) => Self::show_action_error(hwnd, "Save", &error),
+                Err(error) => Self::show_action_error(hwnd, "Kaydetme", &error),
             }
             return LRESULT(0);
         }
 
         if self.mode == OverlayMode::SelectionActive && ctrl_down && vk == 'U' as usize {
             if let Err(error) = self.upload_selection(hwnd) {
-                Self::show_action_error(hwnd, "Upload", &error);
+                Self::show_action_error(hwnd, "Yükleme", &error);
             }
             return LRESULT(0);
         }
@@ -710,7 +710,7 @@ impl OverlayState {
                         self.redraw(hwnd);
                     }
                 }
-                Err(error) => Self::show_action_error(hwnd, "Copy", &error),
+                Err(error) => Self::show_action_error(hwnd, "Kopyalama", &error),
             }
             return LRESULT(0);
         }
@@ -896,7 +896,7 @@ impl OverlayState {
 
     fn show_action_error(hwnd: HWND, action: &str, error: &str) {
         ACTION_ERROR.with(|pending| {
-            *pending.borrow_mut() = Some((format!("{action} failed"), error.to_string()))
+            *pending.borrow_mut() = Some((format!("{action} başarısız"), error.to_string()))
         });
         unsafe {
             let _ = windows::Win32::UI::WindowsAndMessaging::PostMessageW(
@@ -911,7 +911,7 @@ impl OverlayState {
     fn copy_selection_to_clipboard(&mut self, hwnd: HWND) -> std::result::Result<(), String> {
         let sel = self
             .committed_selection
-            .ok_or_else(|| "No screenshot region is selected.".to_string())?;
+            .ok_or_else(|| "Önce bir ekran bölgesi seçin.".to_string())?;
 
         self.composite_scene_with(CompositionPolicy::EXPORT);
 
@@ -938,7 +938,7 @@ impl OverlayState {
     fn save_selection_to_file(&mut self) -> std::result::Result<std::path::PathBuf, String> {
         let sel = self
             .committed_selection
-            .ok_or_else(|| "No screenshot region is selected.".to_string())?;
+            .ok_or_else(|| "Önce bir ekran bölgesi seçin.".to_string())?;
 
         self.composite_scene_with(CompositionPolicy::EXPORT);
 
@@ -967,11 +967,11 @@ impl OverlayState {
 
     fn upload_selection(&mut self, hwnd: HWND) -> std::result::Result<(), String> {
         if self.upload_result.is_some() {
-            return Err("An upload is already in progress.".to_string());
+            return Err("Bir yükleme zaten sürüyor.".to_string());
         }
         let selection = self
             .committed_selection
-            .ok_or_else(|| "No screenshot region is selected.".to_string())?;
+            .ok_or_else(|| "Önce bir ekran bölgesi seçin.".to_string())?;
         if self.settings.cloud_url.is_none() {
             if self.setup_pending {
                 return Ok(());
@@ -984,7 +984,7 @@ impl OverlayState {
                     LPARAM(0),
                 )
             }
-            .map_err(|error| format!("Cloudflare setup could not be opened: {error}"))?;
+            .map_err(|error| format!("Cloudflare kurulumu açılamadı: {error}"))?;
             self.setup_pending = true;
             return Ok(());
         }
@@ -1287,7 +1287,7 @@ unsafe extern "system" fn overlay_wnd_proc(
                             }
                             Err(error) => {
                                 state.redraw(hwnd);
-                                OverlayState::show_action_error(hwnd, "Save", &error);
+                                OverlayState::show_action_error(hwnd, "Kaydetme", &error);
                             }
                         }
                     }
@@ -1341,7 +1341,7 @@ unsafe extern "system" fn overlay_wnd_proc(
                 Ok(Some(settings)) => {
                     state.settings = settings;
                     if let Err(error) = state.upload_selection(hwnd) {
-                        OverlayState::show_action_error(hwnd, "Upload", &error);
+                        OverlayState::show_action_error(hwnd, "Yükleme", &error);
                     }
                 }
                 Ok(None) => {}
@@ -1361,10 +1361,10 @@ unsafe extern "system" fn overlay_wnd_proc(
             };
             let outcome = shared
                 .lock()
-                .map_err(|_| "Upload result could not be read.".to_string())
+                .map_err(|_| "Yükleme sonucu okunamadı.".to_string())
                 .and_then(|mut slot| {
                     slot.take()
-                        .ok_or_else(|| "Upload finished without a result.".to_string())
+                        .ok_or_else(|| "Yükleme sonuçsuz bitti.".to_string())
                 });
             if let Some(toolbar) = state.toolbar.as_mut()
                 && let Some(button) = toolbar
@@ -1390,13 +1390,15 @@ unsafe extern "system" fn overlay_wnd_proc(
                         }
                         Err(error) => OverlayState::show_action_error(
                             hwnd,
-                            "Link uploaded; clipboard failed",
-                            &format!("{error}\nCopy the link manually: {url}"),
+                            "Bağlantıyı panoya kopyalama",
+                            &format!(
+                                "Görüntü yüklendi: {error}\nBağlantıyı elle kopyalayın: {url}"
+                            ),
                         ),
                     }
                 }
                 Ok(Err(error)) | Err(error) => {
-                    OverlayState::show_action_error(hwnd, "Upload", &error)
+                    OverlayState::show_action_error(hwnd, "Yükleme", &error)
                 }
             }
             LRESULT(0)
@@ -1952,9 +1954,9 @@ unsafe extern "system" fn overlay_wnd_proc(
                                                 state.redraw(hwnd);
                                             }
                                         }
-                                        Err(error) => {
-                                            OverlayState::show_action_error(hwnd, "Save", &error)
-                                        }
+                                        Err(error) => OverlayState::show_action_error(
+                                            hwnd, "Kaydetme", &error,
+                                        ),
                                     }
                                 }
                                 ToolbarItem::Action(ToolbarAction::Copy) => {
@@ -1966,14 +1968,16 @@ unsafe extern "system" fn overlay_wnd_proc(
                                                 state.redraw(hwnd);
                                             }
                                         }
-                                        Err(error) => {
-                                            OverlayState::show_action_error(hwnd, "Copy", &error)
-                                        }
+                                        Err(error) => OverlayState::show_action_error(
+                                            hwnd,
+                                            "Kopyalama",
+                                            &error,
+                                        ),
                                     }
                                 }
                                 ToolbarItem::Action(ToolbarAction::Upload) => {
                                     if let Err(error) = state.upload_selection(hwnd) {
-                                        OverlayState::show_action_error(hwnd, "Upload", &error);
+                                        OverlayState::show_action_error(hwnd, "Yükleme", &error);
                                     }
                                 }
                                 ToolbarItem::Action(ToolbarAction::Settings) => unsafe {

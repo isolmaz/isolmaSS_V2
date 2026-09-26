@@ -6,8 +6,7 @@ use crate::settings::{PRESET_COLORS, SaveFormat, Settings};
 use crate::theme::ThemePreference;
 use std::path::{Path, PathBuf};
 use windows::Win32::Foundation::{
-    COLORREF, ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT,
-    RECT, WPARAM,
+    ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, GetMonitorInfoW, HBRUSH, HDC,
@@ -609,73 +608,58 @@ fn draw_progress(draw: &windows::Win32::UI::Controls::NMCUSTOMDRAW, state: &Sett
     );
 }
 
-/// Windows 11 buttons, toggle switches and colour swatches.
+/// Windows 11 buttons, tabs, toggle switches and colour swatches.
 fn draw_button(draw: &windows::Win32::UI::Controls::NMCUSTOMDRAW, state: &SettingsWindowState) {
-    use windows::Win32::Graphics::Gdi::*;
-    use windows::Win32::UI::Controls::*;
+    use crate::drawing::{Look, fluent_button, fluent_tab, fluent_toggle, rounded, ui_text};
     let hdc = draw.hdc;
     let id = draw.hdr.idFrom as i32;
     let dpi = state.dpi;
     let tokens = tokens();
-    let checked = unsafe { SendMessageW(draw.hdr.hwndFrom, BM_GETCHECK, WPARAM(0), LPARAM(0)).0 }
-        == BST_CHECKED.0 as isize;
-    let disabled = draw.uItemState.contains(CDIS_DISABLED);
-    let hot = draw.uItemState.contains(CDIS_HOT);
-    let pressed = draw.uItemState.contains(CDIS_SELECTED);
-    let keyboard_focus =
-        draw.uItemState.contains(CDIS_FOCUS) && draw.uItemState.contains(CDIS_SHOWKEYBOARDCUES);
-    let primary = id == ID_SAVE;
-    let toggle = (ID_WINDOW_SNAP..=ID_CHECK_UPDATES).contains(&id);
-    let swatch = (ID_COLOR_FIRST..=ID_COLOR_LAST).contains(&id);
-    let tab = (ID_TAB_FIRST..=ID_TAB_LAST).contains(&id);
+    let look = Look {
+        primary: id == ID_SAVE,
+        ..Look::from_custom_draw(draw)
+    };
+    let background = if in_footer(id) {
+        state.footer_brush
+    } else {
+        state.page_brush
+    };
     let mut rect = RECT::default();
     unsafe {
         let _ = GetClientRect(draw.hdr.hwndFrom, &mut rect);
-        let _ = FillRect(
-            hdc,
-            &rect,
-            if in_footer(id) {
-                state.footer_brush
-            } else {
-                state.page_brush
-            },
-        );
     }
-    let radius = scale(8, dpi);
+    let mut label = [0u16; 128];
+    let length = unsafe { GetWindowTextW(draw.hdr.hwndFrom, &mut label) }.max(0) as usize;
+    let text = &mut label[..length];
 
-    if swatch {
-        let source = PALETTE[(id - ID_COLOR_FIRST) as usize];
-        let color = crate::annotation::bgra_to_colorref(source);
+    if (ID_TAB_FIRST..=ID_TAB_LAST).contains(&id) {
+        fluent_tab(hdc, rect, text, dpi, look, background);
+    } else if (ID_WINDOW_SNAP..=ID_CHECK_UPDATES).contains(&id) {
+        fluent_toggle(hdc, rect, text, dpi, look, background);
+    } else if (ID_COLOR_FIRST..=ID_COLOR_LAST).contains(&id) {
+        unsafe {
+            let _ = FillRect(hdc, &rect, background);
+        }
+        let color = crate::annotation::bgra_to_colorref(PALETTE[(id - ID_COLOR_FIRST) as usize]);
         let diameter = scale(20, dpi);
         let x = (rect.right - diameter) / 2;
         let y = (rect.bottom - diameter) / 2;
-        if checked || hot || keyboard_focus {
+        if look.selected || look.hot || look.focus {
+            // A ring around the chip: accent (2 px) when chosen, subtle on hover/focus.
             let ring = scale(4, dpi);
-            let ring_color = if checked {
+            let ring_color = if look.selected {
                 tokens.accent
             } else {
                 tokens.stroke
             };
-            crate::drawing::rounded(
-                hdc,
-                crate::capture::Rect::new(
-                    x - ring,
-                    y - ring,
-                    x + diameter + ring,
-                    y + diameter + ring,
-                ),
-                diameter + ring * 2,
-                tokens.page,
-                ring_color,
-            );
-            if checked {
-                crate::drawing::rounded(
+            for inset in 0..if look.selected { 2 } else { 1 } {
+                rounded(
                     hdc,
                     crate::capture::Rect::new(
-                        x - ring + 1,
-                        y - ring + 1,
-                        x + diameter + ring - 1,
-                        y + diameter + ring - 1,
+                        x - ring + inset,
+                        y - ring + inset,
+                        x + diameter + ring - inset,
+                        y + diameter + ring - inset,
                     ),
                     diameter + ring * 2,
                     tokens.page,
@@ -683,238 +667,41 @@ fn draw_button(draw: &windows::Win32::UI::Controls::NMCUSTOMDRAW, state: &Settin
                 );
             }
         }
-        crate::drawing::rounded(
+        rounded(
             hdc,
             crate::capture::Rect::new(x, y, x + diameter, y + diameter),
             diameter,
             color,
             tokens.stroke,
         );
-        return;
-    }
-
-    let mut label = [0u16; 128];
-    let length = unsafe { GetWindowTextW(draw.hdr.hwndFrom, &mut label) }.max(0) as usize;
-    let mut text_rect = rect;
-
-    if tab {
-        // Windows 11 SelectorBar item: text, with a short accent pill under
-        // the selected one.
-        let color = if checked || hot {
-            tokens.text
-        } else {
-            tokens.text_secondary
-        };
-        let mut text = rect;
-        text.bottom -= scale(4, dpi);
-        draw_label(
-            hdc,
-            &mut label[..length],
-            &mut text,
-            dpi,
-            color,
-            true,
-            false,
-        );
-        if checked {
-            let half = scale(8, dpi);
-            let middle = rect.right / 2;
-            crate::drawing::rounded(
-                hdc,
-                crate::capture::Rect::new(
-                    middle - half,
-                    rect.bottom - scale(5, dpi),
-                    middle + half,
-                    rect.bottom - scale(2, dpi),
-                ),
-                scale(3, dpi),
-                tokens.accent,
-                tokens.accent,
-            );
-        }
-        if keyboard_focus {
-            let focus = RECT {
-                left: 2,
-                top: 2,
-                right: rect.right - 2,
-                bottom: rect.bottom - 2,
-            };
-            unsafe {
-                let _ = DrawFocusRect(hdc, &focus);
-            }
-        }
-        return;
-    }
-
-    if toggle {
-        // Label on the left, Fluent ToggleSwitch (40×20) on the right,
-        // anti-aliased by drawing::rounded.
-        let track_width = scale(40, dpi);
-        let track_height = scale(20, dpi);
-        let x = rect.right - track_width - scale(2, dpi);
-        let y = (rect.bottom - track_height) / 2;
-        let (track, border) = if disabled {
-            (tokens.page, tokens.text_disabled)
-        } else if checked {
-            (tokens.accent, tokens.accent)
-        } else {
-            (tokens.page, tokens.text_secondary)
-        };
-        crate::drawing::rounded(
-            hdc,
-            crate::capture::Rect::new(x, y, x + track_width, y + track_height),
-            track_height,
-            track,
-            border,
-        );
-        let knob = scale(if hot || pressed { 14 } else { 12 }, dpi);
-        let inset = (track_height - knob) / 2;
-        let knob_x = if checked {
-            x + track_width - knob - inset
-        } else {
-            x + inset
-        };
-        let knob_color = if checked {
-            tokens.accent_text
-        } else {
-            tokens.text_secondary
-        };
-        crate::drawing::rounded(
-            hdc,
-            crate::capture::Rect::new(knob_x, y + inset, knob_x + knob, y + inset + knob),
-            knob,
-            knob_color,
-            knob_color,
-        );
-        let state_text: Vec<u16> = if checked { "Açık" } else { "Kapalı" }
-            .encode_utf16()
-            .collect();
-        let mut state_rect = RECT {
-            left: x - scale(60, dpi),
-            right: x - scale(10, dpi),
-            ..rect
-        };
-        let mut state_text = state_text;
-        draw_label(
-            hdc,
-            &mut state_text,
-            &mut state_rect,
-            dpi,
-            tokens.text_secondary,
-            false,
-            false,
-        );
-        text_rect.right = state_rect.left - scale(8, dpi);
-        draw_label(
-            hdc,
-            &mut label[..length],
-            &mut text_rect,
-            dpi,
-            tokens.text,
-            false,
-            false,
-        );
-        if keyboard_focus {
-            let focus = RECT {
-                left: x - 3,
-                top: y - 3,
-                right: x + track_width + 3,
-                bottom: y + track_height + 3,
-            };
-            unsafe {
-                let _ = DrawFocusRect(hdc, &focus);
-            }
-        }
-        return;
-    }
-
-    let fill = if disabled {
-        tokens.control_fill
-    } else if primary {
-        tokens.accent
-    } else if pressed || hot {
-        tokens.control_hover
-    } else {
-        tokens.control_fill
-    };
-    let border = if keyboard_focus {
-        tokens.text
-    } else if primary {
-        tokens.accent
-    } else {
-        tokens.stroke
-    };
-    crate::drawing::rounded(
-        hdc,
-        crate::capture::Rect::new(1, 1, rect.right - 1, rect.bottom - 1),
-        radius / 2 * 2,
-        fill,
-        border,
-    );
-    text_rect.left += scale(8, dpi);
-    text_rect.right -= scale(8, dpi);
-    if id == ID_COLOR_CUSTOM {
+    } else if id == ID_COLOR_CUSTOM {
+        // The button shows the current colour; its dot is ringed in accent
+        // when that colour is not one of the palette chips.
+        fluent_button(hdc, rect, &mut [], dpi, look, background);
         let custom = state.settings.default_color;
         let dot = scale(12, dpi);
         let x = scale(10, dpi);
         let y = (rect.bottom - dot) / 2;
-        let chosen = !PALETTE.contains(&custom);
-        crate::drawing::rounded(
+        rounded(
             hdc,
             crate::capture::Rect::new(x, y, x + dot, y + dot),
             dot,
             crate::annotation::bgra_to_colorref(custom),
-            if chosen { tokens.accent } else { tokens.stroke },
+            if PALETTE.contains(&custom) {
+                tokens.stroke
+            } else {
+                tokens.accent
+            },
         );
-        text_rect.left = x + dot + scale(6, dpi);
-    }
-    let color = if disabled {
-        tokens.text_disabled
-    } else if primary {
-        tokens.accent_text
+        let mut text_rect = RECT {
+            left: x + dot + scale(6, dpi),
+            right: rect.right - scale(6, dpi),
+            ..rect
+        };
+        ui_text(hdc, text, &mut text_rect, dpi, tokens.text, false);
     } else {
-        tokens.text
-    };
-    draw_label(
-        hdc,
-        &mut label[..length],
-        &mut text_rect,
-        dpi,
-        color,
-        true,
-        false,
-    );
-}
-
-fn draw_label(
-    hdc: HDC,
-    text: &mut [u16],
-    rect: &mut RECT,
-    dpi: u32,
-    color: COLORREF,
-    centered: bool,
-    bold: bool,
-) {
-    use windows::Win32::Graphics::Gdi::*;
-    crate::drawing::with_font(
-        hdc,
-        -scale(crate::theme::FONT_BODY_PX, dpi),
-        if bold { 600 } else { 400 },
-        || unsafe {
-            let _ = SetBkMode(hdc, TRANSPARENT);
-            let _ = SetTextColor(hdc, color);
-            let _ = DrawTextW(
-                hdc,
-                text,
-                rect,
-                DT_VCENTER
-                    | DT_SINGLELINE
-                    | DT_NOPREFIX
-                    | DT_END_ELLIPSIS
-                    | if centered { DT_CENTER } else { DT_LEFT },
-            );
-        },
-    );
+        fluent_button(hdc, rect, text, dpi, look, background);
+    }
 }
 
 fn create_settings_controls(hwnd: HWND) -> Result<()> {

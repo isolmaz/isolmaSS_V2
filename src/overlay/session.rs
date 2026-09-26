@@ -237,7 +237,7 @@ fn run_session(
     if state.preferences_dirty
         && let Err(error) = state.settings.save_editor_preferences()
     {
-        crate::tray::show_notification("Preferences could not be saved", &error.to_string());
+        crate::tray::show_notification("Tercihler kaydedilemedi", &error.to_string());
     }
 
     loop_result?;

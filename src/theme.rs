@@ -329,12 +329,9 @@ pub fn tokens_for(theme: Theme) -> Tokens {
 
 // ---------------------------------------------------------------------------
 // Typography — Segoe UI Variable pixel sizes and weights (GDI takes pixels).
-// A clear native hierarchy: page title, readable body, and section labels.
+// Body text and semibold section labels, as in Windows 11 dialogs.
 // ---------------------------------------------------------------------------
-pub const FONT_TITLE_PX: i32 = 22;
 pub const FONT_BODY_PX: i32 = 14;
-pub const FONT_SECTION_PX: i32 = 15;
-pub const FONT_WEIGHT_TITLE: i32 = 600;
 pub const FONT_WEIGHT_SECTION: i32 = 600;
 
 /// The modern Windows 11 UI face, with a Windows 10 fallback.

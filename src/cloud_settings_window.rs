@@ -1,3 +1,6 @@
+//! Cloudflare sharing dialog in the same compact Windows 11 style as Settings:
+//! a guided two-step connection page, or — once paired — tabs for the
+//! connection, quotas and recent images, with status in the footer band.
 use crate::cloudflare_oauth::{self, Account, Authorization};
 use crate::cloudflare_setup;
 use crate::settings::Settings;
@@ -5,16 +8,15 @@ use serde_json::{Value, json};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::{
-    ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM,
+    ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CreateSolidBrush, DT_CENTER, DT_END_ELLIPSIS, DT_SINGLELINE, DT_VCENTER,
-    DeleteObject, DrawTextW, EndPaint, FillRect, HBRUSH, HDC, HFONT, HGDIOBJ, InvalidateRect,
-    PAINTSTRUCT, RedrawWindow, SetBkColor, SetBkMode, SetTextColor, TRANSPARENT,
+    BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, HBRUSH, HDC, HFONT, HGDIOBJ,
+    InvalidateRect, PAINTSTRUCT, PS_SOLID, RedrawWindow, SetBkColor, SetBkMode, SetTextColor,
+    TRANSPARENT,
 };
 use windows::Win32::UI::Controls::{
-    CDDS_PREPAINT, CDIS_DISABLED, CDIS_FOCUS, CDIS_HOT, CDIS_SELECTED, CDRF_SKIPDEFAULT,
-    NM_CUSTOMDRAW, NMCUSTOMDRAW, NMHDR, SetScrollInfo,
+    CDDS_PREPAINT, CDRF_SKIPDEFAULT, NM_CUSTOMDRAW, NMCUSTOMDRAW, NMHDR,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled, SetActiveWindow};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -37,6 +39,18 @@ const ID_DELETE: i32 = 1030;
 const ID_CLOSE: i32 = 1031;
 const ID_PASSWORD: i32 = 1032;
 const ID_SAVE_PASSWORD: i32 = 1033;
+// Labels.
+const ID_INTRO: i32 = 1101;
+const ID_STEP_ACCOUNT: i32 = 1102;
+const ID_PASSWORD_LABEL: i32 = 1104;
+const ID_MODE_LABEL: i32 = 1106;
+const ID_IMAGES_LABEL: i32 = 1107;
+const ID_COST_NOTE: i32 = 1108;
+const ID_STEP_CONSENT: i32 = 1110;
+const ID_CONSENT_NOTE: i32 = 1111;
+const ID_LIMIT_LABEL_FIRST: i32 = 1200;
+const ID_TAB_FIRST: i32 = 1300;
+const TABS: [&str; 3] = ["Bağlantı", "Sınırlar", "Resimler"];
 
 const LIMITS: [(&str, &str, u64); 7] = [
     ("Saklanan son resim", "max_active", 1),
@@ -48,6 +62,14 @@ const LIMITS: [(&str, &str, u64); 7] = [
     ("Uyarı/durma (%)", "warning_percent", 1),
 ];
 
+// Design grid (96-DPI pixels), shared with the Settings dialog.
+const WIDTH: i32 = 480;
+const MARGIN: i32 = 20;
+const TAB_BAR: i32 = 48;
+const ROW: i32 = 30;
+const PITCH: i32 = 36;
+const FOOTER: i32 = 60;
+
 struct State {
     settings: Settings,
     saved: bool,
@@ -57,48 +79,46 @@ struct State {
     cancel: Arc<AtomicBool>,
     authorization: Option<Authorization>,
     loaded: bool,
-    scroll: i32,
+    tab: usize,
     images: Vec<String>,
     response: Arc<Mutex<Option<Completion>>>,
     dpi: u32,
     font: HFONT,
-    title_font: HFONT,
     heading_font: HFONT,
     page_brush: HBRUSH,
-    card_brush: HBRUSH,
+    footer_brush: HBRUSH,
+    input_brush: HBRUSH,
 }
 impl State {
+    fn guided(&self) -> bool {
+        self.settings.cloud_url.is_none()
+    }
+
     fn refresh_brushes(&mut self) {
+        let tokens = crate::theme::tokens();
         unsafe {
-            for brush in [self.page_brush, self.card_brush] {
+            for brush in [self.page_brush, self.footer_brush, self.input_brush] {
                 if !brush.is_invalid() {
                     let _ = DeleteObject(HGDIOBJ(brush.0));
                 }
             }
-            let tokens = crate::theme::tokens();
             self.page_brush = CreateSolidBrush(tokens.page);
-            self.card_brush = CreateSolidBrush(tokens.card);
+            self.footer_brush = CreateSolidBrush(tokens.card);
+            self.input_brush = CreateSolidBrush(tokens.control_fill);
         }
     }
 
     fn refresh_fonts(&mut self, hwnd: HWND) {
-        let previous = [self.font, self.title_font, self.heading_font];
+        let previous = [self.font, self.heading_font];
         self.font = crate::theme::create_ui_font(self.dpi, crate::theme::FONT_BODY_PX, 400);
-        self.title_font = crate::theme::create_ui_font(
-            self.dpi,
-            crate::theme::FONT_TITLE_PX,
-            crate::theme::FONT_WEIGHT_TITLE,
-        );
         self.heading_font = crate::theme::create_ui_font(
             self.dpi,
-            crate::theme::FONT_SECTION_PX,
+            crate::theme::FONT_BODY_PX,
             crate::theme::FONT_WEIGHT_SECTION,
         );
-        for id in 1000..=1206 {
+        for id in 1000..=1310 {
             if let Some(child) = control(hwnd, id) {
-                let font = if id == 1100 {
-                    self.title_font
-                } else if matches!(id, 1102..=1107 | 1110) {
+                let font = if matches!(id, ID_STEP_CONSENT | ID_STEP_ACCOUNT) {
                     self.heading_font
                 } else {
                     self.font
@@ -119,14 +139,14 @@ impl State {
 }
 impl Drop for State {
     fn drop(&mut self) {
-        for font in [self.font, self.title_font, self.heading_font] {
+        for font in [self.font, self.heading_font] {
             if !font.is_invalid() {
                 unsafe {
                     let _ = DeleteObject(HGDIOBJ(font.0));
                 }
             }
         }
-        for brush in [self.page_brush, self.card_brush] {
+        for brush in [self.page_brush, self.footer_brush, self.input_brush] {
             if !brush.is_invalid() {
                 unsafe {
                     let _ = DeleteObject(HGDIOBJ(brush.0));
@@ -157,10 +177,10 @@ fn set_text(hwnd: HWND, id: i32, text: &str) {
     }
 }
 fn get_text(hwnd: HWND, id: i32) -> std::result::Result<String, String> {
-    let child = control(hwnd, id).ok_or("Cloudflare field is missing.")?;
+    let child = control(hwnd, id).ok_or("Cloudflare alanı bulunamadı.")?;
     let size = unsafe { GetWindowTextLengthW(child) };
     if !(0..=512).contains(&size) {
-        return Err("Cloudflare field is too long.".into());
+        return Err("Cloudflare alanı çok uzun.".into());
     }
     let mut buffer = vec![0u16; size as usize + 1];
     let count = unsafe { GetWindowTextW(child, &mut buffer) };
@@ -206,138 +226,164 @@ fn edit(hwnd: HWND, id: i32, password: bool) -> Result<HWND> {
         id,
         "",
         WINDOW_STYLE(
-            WS_BORDER.0
-                | WS_TABSTOP.0
-                | ES_AUTOHSCROLL as u32
-                | if password { ES_PASSWORD as u32 } else { 0 },
+            WS_TABSTOP.0 | ES_AUTOHSCROLL as u32 | if password { ES_PASSWORD as u32 } else { 0 },
         ),
     )
 }
-fn place(hwnd: HWND, id: i32, rect: (i32, i32, i32, i32), dpi: u32, scroll: i32) {
-    let Some(child) = control(hwnd, id) else {
+fn scale(value: i32, dpi: u32) -> i32 {
+    value * dpi as i32 / 96
+}
+fn place(hwnd: HWND, id: i32, (x, y, width, height): (i32, i32, i32, i32), dpi: u32) {
+    if let Some(child) = control(hwnd, id) {
+        unsafe {
+            let _ = MoveWindow(
+                child,
+                scale(x, dpi),
+                scale(y, dpi),
+                scale(width, dpi),
+                scale(height, dpi),
+                false,
+            );
+        }
+    }
+}
+
+/// Which tab of the paired dialog a control belongs to (`None`: always shown).
+fn tab_of(id: i32) -> Option<usize> {
+    match id {
+        ID_INTRO | ID_STATS | ID_PASSWORD_LABEL | ID_PASSWORD | ID_SAVE_PASSWORD | ID_REFRESH
+        | ID_FORGET => Some(0),
+        ID_MODE_LABEL | ID_MODE | ID_SAVE_LIMITS | ID_COST_NOTE => Some(1),
+        _ if (ID_LIMIT_FIRST..ID_LIMIT_FIRST + LIMITS.len() as i32).contains(&id)
+            || (ID_LIMIT_LABEL_FIRST..ID_LIMIT_LABEL_FIRST + LIMITS.len() as i32).contains(&id) =>
+        {
+            Some(1)
+        }
+        ID_IMAGES_LABEL | ID_IMAGES | ID_DELETE => Some(2),
+        _ => None,
+    }
+}
+
+fn show_tab(hwnd: HWND, state: &State) {
+    if state.guided() {
         return;
-    };
-    let (x, y, width, height) = rect;
-    unsafe {
-        let _ = MoveWindow(
-            child,
-            x * dpi as i32 / 96,
-            y * dpi as i32 / 96 - scroll,
-            width * dpi as i32 / 96,
-            height * dpi as i32 / 96,
-            true,
-        );
     }
-}
-fn cloud_geometry(width: i32) -> (i32, i32, i32, i32) {
-    let columns = if width < 700 { 1 } else { 2 };
-    let rows = (LIMITS.len() as i32 + columns - 1) / columns;
-    let mode_y = 588 + rows * 64;
-    let images_y = mode_y + 104;
-    (columns, mode_y, images_y, images_y + 286)
-}
-fn layout(hwnd: HWND, state: &mut State) {
-    let dpi = state.dpi as i32;
-    let mut client = RECT::default();
-    unsafe {
-        let _ = GetClientRect(hwnd, &mut client);
-    }
-    let design_width = client.right * 96 / dpi;
-    let right = design_width - 24;
-    let content = right - 24;
-    let guided = state.settings.cloud_url.is_none();
-    let (columns, mode_y, images_y, page_height) = if guided {
-        (1, 0, 0, 504)
-    } else {
-        cloud_geometry(design_width)
-    };
-    state.scroll = state
-        .scroll
-        .clamp(0, (page_height * dpi / 96 - client.bottom).max(0));
-    let info = SCROLLINFO {
-        cbSize: std::mem::size_of::<SCROLLINFO>() as u32,
-        fMask: SIF_RANGE | SIF_PAGE | SIF_POS,
-        nMin: 0,
-        nMax: page_height * dpi / 96 - 1,
-        nPage: client.bottom.max(1) as u32,
-        nPos: state.scroll,
-        ..Default::default()
-    };
-    unsafe {
-        SetScrollInfo(hwnd, SB_VERT, &info, true);
-    }
-    if guided {
-        for (id, rect) in [
-            (1100, (24, 28, content, 40)),
-            (1101, (24, 82, content, 68)),
-            (1110, (44, 180, content - 40, 26)),
-            (1111, (44, 216, content - 40, 44)),
-            (ID_CONNECT, (44, 274, 300, 42)),
-            (1102, (44, 180, content - 40, 27)),
-            (ID_ACCOUNT, (44, 225, content - 40, 196)),
-            (ID_INSTALL, (44, 278, 300, 42)),
-            (ID_STATUS, (44, 372, content - 40, 62)),
-            (ID_CLOSE, (right - 132, 452, 132, 38)),
-        ] {
-            place(hwnd, id, rect, state.dpi, state.scroll);
+    for id in 1000..1300 {
+        if let (Some(tab), Some(child)) = (tab_of(id), control(hwnd, id)) {
+            unsafe {
+                let _ = ShowWindow(child, if tab == state.tab { SW_SHOW } else { SW_HIDE });
+            }
         }
-    } else {
-        for (id, rect) in [
-            (1100, (24, 28, content - 200, 40)),
-            (1101, (24, 76, content, 30)),
-            (ID_FORGET, (right - 184, 32, 184, 38)),
-            (ID_STATUS, (44, 138, content - 40, 44)),
-            (1103, (44, 226, content - 40, 26)),
-            (ID_REFRESH, (right - 148, 218, 124, 38)),
-            (ID_STATS, (44, 270, content - 40, 78)),
-            (1104, (44, 398, content - 40, 26)),
-            (ID_PASSWORD, (44, 446, content - 222, 38)),
-            (ID_SAVE_PASSWORD, (right - 168, 446, 168, 38)),
-            (1105, (44, 538, content - 40, 26)),
-            (1106, (44, mode_y, content - 40, 26)),
-            (ID_MODE, (44, mode_y + 32, content - 228, 180)),
-            (ID_SAVE_LIMITS, (right - 168, mode_y + 32, 168, 38)),
-            (1107, (44, images_y + 22, content - 40, 26)),
-            (ID_IMAGES, (44, images_y + 64, content - 40, 90)),
-            (ID_DELETE, (44, images_y + 166, 188, 38)),
-            (1108, (44, images_y + 216, content - 40, 24)),
-            (ID_CLOSE, (right - 132, images_y + 242, 132, 38)),
-        ] {
-            place(hwnd, id, rect, state.dpi, state.scroll);
-        }
-        let field_width = if columns == 2 {
-            (content - 60) / 2
-        } else {
-            content - 40
-        };
-        for (index, _) in LIMITS.iter().enumerate() {
-            let index = index as i32;
-            let x = 44 + index % columns * (field_width + 20);
-            let y = 582 + index / columns * 64;
-            place(
-                hwnd,
-                1200 + index,
-                (x, y, field_width, 23),
-                state.dpi,
-                state.scroll,
-            );
-            place(
-                hwnd,
-                ID_LIMIT_FIRST + index,
-                (x, y + 25, field_width, 34),
-                state.dpi,
-                state.scroll,
-            );
+    }
+    for index in 0..TABS.len() as i32 {
+        if let Some(tab) = control(hwnd, ID_TAB_FIRST + index) {
+            unsafe {
+                SendMessageW(
+                    tab,
+                    BM_SETCHECK,
+                    WPARAM(usize::from(index as usize == state.tab)),
+                    LPARAM(0),
+                );
+            }
         }
     }
     unsafe {
         let _ = InvalidateRect(hwnd, None, true);
     }
 }
+
+/// Positions every control; returns the client height in design pixels.
+fn layout(hwnd: HWND, state: &State) -> i32 {
+    let dpi = state.dpi;
+    let right = WIDTH - MARGIN;
+    let full = WIDTH - 2 * MARGIN;
+    let bottom = if state.guided() {
+        place(hwnd, ID_INTRO, (MARGIN, 18, full, 40), dpi);
+        place(hwnd, ID_STEP_CONSENT, (MARGIN, 74, full, 20), dpi);
+        place(hwnd, ID_CONSENT_NOTE, (MARGIN, 98, full, 40), dpi);
+        place(hwnd, ID_STEP_ACCOUNT, (MARGIN, 74, full, 20), dpi);
+        place(hwnd, ID_ACCOUNT, (MARGIN, 102, full, 220), dpi);
+        place(hwnd, ID_CONNECT, (MARGIN, 146, 230, ROW + 2), dpi);
+        place(hwnd, ID_INSTALL, (MARGIN, 146, 230, ROW + 2), dpi);
+        place(hwnd, ID_STATUS, (MARGIN, 192, full, 40), dpi);
+        240
+    } else {
+        let mut x = MARGIN - 10;
+        for (index, name) in TABS.iter().enumerate() {
+            let width = crate::drawing::measure_text(name, crate::theme::FONT_BODY_PX).0 + 30;
+            place(hwnd, ID_TAB_FIRST + index as i32, (x, 6, width, 40), dpi);
+            x += width;
+        }
+        let top = TAB_BAR + 16;
+        // Connection
+        place(hwnd, ID_INTRO, (MARGIN, top, full, 20), dpi);
+        place(hwnd, ID_STATS, (MARGIN, top + 30, full, 80), dpi);
+        place(hwnd, ID_PASSWORD_LABEL, (MARGIN, top + 124, full, 20), dpi);
+        place(hwnd, ID_PASSWORD, (MARGIN, top + 150, full - 162, 26), dpi);
+        place(
+            hwnd,
+            ID_SAVE_PASSWORD,
+            (right - 150, top + 147, 150, ROW + 2),
+            dpi,
+        );
+        place(hwnd, ID_REFRESH, (MARGIN, top + 200, 120, ROW + 2), dpi);
+        place(hwnd, ID_FORGET, (right - 170, top + 200, 170, ROW + 2), dpi);
+        let connection = top + 236;
+        // Limits
+        let mut y = top;
+        for index in 0..LIMITS.len() as i32 {
+            place(
+                hwnd,
+                ID_LIMIT_LABEL_FIRST + index,
+                (MARGIN, y + 6, full - 140, 20),
+                dpi,
+            );
+            place(
+                hwnd,
+                ID_LIMIT_FIRST + index,
+                (right - 120, y + 2, 120, 26),
+                dpi,
+            );
+            y += PITCH;
+        }
+        place(hwnd, ID_MODE_LABEL, (MARGIN, y + 6, 140, 20), dpi);
+        place(hwnd, ID_MODE, (right - 240, y, 240, 200), dpi);
+        y += PITCH + 8;
+        place(hwnd, ID_COST_NOTE, (MARGIN, y, full - 176, 40), dpi);
+        place(hwnd, ID_SAVE_LIMITS, (right - 160, y, 160, ROW + 2), dpi);
+        let limits = y + 44;
+        // Images
+        place(hwnd, ID_IMAGES_LABEL, (MARGIN, top, full, 20), dpi);
+        place(hwnd, ID_IMAGES, (MARGIN, top + 28, full, 230), dpi);
+        place(hwnd, ID_DELETE, (MARGIN, top + 268, 180, ROW + 2), dpi);
+        let images = top + 304;
+        connection.max(limits).max(images)
+    };
+    let footer = bottom + 8;
+    let button_y = footer + (FOOTER - ROW - 2) / 2;
+    if !state.guided() {
+        place(hwnd, ID_STATUS, (MARGIN, footer + 10, full - 120, 40), dpi);
+    }
+    place(hwnd, ID_CLOSE, (right - 100, button_y, 100, ROW + 2), dpi);
+    unsafe {
+        let _ = InvalidateRect(hwnd, None, true);
+    }
+    footer + FOOTER
+}
+
+/// Guided setup: step one (consent) or, after consent with several accounts,
+/// step two (account choice).
 fn account_controls(hwnd: HWND, visible: bool) {
-    for id in [1102, ID_ACCOUNT, ID_INSTALL, 1110, 1111, ID_CONNECT] {
+    for id in [
+        ID_STEP_ACCOUNT,
+        ID_ACCOUNT,
+        ID_INSTALL,
+        ID_STEP_CONSENT,
+        ID_CONSENT_NOTE,
+        ID_CONNECT,
+    ] {
         if let Some(child) = control(hwnd, id) {
-            let account_step = matches!(id, 1102 | ID_ACCOUNT | ID_INSTALL);
+            let account_step = matches!(id, ID_STEP_ACCOUNT | ID_ACCOUNT | ID_INSTALL);
             unsafe {
                 let _ = ShowWindow(
                     child,
@@ -406,10 +452,7 @@ fn start(hwnd: HWND, state: &mut State, task: impl FnOnce() -> Completion + Send
         })
     {
         set_busy(hwnd, state, false);
-        set_status(
-            hwnd,
-            &format!("Could not start Cloudflare request: {error}"),
-        );
+        set_status(hwnd, &format!("Cloudflare isteği başlatılamadı: {error}"));
     }
 }
 fn begin_authorization(hwnd: HWND, state: &mut State) {
@@ -715,8 +758,17 @@ fn close(hwnd: HWND, state: &mut State) {
         let _ = DestroyWindow(hwnd);
     }
 }
-fn cloud_uses_card(id: i32) -> bool {
-    !matches!(id, 1100 | 1101 | ID_FORGET | ID_CLOSE | 1108)
+
+fn footer_top(hwnd: HWND, dpi: u32) -> i32 {
+    let mut client = RECT::default();
+    unsafe {
+        let _ = GetClientRect(hwnd, &mut client);
+    }
+    client.bottom - scale(FOOTER, dpi)
+}
+
+fn in_footer(id: i32, state: &State) -> bool {
+    id == ID_CLOSE || (id == ID_STATUS && !state.guided())
 }
 
 fn paint_surface(hwnd: HWND, state: &State, hdc: HDC) {
@@ -725,106 +777,77 @@ fn paint_surface(hwnd: HWND, state: &State, hdc: HDC) {
         let _ = GetClientRect(hwnd, &mut client);
         let _ = FillRect(hdc, &client, state.page_brush);
     }
-    let scale = |value: i32| value * state.dpi as i32 / 96;
-    let right = client.right * 96 / state.dpi as i32 - 24;
-    let tokens = crate::theme::tokens();
-    let guided = state.settings.cloud_url.is_none();
-    let (_, mode_y, images_y, _) = cloud_geometry(client.right * 96 / state.dpi as i32);
-    let cards: &[(i32, i32, i32, i32)] = if guided {
-        &[(24, 160, right, 334), (24, 352, right, 446)]
-    } else {
-        &[
-            (24, 122, right, 196),
-            (24, 208, right, 366),
-            (24, 380, right, 504),
-            (24, 520, right, mode_y + 90),
-            (24, images_y, right, images_y + 212),
-        ]
-    };
-    for &(left, top, card_right, bottom) in cards {
-        let top = scale(top) - state.scroll;
-        let bottom = scale(bottom) - state.scroll;
-        if bottom <= 0 || top >= client.bottom {
-            continue;
-        }
-        crate::drawing::rounded(
-            hdc,
-            crate::capture::Rect::new(scale(left), top, scale(card_right), bottom),
-            scale(crate::theme::RADIUS_CARD),
-            tokens.card,
-            tokens.stroke,
-        );
+    let top = footer_top(hwnd, state.dpi);
+    unsafe {
+        let footer = RECT { top, ..client };
+        let _ = FillRect(hdc, &footer, state.footer_brush);
     }
+    let guided = state.guided();
+    let bar = scale(TAB_BAR, state.dpi);
+    crate::drawing::with_pen(hdc, PS_SOLID, 1, crate::theme::tokens().stroke, || unsafe {
+        let _ = windows::Win32::Graphics::Gdi::Polyline(
+            hdc,
+            &[
+                POINT { x: 0, y: top },
+                POINT {
+                    x: client.right,
+                    y: top,
+                },
+            ],
+        );
+        if !guided {
+            let _ = windows::Win32::Graphics::Gdi::Polyline(
+                hdc,
+                &[
+                    POINT { x: 0, y: bar },
+                    POINT {
+                        x: client.right,
+                        y: bar,
+                    },
+                ],
+            );
+        }
+    });
 }
 
 fn draw_cloud_button(draw: &NMCUSTOMDRAW, state: &State) {
+    use crate::drawing::{Look, fluent_button, fluent_tab};
     let id = draw.hdr.idFrom as i32;
-    let disabled = draw.uItemState.contains(CDIS_DISABLED);
-    let focused = draw.uItemState.contains(CDIS_FOCUS);
-    let hovered = draw.uItemState.contains(CDIS_HOT) || draw.uItemState.contains(CDIS_SELECTED);
-    let primary = matches!(id, ID_CONNECT | ID_INSTALL | ID_SAVE_LIMITS);
-    let tokens = crate::theme::tokens();
+    let look = Look {
+        primary: matches!(id, ID_CONNECT | ID_INSTALL | ID_SAVE_LIMITS),
+        ..Look::from_custom_draw(draw)
+    };
+    let background = if in_footer(id, state) {
+        state.footer_brush
+    } else {
+        state.page_brush
+    };
     let mut rect = RECT::default();
-    unsafe {
+    let mut label = [0u16; 128];
+    let length = unsafe {
         let _ = GetClientRect(draw.hdr.hwndFrom, &mut rect);
-        let _ = FillRect(
+        GetWindowTextW(draw.hdr.hwndFrom, &mut label)
+    }
+    .max(0) as usize;
+    if (ID_TAB_FIRST..ID_TAB_FIRST + TABS.len() as i32).contains(&id) {
+        fluent_tab(
             draw.hdc,
-            &rect,
-            if cloud_uses_card(id) {
-                state.card_brush
-            } else {
-                state.page_brush
-            },
+            rect,
+            &mut label[..length],
+            state.dpi,
+            look,
+            background,
+        );
+    } else {
+        fluent_button(
+            draw.hdc,
+            rect,
+            &mut label[..length],
+            state.dpi,
+            look,
+            background,
         );
     }
-    let fill = if disabled {
-        tokens.control_fill
-    } else if primary {
-        tokens.accent
-    } else if hovered {
-        tokens.control_hover
-    } else {
-        tokens.control_fill
-    };
-    let stroke = if focused {
-        tokens.accent
-    } else {
-        tokens.stroke
-    };
-    let inset = state.dpi as i32 / 96;
-    crate::drawing::rounded(
-        draw.hdc,
-        crate::capture::Rect::new(inset, inset, rect.right - inset, rect.bottom - inset),
-        crate::theme::RADIUS_CARD * state.dpi as i32 / 96,
-        fill,
-        stroke,
-    );
-    let mut label = [0u16; 128];
-    let length = unsafe { GetWindowTextW(draw.hdr.hwndFrom, &mut label) }.max(0) as usize;
-    crate::drawing::with_font(
-        draw.hdc,
-        -(crate::theme::FONT_BODY_PX * state.dpi as i32 / 96),
-        600,
-        || unsafe {
-            let _ = SetBkMode(draw.hdc, TRANSPARENT);
-            let _ = SetTextColor(
-                draw.hdc,
-                if disabled {
-                    tokens.text_disabled
-                } else if primary {
-                    tokens.accent_text
-                } else {
-                    tokens.text
-                },
-            );
-            let _ = DrawTextW(
-                draw.hdc,
-                &mut label[..length],
-                &mut rect,
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS,
-            );
-        },
-    );
 }
 
 unsafe extern "system" fn wnd_proc(
@@ -835,15 +858,7 @@ unsafe extern "system" fn wnd_proc(
 ) -> LRESULT {
     let pointer = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *mut State;
     match msg {
-        WM_ERASEBKGND if !pointer.is_null() => {
-            let state = unsafe { &*pointer };
-            let mut client = RECT::default();
-            unsafe {
-                let _ = GetClientRect(hwnd, &mut client);
-                let _ = FillRect(HDC(wparam.0 as *mut _), &client, state.page_brush);
-            }
-            LRESULT(1)
-        }
+        WM_ERASEBKGND if !pointer.is_null() => LRESULT(1),
         WM_PAINT if !pointer.is_null() => {
             let mut paint = PAINTSTRUCT::default();
             let hdc = unsafe { BeginPaint(hwnd, &mut paint) };
@@ -870,9 +885,9 @@ unsafe extern "system" fn wnd_proc(
             let hdc = HDC(wparam.0 as *mut _);
             unsafe {
                 let _ = SetTextColor(hdc, tokens.text);
-                let _ = SetBkColor(hdc, tokens.card);
+                let _ = SetBkColor(hdc, tokens.control_fill);
             }
-            LRESULT(state.card_brush.0 as isize)
+            LRESULT(state.input_brush.0 as isize)
         }
         WM_CTLCOLORSTATIC | WM_CTLCOLORBTN if !pointer.is_null() => {
             let state = unsafe { &*pointer };
@@ -880,26 +895,28 @@ unsafe extern "system" fn wnd_proc(
             let id = unsafe { GetDlgCtrlID(child) };
             let hdc = HDC(wparam.0 as *mut _);
             let tokens = crate::theme::tokens();
+            let secondary = matches!(id, ID_CONSENT_NOTE | ID_COST_NOTE | ID_STATUS)
+                || (id == ID_INTRO && !state.guided());
             unsafe {
                 let _ = SetBkMode(hdc, TRANSPARENT);
                 let _ = SetTextColor(
                     hdc,
                     if !IsWindowEnabled(child).as_bool() {
                         tokens.text_disabled
-                    } else if matches!(id, 1101 | 1108 | 1111 | ID_STATUS) {
+                    } else if secondary {
                         tokens.text_secondary
                     } else {
                         tokens.text
                     },
                 );
             }
-            LRESULT(if cloud_uses_card(id) {
-                state.card_brush.0 as isize
+            LRESULT(if in_footer(id, state) {
+                state.footer_brush.0 as isize
             } else {
                 state.page_brush.0 as isize
             })
         }
-        WM_SETTINGCHANGE if !pointer.is_null() => {
+        WM_SETTINGCHANGE | WM_DWMCOLORIZATIONCOLORCHANGED if !pointer.is_null() => {
             crate::theme::invalidate_theme_cache();
             let state = unsafe { &mut *pointer };
             state.refresh_brushes();
@@ -907,32 +924,14 @@ unsafe extern "system" fn wnd_proc(
                 crate::theme::apply_window_theme(
                     hwnd,
                     crate::theme::theme() == crate::theme::Theme::Dark,
-                    true,
+                    false,
                 );
-            }
-
-            unsafe {
                 let _ = RedrawWindow(
                     hwnd,
                     None,
                     None,
                     windows::Win32::Graphics::Gdi::RDW_INVALIDATE
-                        | windows::Win32::Graphics::Gdi::RDW_ALLCHILDREN,
-                );
-            }
-            LRESULT(0)
-        }
-        WM_DWMCOLORIZATIONCOLORCHANGED if !pointer.is_null() => {
-            crate::theme::invalidate_accent();
-            unsafe {
-                (*pointer).refresh_brushes();
-            }
-            unsafe {
-                let _ = RedrawWindow(
-                    hwnd,
-                    None,
-                    None,
-                    windows::Win32::Graphics::Gdi::RDW_INVALIDATE
+                        | windows::Win32::Graphics::Gdi::RDW_ERASE
                         | windows::Win32::Graphics::Gdi::RDW_ALLCHILDREN,
                 );
             }
@@ -941,6 +940,9 @@ unsafe extern "system" fn wnd_proc(
         WM_DPICHANGED if !pointer.is_null() => {
             let state = unsafe { &mut *pointer };
             state.dpi = ((wparam.0 & 0xffff) as u32).max(96);
+            state.refresh_fonts(hwnd);
+            let height = layout(hwnd, state);
+            let (width, height) = window_size(state.dpi, height);
             if lparam.0 != 0 {
                 let rect = unsafe { &*(lparam.0 as *const RECT) };
                 unsafe {
@@ -949,26 +951,12 @@ unsafe extern "system" fn wnd_proc(
                         None,
                         rect.left,
                         rect.top,
-                        rect.right - rect.left,
-                        rect.bottom - rect.top,
+                        width,
+                        height,
                         SWP_NOZORDER | SWP_NOACTIVATE,
                     );
                 }
             }
-            state.refresh_fonts(hwnd);
-            layout(hwnd, state);
-            LRESULT(0)
-        }
-        WM_GETMINMAXINFO if !pointer.is_null() && lparam.0 != 0 => {
-            let state = unsafe { &*pointer };
-            let info = unsafe { &mut *(lparam.0 as *mut MINMAXINFO) };
-            let minimum = if state.settings.cloud_url.is_none() {
-                540
-            } else {
-                600
-            };
-            info.ptMinTrackSize.x = minimum * state.dpi as i32 / 96;
-            info.ptMinTrackSize.y = 400 * state.dpi as i32 / 96;
             LRESULT(0)
         }
         WM_CLOUD_RESULT if !pointer.is_null() => {
@@ -1092,39 +1080,15 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
-        WM_SIZE if !pointer.is_null() => {
-            layout(hwnd, unsafe { &mut *pointer });
-            LRESULT(0)
-        }
-        WM_VSCROLL if !pointer.is_null() => {
-            let state = unsafe { &mut *pointer };
-            let mut client = RECT::default();
-            unsafe {
-                let _ = GetClientRect(hwnd, &mut client);
-            }
-            let step = 40;
-            state.scroll = match (wparam.0 & 0xffff) as i32 {
-                value if value == SB_LINEUP.0 => state.scroll - step,
-                value if value == SB_LINEDOWN.0 => state.scroll + step,
-                value if value == SB_PAGEUP.0 => state.scroll - client.bottom,
-                value if value == SB_PAGEDOWN.0 => state.scroll + client.bottom,
-                value if value == SB_THUMBTRACK.0 || value == SB_THUMBPOSITION.0 => {
-                    (wparam.0 >> 16) as i32
-                }
-                _ => state.scroll,
-            };
-            layout(hwnd, state);
-            LRESULT(0)
-        }
-        WM_MOUSEWHEEL if !pointer.is_null() => {
-            let state = unsafe { &mut *pointer };
-            let wheel = ((wparam.0 >> 16) as u16 as i16) as i32;
-            state.scroll -= wheel / 120 * 60;
-            layout(hwnd, state);
-            LRESULT(0)
-        }
         WM_COMMAND if !pointer.is_null() && wparam.0 >> 16 == 0 => {
-            command(hwnd, unsafe { &mut *pointer }, (wparam.0 & 0xffff) as i32);
+            let state = unsafe { &mut *pointer };
+            let id = (wparam.0 & 0xffff) as i32;
+            if (ID_TAB_FIRST..ID_TAB_FIRST + TABS.len() as i32).contains(&id) {
+                state.tab = (id - ID_TAB_FIRST) as usize;
+                show_tab(hwnd, state);
+            } else {
+                command(hwnd, state, id);
+            }
             LRESULT(0)
         }
         WM_CLOSE if !pointer.is_null() => {
@@ -1163,21 +1127,20 @@ fn register() -> Result<()> {
     Ok(())
 }
 fn build_controls(hwnd: HWND, state: &State) -> Result<()> {
-    if state.settings.cloud_url.is_none() {
-        label(hwnd, 1100, "Cloudflare'a bağlan")?;
+    if state.guided() {
         label(
             hwnd,
-            1101,
-            "Ekran görüntüleriniz yalnızca sizin Cloudflare hesabınızdaki Worker'a yüklenir. Bağlanana kadar hiçbir görüntü gönderilmez.",
+            ID_INTRO,
+            "Ekran görüntüleriniz yalnızca kendi Cloudflare hesabınızdaki Worker'a yüklenir. Bağlanana kadar hiçbir görüntü gönderilmez.",
         )?;
-        label(hwnd, 1110, "1 · Cloudflare hesabında izin verin")?;
+        label(hwnd, ID_STEP_CONSENT, "1 · Cloudflare hesabında izin verin")?;
         label(
             hwnd,
-            1111,
-            "İzin ekranı tarayıcıda açılır. Kurulumdan önce kullanılacak hesabı siz seçersiniz.",
+            ID_CONSENT_NOTE,
+            "İzin sayfası tarayıcıda açılır. İzin verdikten sonra bu pencereye dönün; kurulum burada tamamlanır.",
         )?;
         button(hwnd, ID_CONNECT, "Cloudflare ile devam et")?;
-        label(hwnd, 1102, "2 · Kurulacak hesabı seçin")?;
+        label(hwnd, ID_STEP_ACCOUNT, "2 · Kurulacak hesabı seçin")?;
         create(
             hwnd,
             w!("COMBOBOX"),
@@ -1193,86 +1156,98 @@ fn build_controls(hwnd: HWND, state: &State) -> Result<()> {
         )?;
         button(hwnd, ID_CLOSE, "Vazgeç")?;
         account_controls(hwnd, false);
-    } else {
-        label(hwnd, 1100, "Bulut paylaşımı")?;
-        label(
-            hwnd,
-            1101,
-            state.settings.cloud_url.as_deref().unwrap_or(""),
-        )?;
-        button(hwnd, ID_FORGET, "Bağlantıyı kaldır")?;
-        label(
-            hwnd,
-            ID_STATUS,
-            "Bağlı Worker hazır. İstatistikleri Yenile ile yükleyin.",
-        )?;
-        label(hwnd, 1103, "İstatistikler")?;
-        button(hwnd, ID_REFRESH, "Yenile")?;
-        label(hwnd, ID_STATS, "Henüz veri yüklenmedi.")?;
-        label(
-            hwnd,
-            1104,
-            "Yeni yüklemeler için resim şifresi · Boş bırakılırsa şifresiz",
-        )?;
-        edit(hwnd, ID_PASSWORD, true)?;
-        button(hwnd, ID_SAVE_PASSWORD, "Şifreyi kaydet")?;
-        label(hwnd, 1105, "Kota ve saklama ayarları")?;
-        for (index, (name, _, _)) in LIMITS.iter().enumerate() {
-            label(hwnd, 1200 + index as i32, name)?;
-            edit(hwnd, ID_LIMIT_FIRST + index as i32, false)?;
-        }
-        label(hwnd, 1106, "Sınırda davranış")?;
-        let combo = create(
-            hwnd,
-            w!("COMBOBOX"),
-            ID_MODE,
-            "",
-            WINDOW_STYLE(WS_TABSTOP.0 | CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0),
-        )?;
-        for text in [
-            "Yalnızca uyar",
-            "Yeni yüklemeleri durdur",
-            "Yükleme ve görüntülemeyi durdur",
-        ] {
-            let value = wide(text);
-            unsafe {
-                SendMessageW(
-                    combo,
-                    CB_ADDSTRING,
-                    WPARAM(0),
-                    LPARAM(value.as_ptr() as isize),
-                );
-            }
-        }
-        button(hwnd, ID_SAVE_LIMITS, "Sınırları kaydet")?;
-        label(
-            hwnd,
-            1107,
-            "Son resimler · Silinen bağlantılar hemen kapanır",
-        )?;
+        return Ok(());
+    }
+    for (index, name) in TABS.iter().enumerate() {
         create(
             hwnd,
-            w!("LISTBOX"),
-            ID_IMAGES,
-            "",
-            WINDOW_STYLE(WS_BORDER.0 | WS_TABSTOP.0 | WS_VSCROLL.0 | LBS_NOTIFY as u32),
+            w!("BUTTON"),
+            ID_TAB_FIRST + index as i32,
+            name,
+            WINDOW_STYLE(
+                WS_TABSTOP.0
+                    | BS_AUTORADIOBUTTON as u32
+                    | BS_PUSHLIKE as u32
+                    | if index == 0 { WS_GROUP.0 } else { 0 },
+            ),
         )?;
-        button(hwnd, ID_DELETE, "Seçili resmi sil")?;
-        label(
-            hwnd,
-            1108,
-            "Ücret uyarıları tahmindir; Cloudflare faturasını garanti etmez.",
-        )?;
-        button(hwnd, ID_CLOSE, "Kapat")?;
-        if let Some(origin) = state.settings.cloud_url.as_deref()
-            && let Ok(credentials) = cloudflare_setup::load_credentials(origin)
-        {
-            set_text(
-                hwnd,
-                ID_PASSWORD,
-                credentials.share_password.as_deref().unwrap_or(""),
+    }
+    label(
+        hwnd,
+        ID_INTRO,
+        state
+            .settings
+            .cloud_url
+            .as_deref()
+            .unwrap_or("")
+            .trim_start_matches("https://"),
+    )?;
+    label(hwnd, ID_STATS, "İstatistikler yükleniyor…")?;
+    label(
+        hwnd,
+        ID_PASSWORD_LABEL,
+        "Yeni yüklemeler için resim şifresi (boş: şifresiz)",
+    )?;
+    edit(hwnd, ID_PASSWORD, true)?;
+    button(hwnd, ID_SAVE_PASSWORD, "Şifreyi kaydet")?;
+    button(hwnd, ID_REFRESH, "Yenile")?;
+    button(hwnd, ID_FORGET, "Bağlantıyı kaldır")?;
+    for (index, (name, _, _)) in LIMITS.iter().enumerate() {
+        label(hwnd, ID_LIMIT_LABEL_FIRST + index as i32, name)?;
+        edit(hwnd, ID_LIMIT_FIRST + index as i32, false)?;
+    }
+    label(hwnd, ID_MODE_LABEL, "Sınırda")?;
+    let combo = create(
+        hwnd,
+        w!("COMBOBOX"),
+        ID_MODE,
+        "",
+        WINDOW_STYLE(WS_TABSTOP.0 | CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0),
+    )?;
+    for text in [
+        "Yalnızca uyar",
+        "Yeni yüklemeleri durdur",
+        "Yükleme ve görüntülemeyi durdur",
+    ] {
+        let value = wide(text);
+        unsafe {
+            SendMessageW(
+                combo,
+                CB_ADDSTRING,
+                WPARAM(0),
+                LPARAM(value.as_ptr() as isize),
             );
         }
+    }
+    label(
+        hwnd,
+        ID_COST_NOTE,
+        "Sınırlar yalnızca bu Worker'ı sayar; Cloudflare faturasını garanti etmez.",
+    )?;
+    button(hwnd, ID_SAVE_LIMITS, "Sınırları kaydet")?;
+    label(
+        hwnd,
+        ID_IMAGES_LABEL,
+        "Son resimler · Silinen bağlantılar hemen kapanır",
+    )?;
+    create(
+        hwnd,
+        w!("LISTBOX"),
+        ID_IMAGES,
+        "",
+        WINDOW_STYLE(WS_TABSTOP.0 | WS_VSCROLL.0 | LBS_NOTIFY as u32),
+    )?;
+    button(hwnd, ID_DELETE, "Seçili resmi sil")?;
+    label(hwnd, ID_STATUS, "Bağlı")?;
+    button(hwnd, ID_CLOSE, "Kapat")?;
+    if let Some(origin) = state.settings.cloud_url.as_deref()
+        && let Ok(credentials) = cloudflare_setup::load_credentials(origin)
+    {
+        set_text(
+            hwnd,
+            ID_PASSWORD,
+            credentials.share_password.as_deref().unwrap_or(""),
+        );
     }
     Ok(())
 }
@@ -1294,8 +1269,31 @@ pub fn show(current: &Settings, owner: HWND) -> Result<Option<Settings>> {
 pub fn show_for_upload(current: &Settings) -> Result<Option<Settings>> {
     show_impl(current, None, true)
 }
-fn fit_dialog_to_work_area(hwnd: HWND, owner: Option<HWND>, width: i32, height: i32, dpi: u32) {
-    use windows::Win32::Foundation::POINT;
+
+const STYLE: WINDOW_STYLE =
+    WINDOW_STYLE(WS_CAPTION.0 | WS_SYSMENU.0 | WS_MINIMIZEBOX.0 | WS_CLIPCHILDREN.0);
+
+fn window_size(dpi: u32, client_height: i32) -> (i32, i32) {
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: scale(WIDTH, dpi),
+        bottom: scale(client_height, dpi),
+    };
+    unsafe {
+        let _ = windows::Win32::UI::HiDpi::AdjustWindowRectExForDpi(
+            &mut rect,
+            STYLE,
+            false,
+            Default::default(),
+            dpi,
+        );
+    }
+    (rect.right - rect.left, rect.bottom - rect.top)
+}
+
+/// Centres the dialog on its owner, or on the monitor under the cursor.
+fn position(hwnd: HWND, owner: Option<HWND>, width: i32, height: i32) {
     use windows::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, MonitorFromWindow,
     };
@@ -1309,25 +1307,26 @@ fn fit_dialog_to_work_area(hwnd: HWND, owner: Option<HWND>, width: i32, height: 
             }
         }
     };
-    let mut monitor_info = MONITORINFO {
+    let mut info = MONITORINFO {
         cbSize: std::mem::size_of::<MONITORINFO>() as u32,
         ..Default::default()
     };
-    if !unsafe { GetMonitorInfoW(monitor, &mut monitor_info).as_bool() } {
+    if !unsafe { GetMonitorInfoW(monitor, &mut info).as_bool() } {
         crate::diagnostics::record("Cloudflare görünümü", "Çalışma alanı ölçülemedi.");
         return;
     }
-    let work = monitor_info.rcWork;
-    let width = (width * dpi as i32 / 96).min(work.right - work.left);
-    let height = (height * dpi as i32 / 96).min(work.bottom - work.top);
+    let work = info.rcWork;
     let mut anchor = work;
     if let Some(owner) = owner
         && unsafe { GetWindowRect(owner, &mut anchor) }.is_err()
     {
         anchor = work;
     }
-    let x = ((anchor.left + anchor.right - width) / 2).clamp(work.left, work.right - width);
-    let y = ((anchor.top + anchor.bottom - height) / 2).clamp(work.top, work.bottom - height);
+    let height = height.min(work.bottom - work.top);
+    let x = ((anchor.left + anchor.right - width) / 2)
+        .clamp(work.left, (work.right - width).max(work.left));
+    let y = ((anchor.top + anchor.bottom - height) / 2)
+        .clamp(work.top, (work.bottom - height).max(work.top));
     if let Err(error) = unsafe {
         SetWindowPos(
             hwnd,
@@ -1350,7 +1349,6 @@ fn show_impl(
 ) -> Result<Option<Settings>> {
     register()?;
     crate::theme::set_preference(current.theme_preference);
-    let guided = current.cloud_url.is_none();
     let mut state = Box::new(State {
         settings: current.clone(),
         saved: false,
@@ -1360,15 +1358,15 @@ fn show_impl(
         cancel: Arc::new(AtomicBool::new(false)),
         authorization: None,
         loaded: false,
-        scroll: 0,
+        tab: 0,
         images: Vec::new(),
         response: Arc::new(Mutex::new(None)),
         dpi: 96,
         font: HFONT::default(),
-        title_font: HFONT::default(),
         heading_font: HFONT::default(),
         page_brush: HBRUSH::default(),
-        card_brush: HBRUSH::default(),
+        footer_brush: HBRUSH::default(),
+        input_brush: HBRUSH::default(),
     });
     state.refresh_brushes();
     let hwnd = unsafe {
@@ -1376,11 +1374,11 @@ fn show_impl(
             Default::default(),
             CLASS,
             w!("isolmaSS Cloudflare"),
-            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_VSCROLL,
+            STYLE,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            if guided { 680 } else { 800 },
-            if guided { 560 } else { 700 },
+            WIDTH,
+            400,
             owner.unwrap_or_default(),
             None,
             HINSTANCE::default(),
@@ -1401,29 +1399,25 @@ fn show_impl(
     state.dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd) }.max(96);
     build_controls(hwnd, &state)?;
     state.refresh_fonts(hwnd);
-    fit_dialog_to_work_area(
-        hwnd,
-        owner,
-        if guided { 680 } else { 800 },
-        if guided { 560 } else { 700 },
-        state.dpi,
-    );
-    let current_dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd) }.max(96);
-    if current_dpi != state.dpi {
-        state.dpi = current_dpi;
-        state.refresh_fonts(hwnd);
-    }
-
-    layout(hwnd, &mut state);
     unsafe {
         crate::theme::apply_window_theme(
             hwnd,
             crate::theme::theme() == crate::theme::Theme::Dark,
-            true,
+            false,
         );
+    }
+    let height = layout(hwnd, &state);
+    show_tab(hwnd, &state);
+    let (width, height) = window_size(state.dpi, height);
+    position(hwnd, owner, width, height);
+    unsafe {
         let _ = ShowWindow(hwnd, SW_SHOW);
     }
     crate::ui::bring_to_front(hwnd);
+    if !state.guided() {
+        // Load current statistics, limits and images right away.
+        refresh(hwnd, &mut state);
+    }
     crate::ui::window_loop(hwnd, crate::ui::WindowKind::CloudSettings)?;
     if state.saved {
         Ok(Some(state.settings.clone()))

@@ -120,6 +120,9 @@ fn with_object<T>(
     action()
 }
 
+/// Windows 11 icon font; Windows 10 resolves the shared codepoints through Segoe MDL2.
+const ICON_FACE: &str = "Segoe Fluent Icons";
+
 pub fn with_font<T>(hdc: HDC, height: i32, weight: i32, action: impl FnOnce() -> T) -> T {
     with_font_face(hdc, crate::theme::ui_face(), height, weight, action)
 }
@@ -154,7 +157,13 @@ pub fn with_font_face<T>(
                     DEFAULT_CHARSET.0 as u32,
                     OUT_DEFAULT_PRECIS.0 as u32,
                     CLIP_DEFAULT_PRECIS.0 as u32,
-                    CLEARTYPE_QUALITY.0 as u32,
+                    // Icon glyphs use grayscale anti-aliasing like the shell:
+                    // ClearType's colour fringes show around thin outlines.
+                    if face == ICON_FACE {
+                        ANTIALIASED_QUALITY.0 as u32
+                    } else {
+                        CLEARTYPE_QUALITY.0 as u32
+                    },
                     DEFAULT_PITCH.0 as u32,
                     PCWSTR(wide.as_ptr()),
                 )
@@ -395,7 +404,7 @@ pub fn icon(
     color: COLORREF,
     center: bool,
 ) {
-    with_font_face(hdc, "Segoe Fluent Icons", -size_px.max(1), 400, || unsafe {
+    with_font_face(hdc, ICON_FACE, -size_px.max(1), 400, || unsafe {
         let _ = SetTextColor(hdc, color);
         let _ = SetBkMode(hdc, TRANSPARENT);
         let mut wide = [codepoint];
@@ -416,4 +425,263 @@ pub fn icon(
                 | if center { DT_CENTER } else { DT_LEFT },
         );
     });
+}
+
+/// Interaction state of an owner-drawn Windows 11 control.
+#[derive(Clone, Copy, Default)]
+pub struct Look {
+    pub primary: bool,
+    pub selected: bool,
+    pub disabled: bool,
+    pub hot: bool,
+    pub pressed: bool,
+    /// Keyboard focus while keyboard cues are shown (not after a mouse click).
+    pub focus: bool,
+}
+
+impl Look {
+    /// Reads the state flags of an `NM_CUSTOMDRAW` paint request.
+    pub fn from_custom_draw(draw: &windows::Win32::UI::Controls::NMCUSTOMDRAW) -> Self {
+        use windows::Win32::UI::Controls::*;
+        let state = draw.uItemState;
+        let checked = unsafe {
+            windows::Win32::UI::WindowsAndMessaging::SendMessageW(
+                draw.hdr.hwndFrom,
+                windows::Win32::UI::WindowsAndMessaging::BM_GETCHECK,
+                windows::Win32::Foundation::WPARAM(0),
+                windows::Win32::Foundation::LPARAM(0),
+            )
+            .0
+        } == BST_CHECKED.0 as isize;
+        Self {
+            primary: false,
+            selected: checked,
+            disabled: state.contains(CDIS_DISABLED),
+            hot: state.contains(CDIS_HOT),
+            pressed: state.contains(CDIS_SELECTED),
+            focus: state.contains(CDIS_FOCUS) && state.contains(CDIS_SHOWKEYBOARDCUES),
+        }
+    }
+}
+
+fn scaled(value: i32, dpi: u32) -> i32 {
+    value * dpi as i32 / 96
+}
+
+/// Draws single-line UI text in the body font.
+pub fn ui_text(
+    hdc: HDC,
+    text: &mut [u16],
+    rect: &mut windows::Win32::Foundation::RECT,
+    dpi: u32,
+    color: COLORREF,
+    centered: bool,
+) {
+    with_font(
+        hdc,
+        -scaled(crate::theme::FONT_BODY_PX, dpi),
+        400,
+        || unsafe {
+            let _ = SetBkMode(hdc, TRANSPARENT);
+            let _ = SetTextColor(hdc, color);
+            let _ = DrawTextW(
+                hdc,
+                text,
+                rect,
+                DT_VCENTER
+                    | DT_SINGLELINE
+                    | DT_NOPREFIX
+                    | DT_END_ELLIPSIS
+                    | if centered { DT_CENTER } else { DT_LEFT },
+            );
+        },
+    );
+}
+
+/// Windows 11 push button (accent-filled when `look.primary`) on `background`.
+pub fn fluent_button(
+    hdc: HDC,
+    rect: windows::Win32::Foundation::RECT,
+    text: &mut [u16],
+    dpi: u32,
+    look: Look,
+    background: HBRUSH,
+) {
+    let tokens = crate::theme::tokens();
+    unsafe {
+        let _ = FillRect(hdc, &rect, background);
+    }
+    let fill = if look.disabled {
+        tokens.control_fill
+    } else if look.primary {
+        tokens.accent
+    } else if look.pressed || look.hot {
+        tokens.control_hover
+    } else {
+        tokens.control_fill
+    };
+    let border = if look.focus {
+        tokens.text
+    } else if look.primary && !look.disabled {
+        tokens.accent
+    } else {
+        tokens.stroke
+    };
+    rounded(
+        hdc,
+        crate::capture::Rect::new(rect.left + 1, rect.top + 1, rect.right - 1, rect.bottom - 1),
+        scaled(8, dpi),
+        fill,
+        border,
+    );
+    let color = if look.disabled {
+        tokens.text_disabled
+    } else if look.primary {
+        tokens.accent_text
+    } else {
+        tokens.text
+    };
+    let mut inner = windows::Win32::Foundation::RECT {
+        left: rect.left + scaled(8, dpi),
+        right: rect.right - scaled(8, dpi),
+        ..rect
+    };
+    ui_text(hdc, text, &mut inner, dpi, color, true);
+}
+
+/// Windows 11 SelectorBar item: the label, with a short accent pill under
+/// the selected item.
+pub fn fluent_tab(
+    hdc: HDC,
+    rect: windows::Win32::Foundation::RECT,
+    text: &mut [u16],
+    dpi: u32,
+    look: Look,
+    background: HBRUSH,
+) {
+    let tokens = crate::theme::tokens();
+    unsafe {
+        let _ = FillRect(hdc, &rect, background);
+    }
+    let color = if look.selected || look.hot {
+        tokens.text
+    } else {
+        tokens.text_secondary
+    };
+    let mut label = windows::Win32::Foundation::RECT {
+        bottom: rect.bottom - scaled(4, dpi),
+        ..rect
+    };
+    ui_text(hdc, text, &mut label, dpi, color, true);
+    if look.selected {
+        let half = scaled(8, dpi);
+        let middle = (rect.left + rect.right) / 2;
+        rounded(
+            hdc,
+            crate::capture::Rect::new(
+                middle - half,
+                rect.bottom - scaled(5, dpi),
+                middle + half,
+                rect.bottom - scaled(2, dpi),
+            ),
+            scaled(3, dpi),
+            tokens.accent,
+            tokens.accent,
+        );
+    }
+    if look.focus {
+        let focus = windows::Win32::Foundation::RECT {
+            left: rect.left + 2,
+            top: rect.top + 2,
+            right: rect.right - 2,
+            bottom: rect.bottom - 2,
+        };
+        unsafe {
+            let _ = DrawFocusRect(hdc, &focus);
+        }
+    }
+}
+
+/// Windows 11 ToggleSwitch row: the label on the left, "Açık/Kapalı" and a
+/// 40×20 switch on the right.
+pub fn fluent_toggle(
+    hdc: HDC,
+    rect: windows::Win32::Foundation::RECT,
+    text: &mut [u16],
+    dpi: u32,
+    look: Look,
+    background: HBRUSH,
+) {
+    let tokens = crate::theme::tokens();
+    unsafe {
+        let _ = FillRect(hdc, &rect, background);
+    }
+    let on = look.selected;
+    let track_width = scaled(40, dpi);
+    let track_height = scaled(20, dpi);
+    let x = rect.right - track_width - scaled(2, dpi);
+    let y = (rect.top + rect.bottom - track_height) / 2;
+    let (track, border) = if look.disabled {
+        (tokens.page, tokens.text_disabled)
+    } else if on {
+        (tokens.accent, tokens.accent)
+    } else {
+        (tokens.page, tokens.text_secondary)
+    };
+    rounded(
+        hdc,
+        crate::capture::Rect::new(x, y, x + track_width, y + track_height),
+        track_height,
+        track,
+        border,
+    );
+    let knob = scaled(if look.hot || look.pressed { 14 } else { 12 }, dpi);
+    let inset = (track_height - knob) / 2;
+    let knob_x = if on {
+        x + track_width - knob - inset
+    } else {
+        x + inset
+    };
+    let knob_color = if on {
+        tokens.accent_text
+    } else {
+        tokens.text_secondary
+    };
+    rounded(
+        hdc,
+        crate::capture::Rect::new(knob_x, y + inset, knob_x + knob, y + inset + knob),
+        knob,
+        knob_color,
+        knob_color,
+    );
+    let mut state_text: Vec<u16> = if on { "Açık" } else { "Kapalı" }.encode_utf16().collect();
+    let mut state_rect = windows::Win32::Foundation::RECT {
+        left: x - scaled(60, dpi),
+        right: x - scaled(10, dpi),
+        ..rect
+    };
+    ui_text(
+        hdc,
+        &mut state_text,
+        &mut state_rect,
+        dpi,
+        tokens.text_secondary,
+        false,
+    );
+    let mut label = windows::Win32::Foundation::RECT {
+        right: state_rect.left - scaled(8, dpi),
+        ..rect
+    };
+    ui_text(hdc, text, &mut label, dpi, tokens.text, false);
+    if look.focus {
+        let focus = windows::Win32::Foundation::RECT {
+            left: x - 3,
+            top: y - 3,
+            right: x + track_width + 3,
+            bottom: y + track_height + 3,
+        };
+        unsafe {
+            let _ = DrawFocusRect(hdc, &focus);
+        }
+    }
 }

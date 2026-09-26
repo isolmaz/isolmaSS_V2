@@ -54,7 +54,7 @@ fn sha256(bytes: &[u8]) -> Result<[u8; 32], String> {
     let mut digest = [0u8; 32];
     unsafe { BCryptHash(BCRYPT_SHA256_ALG_HANDLE, None, bytes, &mut digest) }
         .ok()
-        .map_err(|error| format!("Windows PKCE hashing failed: {error}"))?;
+        .map_err(|error| format!("Windows PKCE özeti oluşturulamadı: {error}"))?;
     Ok(digest)
 }
 
@@ -278,7 +278,7 @@ fn callback(listener: &TcpListener, state: &str, cancel: &AtomicBool) -> Result<
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                 std::thread::sleep(Duration::from_millis(25))
             }
-            Err(error) => return Err(format!("Could not receive Cloudflare login: {error}")),
+            Err(error) => return Err(format!("Cloudflare girişi alınamadı: {error}")),
         }
     }
 }
@@ -313,7 +313,7 @@ fn cloudflare_json(
         RequestBody::Bytes(encoded.as_deref().unwrap_or_default()),
     )?;
     let response: Value = serde_json::from_slice(&bytes)
-        .map_err(|_| format!("Cloudflare API HTTP {status}: invalid JSON."))?;
+        .map_err(|_| format!("Cloudflare API HTTP {status}: geçersiz JSON."))?;
     if !(200..300).contains(&status) || response["success"] != true {
         return Err(format!("Cloudflare API {}.", api_error(status, &bytes)));
     }

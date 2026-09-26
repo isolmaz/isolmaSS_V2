@@ -51,7 +51,7 @@ pub fn generate_token() -> Result<String, String> {
         )
     }
     .ok()
-    .map_err(|error| format!("Windows could not create a secure token: {error}"))?;
+    .map_err(|error| format!("Windows güvenli anahtar üretemedi: {error}"))?;
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut token = String::with_capacity(43);
     for part in random.chunks(3) {
@@ -74,9 +74,7 @@ fn credential_path() -> Result<PathBuf, String> {
     std::env::var_os("LOCALAPPDATA")
         .map(PathBuf::from)
         .map(|root| root.join("isolmaSS").join(CREDENTIAL_FILE))
-        .ok_or_else(|| {
-            "%LOCALAPPDATA% is unavailable; upload credentials cannot be protected.".to_string()
-        })
+        .ok_or_else(|| "%LOCALAPPDATA% kullanılamıyor; yükleme anahtarları korunamaz.".to_string())
 }
 
 fn valid_token(token: &str) -> bool {
@@ -114,10 +112,10 @@ fn protect(plain: &[u8]) -> Result<Vec<u8>, String> {
             &mut result.0,
         )
     }
-    .map_err(|error| format!("Windows could not protect Cloudflare credentials: {error}"))?;
+    .map_err(|error| format!("Windows Cloudflare anahtarlarını koruyamadı: {error}"))?;
     let len = result.0.cbData as usize;
     if result.0.pbData.is_null() || len > 65536 {
-        return Err("Windows returned invalid protected credentials.".to_string());
+        return Err("Windows geçersiz korumalı anahtar döndürdü.".to_string());
     }
     Ok(unsafe { std::slice::from_raw_parts(result.0.pbData, len) }.to_vec())
 }
@@ -139,11 +137,11 @@ fn unprotect(ciphertext: &[u8]) -> Result<Vec<u8>, String> {
         )
     }
     .map_err(|error| {
-        format!("Windows could not unlock Cloudflare credentials for this user: {error}")
+        format!("Cloudflare anahtarları bu Windows kullanıcısı için açılamadı: {error}")
     })?;
     let len = result.0.cbData as usize;
     if result.0.pbData.is_null() || len > 65536 {
-        return Err("Protected Cloudflare credentials are invalid.".to_string());
+        return Err("Korumalı Cloudflare anahtarları geçersiz.".to_string());
     }
     Ok(unsafe { std::slice::from_raw_parts(result.0.pbData, len) }.to_vec())
 }
@@ -159,7 +157,7 @@ pub fn save_credentials(credentials: &CloudCredentials) -> Result<(), String> {
                 || password.chars().any(char::is_control)
         })
     {
-        return Err("Cloudflare address, tokens or image password are invalid.".to_string());
+        return Err("Cloudflare adresi, anahtarları veya resim şifresi geçersiz.".to_string());
     }
     let plain = serde_json::to_vec(credentials).map_err(|error| error.to_string())?;
     write_protected(&credential_path()?, &plain)
@@ -169,9 +167,9 @@ fn write_protected(path: &Path, plain: &[u8]) -> Result<(), String> {
     let ciphertext = protect(plain)?;
     let parent = path
         .parent()
-        .ok_or_else(|| "Credential path has no folder.".to_string())?;
+        .ok_or_else(|| "Anahtar dosyasının klasörü yok.".to_string())?;
     std::fs::create_dir_all(parent)
-        .map_err(|error| format!("Could not create credential folder: {error}"))?;
+        .map_err(|error| format!("Anahtar klasörü oluşturulamadı: {error}"))?;
     let temporary = parent.join(format!(
         ".cloud-{}-{}.tmp",
         std::process::id(),
@@ -185,10 +183,10 @@ fn write_protected(path: &Path, plain: &[u8]) -> Result<(), String> {
             .write(true)
             .create_new(true)
             .open(&temporary)
-            .map_err(|error| format!("Could not stage protected credentials: {error}"))?;
+            .map_err(|error| format!("Korumalı anahtarlar hazırlanamadı: {error}"))?;
         file.write_all(&ciphertext)
             .and_then(|()| file.sync_all())
-            .map_err(|error| format!("Could not persist protected credentials: {error}"))?;
+            .map_err(|error| format!("Korumalı anahtarlar kaydedilemedi: {error}"))?;
         drop(file);
         use std::os::windows::ffi::OsStrExt;
         let from: Vec<u16> = temporary.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -200,7 +198,7 @@ fn write_protected(path: &Path, plain: &[u8]) -> Result<(), String> {
                 MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
             )
         }
-        .map_err(|error| format!("Could not activate Cloudflare credentials: {error}"))
+        .map_err(|error| format!("Cloudflare anahtarları etkinleştirilemedi: {error}"))
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(temporary);
@@ -210,17 +208,17 @@ fn write_protected(path: &Path, plain: &[u8]) -> Result<(), String> {
 
 pub fn load_credentials(origin: &str) -> Result<CloudCredentials, String> {
     let path = credential_path()?;
-    let bytes =
-        std::fs::read(path).map_err(|error| format!("Cloudflare setup is incomplete: {error}"))?;
+    let bytes = std::fs::read(path)
+        .map_err(|error| format!("Cloudflare kurulumu tamamlanmamış: {error}"))?;
     if bytes.len() > 65536 || bytes.is_empty() {
-        return Err("Protected credentials have an invalid size.".to_string());
+        return Err("Korumalı anahtar dosyasının boyutu geçersiz.".to_string());
     }
     let plain = unprotect(&bytes)?;
     let data: CloudCredentials = serde_json::from_slice(&plain)
-        .map_err(|_| "Protected credentials are corrupt.".to_string())?;
+        .map_err(|_| "Korumalı anahtar dosyası bozuk.".to_string())?;
     if data.origin != origin {
         return Err(
-            "Cloudflare address changed. Pair this installation again before uploading."
+            "Cloudflare adresi değişti. Yüklemeden önce bu bilgisayarı yeniden bağlayın."
                 .to_string(),
         );
     }
@@ -235,7 +233,7 @@ fn remove_secret(path: PathBuf) -> Result<(), String> {
     match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(format!("Could not remove protected credentials: {error}")),
+        Err(error) => Err(format!("Korumalı anahtarlar silinemedi: {error}")),
     }
 }
 
@@ -280,7 +278,7 @@ pub fn api_request(
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
     {
-        return Err("Cloudflare request contains an invalid address or credential.".to_string());
+        return Err("Cloudflare isteğinde geçersiz adres veya anahtar var.".to_string());
     }
     https_request(
         &origin[8..],
@@ -317,7 +315,7 @@ pub fn control_request(
                 })
         })
     {
-        return Err("Invalid Cloudflare API destination or access credential.".to_string());
+        return Err("Geçersiz Cloudflare API hedefi veya erişim anahtarı.".to_string());
     }
     https_request(host, path, method, bearer, content_type, None, body)
 }
@@ -395,19 +393,19 @@ fn https_attempt(
     let mut file = match body {
         RequestBody::File(path) => Some(
             std::fs::File::open(path)
-                .map_err(|error| format!("Screenshot file is unavailable: {error}"))?,
+                .map_err(|error| format!("Ekran görüntüsü dosyası okunamadı: {error}"))?,
         ),
         RequestBody::Bytes(_) => None,
     };
     let size = match body {
         RequestBody::File(path) => std::fs::metadata(path)
-            .map_err(|error| format!("Screenshot size is unknown: {error}"))?
+            .map_err(|error| format!("Ekran görüntüsü boyutu okunamadı: {error}"))?
             .len(),
         RequestBody::Bytes(bytes) => bytes.len() as u64,
     };
     if size > 10 * 1024 * 1024 {
         return Err(
-            "Screenshot or setup request exceeds the maximum service size."
+            "Ekran görüntüsü veya kurulum isteği izin verilen boyutu aşıyor."
                 .to_string()
                 .into(),
         );
@@ -424,7 +422,7 @@ fn https_attempt(
     });
     if session.0.is_null() {
         return Err(format!(
-            "WinHTTP could not start: {}",
+            "WinHTTP başlatılamadı: {}",
             windows::core::Error::from_win32()
         )
         .into());
@@ -432,7 +430,7 @@ fn https_attempt(
     // Resolve, connect, send and receive limits; uploads over slow uplinks and
     // Worker cold starts need more headroom than a JSON API call.
     unsafe { WinHttpSetTimeouts(session.0, 10_000, 10_000, 30_000, 30_000) }
-        .map_err(|error| format!("Could not set Cloudflare request timeouts: {error}"))?;
+        .map_err(|error| format!("Cloudflare istek süreleri ayarlanamadı: {error}"))?;
     let host_wide = wide(host);
     let connection = InternetHandle(unsafe {
         WinHttpConnect(
@@ -444,7 +442,7 @@ fn https_attempt(
     });
     if connection.0.is_null() {
         return Err(format!(
-            "Cloudflare host is unavailable: {}",
+            "Cloudflare sunucusuna ulaşılamıyor: {}",
             windows::core::Error::from_win32()
         )
         .into());
@@ -464,7 +462,7 @@ fn https_attempt(
     });
     if request.0.is_null() {
         return Err(format!(
-            "Could not create the Cloudflare request: {}",
+            "Cloudflare isteği oluşturulamadı: {}",
             windows::core::Error::from_win32()
         )
         .into());
@@ -476,7 +474,7 @@ fn https_attempt(
             Some(&WINHTTP_OPTION_REDIRECT_POLICY_NEVER.to_ne_bytes()),
         )
     }
-    .map_err(|error| format!("Could not disable Cloudflare redirects: {error}"))?;
+    .map_err(|error| format!("Cloudflare yönlendirmeleri kapatılamadı: {error}"))?;
     let mut headers = String::from("Accept: application/json\r\n");
     if let Some(bearer) = bearer {
         headers.push_str(&format!("Authorization: Bearer {bearer}\r\n"));
@@ -499,7 +497,7 @@ fn https_attempt(
                     | "image/jpeg"
             )
         {
-            return Err("Unsupported Cloudflare content type.".to_string().into());
+            return Err("Desteklenmeyen Cloudflare içerik türü.".to_string().into());
         }
         headers.push_str(&format!("Content-Type: {content_type}\r\n"));
     }
@@ -508,7 +506,7 @@ fn https_attempt(
             || password.len() > 128
             || password.chars().any(char::is_control)
         {
-            return Err("Invalid image password.".to_string().into());
+            return Err("Geçersiz resim şifresi.".to_string().into());
         }
         const ALPHABET: &[u8; 64] =
             b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -536,7 +534,7 @@ fn https_attempt(
     unsafe { WinHttpSendRequest(request.0, Some(&headers), None, 0, size as u32, 0) }.map_err(
         |error| Failure {
             retryable: transient(&error),
-            message: format!("Could not reach Cloudflare: {error}"),
+            message: format!("Cloudflare'a ulaşılamadı; internet bağlantınızı denetleyin: {error}"),
         },
     )?;
     let mut buffer = [0u8; 64 * 1024];
@@ -552,9 +550,9 @@ fn https_attempt(
                         &mut written,
                     )
                 }
-                .map_err(|error| format!("Could not send Cloudflare data: {error}"))?;
+                .map_err(|error| format!("Cloudflare'a veri gönderilemedi: {error}"))?;
                 if written as usize != chunk.len() {
-                    return Err("Cloudflare connection stopped before upload finished."
+                    return Err("Cloudflare bağlantısı yükleme bitmeden kesildi."
                         .to_string()
                         .into());
                 }
@@ -565,7 +563,7 @@ fn https_attempt(
             loop {
                 let count = source
                     .read(&mut buffer)
-                    .map_err(|error| format!("Could not read the screenshot file: {error}"))?;
+                    .map_err(|error| format!("Ekran görüntüsü dosyası okunamadı: {error}"))?;
                 if count == 0 {
                     break;
                 }
@@ -578,9 +576,9 @@ fn https_attempt(
                         &mut written,
                     )
                 }
-                .map_err(|error| format!("Could not send the screenshot: {error}"))?;
+                .map_err(|error| format!("Ekran görüntüsü gönderilemedi: {error}"))?;
                 if written as usize != count {
-                    return Err("Cloudflare connection stopped before upload finished."
+                    return Err("Cloudflare bağlantısı yükleme bitmeden kesildi."
                         .to_string()
                         .into());
                 }
@@ -592,7 +590,7 @@ fn https_attempt(
     unsafe { WinHttpReceiveResponse(request.0, std::ptr::null_mut()) }.map_err(|error| {
         Failure {
             retryable: method == "GET" && transient(&error),
-            message: format!("Cloudflare did not respond: {error}"),
+            message: format!("Cloudflare yanıt vermedi: {error}"),
         }
     })?;
     let mut status = 0u32;
@@ -608,17 +606,17 @@ fn https_attempt(
             &mut index,
         )
     }
-    .map_err(|error| format!("Could not read the Cloudflare response code: {error}"))?;
+    .map_err(|error| format!("Cloudflare yanıt kodu okunamadı: {error}"))?;
     let mut data = Vec::new();
     loop {
         let mut available = 0u32;
         unsafe { WinHttpQueryDataAvailable(request.0, &mut available) }
-            .map_err(|error| format!("Could not read the Cloudflare response: {error}"))?;
+            .map_err(|error| format!("Cloudflare yanıtı okunamadı: {error}"))?;
         if available == 0 {
             break;
         }
         if data.len().saturating_add(available as usize) > MAX_JSON_BYTES {
-            return Err("Cloudflare response exceeds the safe size limit."
+            return Err("Cloudflare yanıtı güvenli boyut sınırını aşıyor."
                 .to_string()
                 .into());
         }
@@ -634,9 +632,9 @@ fn https_attempt(
                     &mut count,
                 )
             }
-            .map_err(|error| format!("Could not read Cloudflare data: {error}"))?;
+            .map_err(|error| format!("Cloudflare verisi okunamadı: {error}"))?;
             if count == 0 {
-                return Err("Cloudflare response ended early.".to_string().into());
+                return Err("Cloudflare yanıtı erken kesildi.".to_string().into());
             }
             data.extend_from_slice(&buffer[..count as usize]);
             remaining -= count as usize;
@@ -647,7 +645,7 @@ fn https_attempt(
             .any(|part| part == value.as_bytes())
     }) {
         return Err(
-            "Cloudflare endpoint returned credential data; response was discarded."
+            "Cloudflare yanıtı anahtar verisi içeriyordu; yanıt yok sayıldı."
                 .to_string()
                 .into(),
         );
@@ -676,12 +674,12 @@ pub fn admin_json(
         RequestBody::Bytes(encoded.as_deref().unwrap_or_default()),
     )?;
     let response: serde_json::Value = serde_json::from_slice(&body)
-        .map_err(|_| format!("Cloudflare sent an invalid response (HTTP {status})."))?;
+        .map_err(|_| format!("Cloudflare geçersiz yanıt gönderdi (HTTP {status})."))?;
     if !(200..300).contains(&status) {
         return Err(response
             .get("error")
             .and_then(|v| v.as_str())
-            .unwrap_or("Cloudflare rejected the request.")
+            .unwrap_or("Cloudflare isteği reddetti.")
             .to_string());
     }
     Ok(response)

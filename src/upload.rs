@@ -42,7 +42,7 @@ pub fn begin_upload(
     hwnd: HWND,
 ) -> Result<(), String> {
     let origin = settings.cloud_url.as_deref().ok_or_else(|| {
-        "Set up your own Cloudflare address in Settings before uploading.".to_string()
+        "Yüklemeden önce Ayarlar > Paylaşım bölümünden Cloudflare bağlantısını kurun.".to_string()
     })?;
     let credentials = cloudflare_setup::load_credentials(origin)?;
     let unique = cloudflare_setup::generate_token()?;
@@ -60,7 +60,7 @@ pub fn begin_upload(
         settings.save_format,
         settings.jpeg_quality,
     )
-    .map_err(|error| format!("Could not prepare screenshot for upload: {error}"))?;
+    .map_err(|error| format!("Ekran görüntüsü yüklemeye hazırlanamadı: {error}"))?;
     let format = settings.save_format;
     let target = credentials.origin.clone();
     let handle = hwnd.0 as usize;
@@ -90,7 +90,7 @@ pub fn begin_upload(
                 );
             }
         })
-        .map_err(|error| format!("Could not start upload: {error}"))?;
+        .map_err(|error| format!("Yükleme başlatılamadı: {error}"))?;
     Ok(())
 }
 
@@ -123,7 +123,7 @@ fn send(
                     .and_then(|text| text.as_str())
                     .map(str::to_owned)
             })
-            .unwrap_or_else(|| format!("Upload failed with HTTP {status}."));
+            .unwrap_or_else(|| format!("Yükleme başarısız oldu (HTTP {status})."));
         return Err(detail
             .chars()
             .filter(|character| !character.is_control())
@@ -131,7 +131,7 @@ fn send(
             .collect());
     }
     let receipt: UploadReceipt = serde_json::from_slice(&body)
-        .map_err(|_| "Cloudflare returned an invalid upload receipt.".to_string())?;
+        .map_err(|_| "Cloudflare geçersiz bir yükleme yanıtı döndürdü.".to_string())?;
     if receipt.id.len() != 32
         || !receipt
             .id
@@ -139,7 +139,7 @@ fn send(
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
         || receipt.url != format!("{origin}/i/{}", receipt.id)
     {
-        return Err("Cloudflare returned a link outside this installation.".to_string());
+        return Err("Cloudflare bu kuruluma ait olmayan bir bağlantı döndürdü.".to_string());
     }
     Ok(receipt.url)
 }
