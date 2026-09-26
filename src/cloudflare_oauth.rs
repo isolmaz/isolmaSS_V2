@@ -19,6 +19,10 @@ const REDIRECT_URI: &str = "http://127.0.0.1:38481/oauth/callback";
 const CALLBACK_PORT: u16 = 38481;
 const MAX_ACCOUNTS: usize = 200;
 const WORKER_SOURCE: &str = include_str!("../cloudflare/worker.mjs");
+/// Must equal `WORKER_VERSION` in `cloudflare/worker.mjs` (checked by a test).
+pub const WORKER_VERSION: u64 = 2;
+/// Per-account rate-limit namespace for share-link views (60 per IP per minute).
+const VIEW_LIMITER: &str = "4917";
 
 #[derive(Debug, Clone)]
 pub struct Account {
@@ -635,19 +639,38 @@ fn vacant_worker(token: &str, account: &Account, cancel: &AtomicBool) -> Result<
     Err("Boş bir Worker adı bulunamadı; tekrar deneyin.".into())
 }
 
-fn multipart(upload_token: &str, admin_token: &str) -> Result<(String, Vec<u8>), String> {
+/// Script-upload body. A new Worker declares its Durable Object migration; an
+/// update of an existing Worker must not repeat it. The view rate limiter is
+/// optional so an account that rejects the binding still gets a working Worker.
+fn multipart(
+    upload_token: &str,
+    admin_token: &str,
+    limiter: bool,
+    new_worker: bool,
+) -> Result<(String, Vec<u8>), String> {
     let boundary = format!("isolmass-{}", cloudflare_setup::generate_token()?);
-    let metadata = json!({
+    let mut bindings = vec![
+        json!({"type":"durable_object_namespace", "name":"STORE", "class_name":"ShareStore"}),
+        json!({"type":"secret_text", "name":"UPLOAD_TOKEN", "text":upload_token}),
+        json!({"type":"secret_text", "name":"ADMIN_TOKEN", "text":admin_token}),
+    ];
+    if limiter {
+        bindings.push(json!({
+            "type":"ratelimit",
+            "name":"VIEW_LIMITER",
+            "namespace_id":VIEW_LIMITER,
+            "simple":{"limit":60, "period":60}
+        }));
+    }
+    let mut metadata = json!({
         "main_module": "worker.mjs",
         "compatibility_date": "2026-09-24",
-        "bindings": [
-            {"type":"durable_object_namespace", "name":"STORE", "class_name":"ShareStore"},
-            {"type":"secret_text", "name":"UPLOAD_TOKEN", "text":upload_token},
-            {"type":"secret_text", "name":"ADMIN_TOKEN", "text":admin_token}
-        ],
-        // Script-upload API shape (SingleStepMigration), not wrangler's `[[migrations]]` list.
-        "migrations": {"new_tag":"v1", "new_sqlite_classes":["ShareStore"]}
+        "bindings": bindings,
     });
+    if new_worker {
+        // Script-upload API shape (SingleStepMigration), not wrangler's `[[migrations]]` list.
+        metadata["migrations"] = json!({"new_tag":"v1", "new_sqlite_classes":["ShareStore"]});
+    }
     let encoded = serde_json::to_vec(&metadata).map_err(|error| error.to_string())?;
     let mut body = Vec::with_capacity(WORKER_SOURCE.len() + encoded.len() + 512);
     body.extend_from_slice(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"metadata\"\r\nContent-Type: application/json\r\n\r\n").as_bytes());
@@ -656,6 +679,52 @@ fn multipart(upload_token: &str, admin_token: &str) -> Result<(String, Vec<u8>),
     body.extend_from_slice(WORKER_SOURCE.as_bytes());
     body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
     Ok((format!("multipart/form-data; boundary={boundary}"), body))
+}
+
+/// Uploads the Worker script, first with the view rate limiter and, if
+/// Cloudflare refuses that request, once more without it.
+fn upload_script(
+    token: &str,
+    account: &Account,
+    worker: &str,
+    credentials: &CloudCredentials,
+    new_worker: bool,
+) -> Result<(), String> {
+    let path = account_path(account, &format!("scripts/{worker}"));
+    let mut last = String::new();
+    for limiter in [true, false] {
+        let (content_type, body) = multipart(
+            &credentials.upload_token,
+            &credentials.admin_token,
+            limiter,
+            new_worker,
+        )?;
+        let (status, bytes) = cloudflare_setup::control_request(
+            "api.cloudflare.com",
+            &path,
+            "PUT",
+            Some(token),
+            Some(&content_type),
+            RequestBody::Bytes(&body),
+        )?;
+        if (200..300).contains(&status)
+            && serde_json::from_slice::<Value>(&bytes).is_ok_and(|value| value["success"] == true)
+        {
+            if !limiter {
+                crate::diagnostics::record(
+                    "cloudflare worker",
+                    &format!("rate limiter binding refused, installed without it: {last}"),
+                );
+            }
+            return Ok(());
+        }
+        last = api_error(status, &bytes);
+        // Authorization problems will not improve without the binding.
+        if matches!(status, 401 | 403) {
+            break;
+        }
+    }
+    Err(format!("Cloudflare Worker yüklemesini reddetti ({last})."))
 }
 
 /// A Worker that was created in the user's account. `ready` is false when its
@@ -671,32 +740,19 @@ pub fn install(token: &str, account: &Account, cancel: &AtomicBool) -> Result<In
     }
     let (subdomain, created) = ensure_subdomain(token, account, cancel)?;
     let worker = vacant_worker(token, account, cancel)?;
-    let upload_token = cloudflare_setup::generate_token()?;
-    let admin_token = cloudflare_setup::generate_token()?;
-    let (content_type, body) = multipart(&upload_token, &admin_token)?;
+    let origin = format!("https://{worker}.{subdomain}.workers.dev");
+    let credentials = CloudCredentials {
+        origin: origin.clone(),
+        upload_token: cloudflare_setup::generate_token()?,
+        admin_token: cloudflare_setup::generate_token()?,
+        share_password: None,
+        account_id: Some(account.id.clone()),
+        worker_name: Some(worker.clone()),
+    };
     if cancel.load(Ordering::Relaxed) {
         return Err("Cloudflare kurulumu iptal edildi.".into());
     }
-    let path = account_path(account, &format!("scripts/{worker}"));
-    let (status, bytes) = cloudflare_setup::control_request(
-        "api.cloudflare.com",
-        &path,
-        "PUT",
-        Some(token),
-        Some(&content_type),
-        RequestBody::Bytes(&body),
-    )?;
-    if !(200..300).contains(&status) {
-        return Err(format!(
-            "Cloudflare Worker kurulumu reddetti ({}).",
-            api_error(status, &bytes)
-        ));
-    }
-    let response: Value = serde_json::from_slice(&bytes)
-        .map_err(|_| "Cloudflare Worker kurulum yanıtı okunamadı.".to_string())?;
-    if response["success"] != true {
-        return Err("Cloudflare Worker oluşturulamadı.".into());
-    }
+    upload_script(token, account, &worker, &credentials, true)?;
     let route = account_path(account, &format!("scripts/{worker}/subdomain"));
     let enabled = cloudflare_json(
         "api.cloudflare.com",
@@ -713,13 +769,6 @@ pub fn install(token: &str, account: &Account, cancel: &AtomicBool) -> Result<In
             "Worker {worker} oluşturuldu ancak workers.dev erişimi açılamadı."
         ));
     }
-    let origin = format!("https://{worker}.{subdomain}.workers.dev");
-    let credentials = CloudCredentials {
-        origin: origin.clone(),
-        upload_token,
-        admin_token,
-        share_password: None,
-    };
     // A new workers.dev name needs DNS/TLS propagation (minutes for a brand-new
     // account subdomain). Asking too early also plants a negative DNS cache
     // entry in Windows, so a fresh subdomain gets a head start.
@@ -794,9 +843,92 @@ fn api_error(status: u32, bytes: &[u8]) -> String {
     }
 }
 
+/// Replaces the code of this computer's existing Worker with the bundled
+/// version, keeping its name, address, keys, images and settings. The account
+/// is the stored one, or the authorized account that holds a script of that name.
+pub fn update_worker(
+    token: &str,
+    accounts: &[Account],
+    credentials: &CloudCredentials,
+    cancel: &AtomicBool,
+) -> Result<CloudCredentials, String> {
+    let worker = match credentials.worker_name.clone() {
+        Some(name) => name,
+        None => credentials
+            .origin
+            .strip_prefix("https://")
+            .and_then(|host| host.split('.').next())
+            .filter(|label| label.starts_with("isolmass-share-"))
+            .map(str::to_owned)
+            .ok_or("Bu bağlantının Worker adı belirlenemedi.")?,
+    };
+    let stored = credentials
+        .account_id
+        .as_deref()
+        .and_then(|id| accounts.iter().find(|account| account.id == id));
+    let account = match stored {
+        Some(account) => account.clone(),
+        None => {
+            let mut found = None;
+            for account in accounts {
+                if cancel.load(Ordering::Relaxed) {
+                    return Err("Worker güncellemesi iptal edildi.".into());
+                }
+                let (status, _) = cloudflare_setup::control_request(
+                    "api.cloudflare.com",
+                    &account_path(account, &format!("scripts/{worker}")),
+                    "GET",
+                    Some(token),
+                    None,
+                    RequestBody::Bytes(&[]),
+                )?;
+                if status == 200 {
+                    found = Some(account.clone());
+                    break;
+                }
+            }
+            found.ok_or(
+                "İzin verilen hesaplarda bu bilgisayarın Worker'ı bulunamadı. Cloudflare izin sayfasında Worker'ın bulunduğu hesabı seçin.",
+            )?
+        }
+    };
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Worker güncellemesi iptal edildi.".into());
+    }
+    let mut updated = credentials.clone();
+    updated.account_id = Some(account.id.clone());
+    updated.worker_name = Some(worker.clone());
+    upload_script(token, &account, &worker, &updated, false)?;
+    // The new code is live within seconds; confirm the version it reports.
+    for attempt in 0..10 {
+        if let Ok((200, reply)) = cloudflare_setup::api_request(
+            &updated.origin,
+            "/api/setup",
+            "POST",
+            &updated.admin_token,
+            None,
+            None,
+            RequestBody::Bytes(&[]),
+        ) && serde_json::from_slice::<Value>(&reply)
+            .is_ok_and(|value| value["version"].as_u64() == Some(WORKER_VERSION))
+        {
+            return Ok(updated);
+        }
+        if attempt < 9 {
+            wait(Duration::from_secs(2), cancel);
+        }
+    }
+    Err("Worker güncellendi ancak yeni sürüm henüz yanıt vermiyor; birkaç saniye sonra Yenile'ye basın.".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundled_worker_reports_the_expected_version() {
+        assert!(WORKER_SOURCE.contains(&format!("const WORKER_VERSION = {WORKER_VERSION};")));
+    }
 
     #[test]
     fn oauth_callback_rejects_wrong_state_and_duplicate_parameters() {

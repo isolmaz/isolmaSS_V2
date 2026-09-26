@@ -1,6 +1,6 @@
 # isolmaSS
 
-Native Windows screenshot editor in Rust. Capture a region or window, draw on it, then copy or save locally, or upload to a Worker in **your own Cloudflare account** and get a share link in about a second. isolmaSS operates no shared screenshot service and collects no analytics. Version **0.5.6**.
+Native Windows screenshot editor in Rust. Capture a region or window, draw on it, then copy or save locally, or upload to a Worker in **your own Cloudflare account** and get a share link in about a second. isolmaSS operates no shared screenshot service and collects no analytics. Version **0.5.7**.
 
 ## Use
 
@@ -60,8 +60,8 @@ There is **no central isolmaSS image host or sign-in**. Sharing uses a Worker th
 
 **Cloudflare window.** Once paired it has three tabs and loads current data when opened:
 
-- **Bağlantı** — Worker address, today's and this month's uploads and views, stored images and size, an optional password for new uploads, **Yenile** and **Bağlantıyı kaldır** (removes the connection from this computer only; the Worker and images stay).
-- **Sınırlar** — images kept (50), daily uploads (20) and views (1,000), size per image (10 MB) and in total (800 MB), retention (30 days) and the warning threshold (90%). At the threshold choose *warn*, *stop new uploads* or *stop uploads and viewing*. Counters cover this Worker only, use UTC days, and **no setting guarantees a zero invoice**.
+- **Bağlantı** — Worker address, today's and this month's uploads and views, stored images and size, an optional password for new uploads, **Yenile**, **Bağlantıyı kaldır** (removes the connection from this computer only; the Worker and images stay) and, when the Worker runs older code than the app bundles, **Worker'ı güncelle**. Updating asks for Cloudflare consent once more and replaces only the Worker's code; its address, links, keys, images and settings stay.
+- **Sınırlar** — images kept (50), daily uploads (20), a daily view level for warnings (1,000), size per image (10 MB) and in total (800 MB), retention (30 days) and the warning threshold (90%). At the threshold choose *warn* or *stop new uploads*. Viewing is never blocked by a quota. Counters cover this Worker only, use UTC days, and **no setting guarantees a zero invoice**.
 - **Resimler** — recent images with local time, size, views and password status; **Aç** (or double-click), **Bağlantıyı kopyala** and **Sil**. Deleted and expired links stop working immediately; copies already downloaded cannot be revoked.
 
 A valid link without a password can be viewed by anyone who has it. With a password, only a salted per-image verifier is stored; share the password separately.
@@ -71,7 +71,8 @@ A valid link without a password can be viewed by anyone who has it. With a passw
 - *Workers alt alanı denetlenemedi (403)*: the chosen account does not grant you Workers access, or the publisher's OAuth client is private (usable only by members of its own account). Pick another account.
 - *Adres çözülemedi*: Windows could not resolve the Worker's host name. The app clears that DNS cache entry and retries automatically; if it persists, check the adapter's DNS servers, especially IPv6 servers on a network without IPv6.
 - *401*: the Worker's keys do not match this computer; connect again. The existing Worker is left untouched.
-- *429 / 507*: a daily limit or the storage limit is reached; wait for the UTC reset, raise the limit or delete images.
+- *429 on upload / 507*: the daily upload limit or the storage limit is reached; wait for the UTC reset, raise the limit or delete images.
+- *429 when viewing*: one address opened links more than 60 times in a minute; it can view again a minute later.
 
 ### Worker API
 
@@ -79,7 +80,11 @@ A valid link without a password can be viewed by anyone who has it. With a passw
 
 - `POST /api/upload` requires the `UPLOAD_TOKEN` bearer secret and PNG/JPEG bytes; optional `X-Image-Password` carries a padding-free base64url UTF-8 password (12–128 printable characters). Success: `201 {"id":"<192-bit id>","url":"https://<worker>/i/<id>"}`.
 - `POST /api/setup`, `GET/PUT /api/settings`, `GET /api/stats`, `GET /api/images?limit=50&offset=0` and `DELETE /api/images/:id` require the separate `ADMIN_TOKEN` bearer secret.
-- `GET /i/:id` serves the image or a password form; `POST /i/:id/unlock` checks the password, with at most 20 wrong attempts per hour. Unknown, expired or deleted links return `404`; responses use `no-store`, `nosniff`, CSP and `no-referrer`.
+- `GET /i/:id` serves the image or a password form; `POST /i/:id/unlock` checks the password, with at most 20 wrong attempts per hour. Unknown, expired or deleted links return `404`.
+- Viewing and unlocking are rate-limited to 60 requests per minute per IP address (`429` with `Retry-After`) through Cloudflare's rate-limiting binding; if an account refuses that binding the Worker runs without it.
+- Images without a password are immutable under their ID: responses carry `Cache-Control: public, max-age=31536000, immutable` and an `ETag`, so browsers reuse them and a revalidation returns `304` without touching storage. Password pages and unlocked images use `no-store`. All responses send `nosniff`, CSP and `no-referrer`.
+- A view counts once per visitor, image and UTC day. The visitor is a salted, day-specific hash of the IP address; raw addresses are never stored and the hashes are deleted when the day ends.
+- `POST /api/setup` and `GET /api/stats` report the Worker version; the app offers **Worker'ı güncelle** when it bundles newer code.
 
 Images are stored in chunks of at most 1 MB. Consult Cloudflare's [Workers limits](https://developers.cloudflare.com/workers/platform/limits/) and [Durable Objects limits](https://developers.cloudflare.com/durable-objects/platform/limits/); free allowances are shared by the whole account.
 

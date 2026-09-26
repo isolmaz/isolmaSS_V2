@@ -1,5 +1,7 @@
 import { DurableObject } from 'cloudflare:workers';
 
+/** Reported by /api/setup and /api/stats so the app can offer a Worker update. */
+const WORKER_VERSION = 2;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder('utf-8', { fatal: true });
 const IMAGE_ID = /^[A-Za-z0-9_-]{32}$/;
@@ -20,10 +22,25 @@ const NO_STORE = {
   'X-Content-Type-Options': 'nosniff',
 };
 
-function json(value, status = 200) {
+function json(value, status = 200, extra = {}) {
   return new Response(JSON.stringify(value), {
-    status, headers: { ...NO_STORE, 'Content-Type': 'application/json; charset=utf-8' },
+    status, headers: { ...NO_STORE, 'Content-Type': 'application/json; charset=utf-8', ...extra },
   });
+}
+/** Public images never change under their random ID, so browsers may keep them. */
+const IMMUTABLE = {
+  'Cache-Control': 'public, max-age=31536000, immutable',
+  'Referrer-Policy': 'no-referrer',
+  'X-Content-Type-Options': 'nosniff',
+};
+function etag(id) { return `"${id}"`; }
+function notModified(id) {
+  return new Response(null, { status: 304, headers: { ...IMMUTABLE, ETag: etag(id) } });
+}
+async function visitorKey(request, salt, day) {
+  const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+  const digest = await crypto.subtle.digest('SHA-256', encoder.encode(`${salt}|${day}|${ip}`));
+  return encodeBase64Url(new Uint8Array(digest).subarray(0, 16));
 }
 function error(status, message) { return json({ error: message }, status); }
 class LimitStop extends Error {
@@ -210,8 +227,25 @@ export class ShareStore extends DurableObject {
         failures INTEGER NOT NULL DEFAULT 0,
         PRIMARY KEY(id, hour)
       );
+      CREATE TABLE IF NOT EXISTS view_marks (
+        day TEXT NOT NULL,
+        image_id TEXT NOT NULL,
+        visitor TEXT NOT NULL,
+        PRIMARY KEY(day, image_id, visitor)
+      );
+      CREATE TABLE IF NOT EXISTS meta (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
     `);
+    // Viewing is never blocked by a quota; older installs may still say block_all.
+    this.sql.exec("UPDATE preferences SET limit_action='block_upload' WHERE limit_action='block_all'");
+    if (!this.sql.exec("SELECT value FROM meta WHERE key='visitor_salt'").toArray().length)
+      this.sql.exec("INSERT INTO meta(key, value) VALUES('visitor_salt', ?)", randomId());
   }
+
+  visitorSalt() { return this.sql.exec("SELECT value FROM meta WHERE key='visitor_salt'").one().value; }
+  pruneViews(now) { this.sql.exec('DELETE FROM view_marks WHERE day < ?', dayOf(now)); }
 
   settings() { return this.sql.exec('SELECT * FROM preferences WHERE id = 1').one(); }
   daily(now) {
@@ -240,6 +274,7 @@ export class ShareStore extends DurableObject {
   async alarm() {
     this.ctx.storage.transactionSync(() => {
       this.trim(Date.now(), this.settings().max_active);
+      this.pruneViews(Date.now());
       this.sql.exec('DELETE FROM password_attempts WHERE hour < ?', Math.floor(Date.now() / 3_600_000) - 24);
     });
     await this.nextAlarm();
@@ -260,7 +295,8 @@ export class ShareStore extends DurableObject {
       const daily = this.daily(now);
       const occupied = this.stored().stored_bytes;
       const threshold = prefs.warning_percent / 100;
-      if (daily.uploads >= 1000 || (prefs.limit_action !== 'warn' &&
+      this.pruneViews(now);
+      if (daily.uploads >= 1000 || (prefs.limit_action === 'block_upload' &&
         (daily.uploads >= Math.max(1, Math.floor(prefs.daily_upload_limit * threshold)) ||
           occupied + total > prefs.max_storage_bytes * threshold))) {
         throw new LimitStop(error(429, 'Upload limit reached. Change limits or wait for reset.'));
@@ -283,28 +319,30 @@ export class ShareStore extends DurableObject {
     await this.nextAlarm();
     return json({ id, url: `${origin}/i/${id}` }, 201);
   }
-  imageResponse(record, now) {
+  async imageResponse(request, record, now, unlocked) {
     const pieces = this.sql.exec('SELECT bytes FROM chunks WHERE image_id = ? ORDER BY part', record.id).toArray();
     if (!pieces.length || pieces.reduce((length, row) => length + row.bytes.byteLength, 0) !== record.size_bytes)
       throw new Error('Image storage is incomplete.');
-    const settings = this.settings(), daily = this.daily(now);
-    const threshold = settings.warning_percent / 100;
-    if (settings.limit_action === 'block_all' &&
-      (daily.views >= Math.max(1, Math.floor(settings.daily_view_limit * threshold)) ||
-        daily.uploads >= Math.max(1, Math.floor(settings.daily_upload_limit * threshold))))
-      return error(429, 'View limit reached.');
+    // Views are statistics only: a quota never hides an image. Each visitor
+    // (salted, daily-rotated hash of the IP) counts once per image per day.
+    const day = dayOf(now);
+    const visitor = await visitorKey(request, this.visitorSalt(), day);
     this.ctx.storage.transactionSync(() => {
-      this.sql.exec('INSERT INTO usage_daily(day, uploads, views, bytes_uploaded) VALUES(?, 0, 1, 0) ON CONFLICT(day) DO UPDATE SET views=views+1', dayOf(now));
-      this.sql.exec('UPDATE images SET views=views+1 WHERE id=?', record.id);
+      const fresh = this.sql.exec('INSERT OR IGNORE INTO view_marks(day, image_id, visitor) VALUES(?, ?, ?)', day, record.id, visitor).rowsWritten > 0;
+      if (fresh) {
+        this.sql.exec('INSERT INTO usage_daily(day, uploads, views, bytes_uploaded) VALUES(?, 0, 1, 0) ON CONFLICT(day) DO UPDATE SET views=views+1', day);
+        this.sql.exec('UPDATE images SET views=views+1 WHERE id=?', record.id);
+      }
     });
     let part = 0;
+    const cache = unlocked ? NO_STORE : { ...IMMUTABLE, ETag: etag(record.id) };
     return new Response(new ReadableStream({
       pull(controller) {
         if (part < pieces.length) controller.enqueue(new Uint8Array(pieces[part++].bytes));
         else controller.close();
       },
     }), { headers: {
-      ...NO_STORE, 'Content-Type': record.content_type,
+      ...cache, 'Content-Type': record.content_type,
       'Content-Security-Policy': "default-src 'none'; sandbox",
       'Content-Disposition': `inline; filename="isolmass.${record.content_type === 'image/png' ? 'png' : 'jpg'}"`,
     } });
@@ -313,7 +351,11 @@ export class ShareStore extends DurableObject {
     if (!IMAGE_ID.test(id)) return error(404, 'Image not found.');
     const record = this.sql.exec('SELECT * FROM images WHERE id = ? AND expires_at > ?', id, Math.floor(now / 1000)).toArray()[0];
     if (!record) return error(404, 'Image not found.');
-    if (!record.password_hash) return unlock ? error(405, 'Not password protected.') : this.imageResponse(record, now);
+    if (!record.password_hash) {
+      if (unlock) return error(405, 'Not password protected.');
+      if (request.headers.get('If-None-Match') === etag(record.id)) return notModified(record.id);
+      return await this.imageResponse(request, record, now, false);
+    }
     if (!unlock) return passwordPage(id);
     const hour = Math.floor(now / 3_600_000);
     const attempt = this.sql.exec('SELECT failures FROM password_attempts WHERE id=? AND hour=?', id, hour).toArray()[0];
@@ -328,7 +370,7 @@ export class ShareStore extends DurableObject {
       this.sql.exec('INSERT INTO password_attempts(id,hour,failures) VALUES(?,?,1) ON CONFLICT(id,hour) DO UPDATE SET failures=failures+1', id, hour);
       return error(401, 'Wrong password.');
     }
-    return this.imageResponse(record, now);
+    return await this.imageResponse(request, record, now, true);
   }
   async updateSettings(request, now) {
     const body = await limitedBody(request, 4096);
@@ -336,15 +378,17 @@ export class ShareStore extends DurableObject {
     try { value = JSON.parse(decoder.decode(body)); }
     catch { return error(400, 'Invalid settings JSON.'); }
     if (!value || typeof value !== 'object' || Array.isArray(value)) return error(400, 'Settings must be an object.');
-    const entries = Object.entries(value);
-    if (!entries.length) return error(400, 'No settings provided.');
-    for (const [key, input] of entries) {
+    if (!Object.keys(value).length) return error(400, 'No settings provided.');
+    for (const [key, input] of Object.entries(value)) {
       if (key === 'limit_action') {
         if (!['warn', 'block_upload', 'block_all'].includes(input)) return error(400, 'Invalid limit action.');
+        // Viewing is never blocked; the former third choice maps to stopping uploads.
+        if (input === 'block_all') value[key] = 'block_upload';
       } else if (!SETTINGS[key] || !Number.isSafeInteger(input) || input < SETTINGS[key][0] || input > SETTINGS[key][1]) {
         return error(400, `Invalid ${key}.`);
       }
     }
+    const entries = Object.entries(value);
     this.ctx.storage.transactionSync(() => {
       this.sql.exec(`UPDATE preferences SET ${entries.map(([key]) => `${key}=?`).join(', ')} WHERE id=1`, ...entries.map(([, input]) => input));
       const prefs = this.settings();
@@ -359,7 +403,8 @@ export class ShareStore extends DurableObject {
     const monthly = this.sql.exec('SELECT COALESCE(SUM(uploads),0) uploads, COALESCE(SUM(views),0) views, COALESCE(SUM(bytes_uploaded),0) bytes_uploaded FROM usage_daily WHERE day >= ? AND day < ?', `${month}-01`, `${month}-32`).one();
     const totals = this.sql.exec('SELECT COALESCE(SUM(uploads),0) uploads, COALESCE(SUM(views),0) views FROM usage_daily').one();
     const images = this.stored();
-    return json({ daily, monthly, totals, images, settings, estimates: {
+    this.pruneViews(now);
+    return json({ worker_version: WORKER_VERSION, daily, monthly, totals, images, settings, estimates: {
       worker_requests: monthly.uploads + monthly.views * 2,
       free_storage_bytes: FREE_STORAGE_BYTES,
       note: 'Free limits apply to the entire Cloudflare account; other Workers and Objects are not included here.',
@@ -381,7 +426,7 @@ export class ShareStore extends DurableObject {
   async fetch(request) {
     const now = Date.now(), url = new URL(request.url), path = url.pathname;
     try {
-      if (path === '/api/setup' && request.method === 'POST') return json({ status: 'ready', origin: url.origin });
+      if (path === '/api/setup' && request.method === 'POST') return json({ status: 'ready', origin: url.origin, version: WORKER_VERSION });
       if (path === '/api/settings') {
         if (request.method === 'GET') return json(this.settings());
         if (request.method === 'PUT') return await this.updateSettings(request, now);
@@ -424,6 +469,17 @@ export default {
       if (!await authorized(request, env.ADMIN_TOKEN)) return error(401, 'Administrator token required.');
     } else if (path.startsWith('/api/')) {
       return error(404, 'Not found.');
+    } else {
+      // A browser that already holds the (immutable) image revalidates for free.
+      const shown = /^\/i\/([A-Za-z0-9_-]{32})$/.exec(path);
+      if (shown && request.method === 'GET' && request.headers.get('If-None-Match') === etag(shown[1]))
+        return notModified(shown[1]);
+      // Per-IP rate limit on viewing and unlocking, when the binding exists.
+      if (env.VIEW_LIMITER) {
+        const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+        const { success } = await env.VIEW_LIMITER.limit({ key: ip });
+        if (!success) return json({ error: 'Too many requests. Try again in a minute.' }, 429, { 'Retry-After': '60' });
+      }
     }
     try {
       const stub = env.STORE.getByName('installation');

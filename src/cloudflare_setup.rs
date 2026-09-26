@@ -22,6 +22,11 @@ pub struct CloudCredentials {
     pub upload_token: String,
     pub admin_token: String,
     pub share_password: Option<String>,
+    /// Cloudflare account and script name, kept so the Worker can be updated.
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default)]
+    pub worker_name: Option<String>,
 }
 
 pub fn valid_cloud_origin(origin: &str) -> bool {
@@ -155,6 +160,17 @@ pub fn save_credentials(credentials: &CloudCredentials) -> Result<(), String> {
             password.chars().count() < 12
                 || password.len() > 128
                 || password.chars().any(char::is_control)
+        })
+        || credentials
+            .account_id
+            .as_ref()
+            .is_some_and(|id| id.len() != 32 || !id.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        || credentials.worker_name.as_ref().is_some_and(|name| {
+            name.is_empty()
+                || name.len() > 63
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
         })
     {
         return Err("Cloudflare adresi, anahtarları veya resim şifresi geçersiz.".to_string());

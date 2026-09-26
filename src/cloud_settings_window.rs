@@ -41,6 +41,7 @@ const ID_PASSWORD: i32 = 1032;
 const ID_SAVE_PASSWORD: i32 = 1033;
 const ID_OPEN_IMAGE: i32 = 1034;
 const ID_COPY_IMAGE: i32 = 1035;
+const ID_UPDATE_WORKER: i32 = 1036;
 // Labels.
 const ID_INTRO: i32 = 1101;
 const ID_STEP_ACCOUNT: i32 = 1102;
@@ -57,7 +58,7 @@ const TABS: [&str; 3] = ["Bağlantı", "Sınırlar", "Resimler"];
 const LIMITS: [(&str, &str, u64); 7] = [
     ("Saklanan son resim", "max_active", 1),
     ("Günlük yükleme", "daily_upload_limit", 1),
-    ("Günlük görüntüleme", "daily_view_limit", 1),
+    ("Görüntüleme uyarısı (günlük)", "daily_view_limit", 1),
     ("Resim boyutu (MB)", "max_image_bytes", 1024 * 1024),
     ("Toplam alan (MB)", "max_storage_bytes", 1024 * 1024),
     ("Saklama (gün)", "retention_days", 1),
@@ -78,6 +79,10 @@ struct State {
     for_upload: bool,
     pending: bool,
     authorizing: bool,
+    /// The next authorization is for updating the existing Worker.
+    updating: bool,
+    /// The Worker runs older code than the app bundles.
+    outdated: bool,
     cancel: Arc<AtomicBool>,
     authorization: Option<Authorization>,
     loaded: bool,
@@ -164,6 +169,7 @@ enum Completion {
     Refresh(std::result::Result<(Value, Value), String>),
     Limits(std::result::Result<Value, String>),
     Delete(std::result::Result<String, String>),
+    WorkerUpdate(std::result::Result<cloudflare_setup::CloudCredentials, String>),
 }
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(Some(0)).collect()
@@ -255,7 +261,7 @@ fn place(hwnd: HWND, id: i32, (x, y, width, height): (i32, i32, i32, i32), dpi: 
 fn tab_of(id: i32) -> Option<usize> {
     match id {
         ID_INTRO | ID_STATS | ID_PASSWORD_LABEL | ID_PASSWORD | ID_SAVE_PASSWORD | ID_REFRESH
-        | ID_FORGET => Some(0),
+        | ID_UPDATE_WORKER | ID_FORGET => Some(0),
         ID_MODE_LABEL | ID_MODE | ID_SAVE_LIMITS | ID_COST_NOTE => Some(1),
         _ if (ID_LIMIT_FIRST..ID_LIMIT_FIRST + LIMITS.len() as i32).contains(&id)
             || (ID_LIMIT_LABEL_FIRST..ID_LIMIT_LABEL_FIRST + LIMITS.len() as i32).contains(&id) =>
@@ -273,8 +279,9 @@ fn show_tab(hwnd: HWND, state: &State) {
     }
     for id in 1000..1300 {
         if let (Some(tab), Some(child)) = (tab_of(id), control(hwnd, id)) {
+            let visible = tab == state.tab && (id != ID_UPDATE_WORKER || state.outdated);
             unsafe {
-                let _ = ShowWindow(child, if tab == state.tab { SW_SHOW } else { SW_HIDE });
+                let _ = ShowWindow(child, if visible { SW_SHOW } else { SW_HIDE });
             }
         }
     }
@@ -329,7 +336,13 @@ fn layout(hwnd: HWND, state: &State) -> i32 {
             (right - 150, top + 147, 150, ROW + 2),
             dpi,
         );
-        place(hwnd, ID_REFRESH, (MARGIN, top + 200, 120, ROW + 2), dpi);
+        place(hwnd, ID_REFRESH, (MARGIN, top + 200, 100, ROW + 2), dpi);
+        place(
+            hwnd,
+            ID_UPDATE_WORKER,
+            (MARGIN + 108, top + 200, 150, ROW + 2),
+            dpi,
+        );
         place(hwnd, ID_FORGET, (right - 170, top + 200, 170, ROW + 2), dpi);
         let connection = top + 236;
         // Limits
@@ -420,6 +433,7 @@ fn set_busy(hwnd: HWND, state: &mut State, busy: bool) {
         ID_SAVE_PASSWORD,
         ID_DELETE,
         ID_FORGET,
+        ID_UPDATE_WORKER,
     ] {
         if let Some(child) = control(hwnd, id) {
             unsafe {
@@ -546,7 +560,6 @@ fn save_limits(hwnd: HWND, state: &mut State) {
     let action = match choice {
         0 => "warn",
         1 => "block_upload",
-        2 => "block_all",
         _ => {
             crate::ui::error(hwnd, "Cloudflare", "Sınırda davranışı seçin.");
             return;
@@ -564,6 +577,21 @@ fn save_limits(hwnd: HWND, state: &mut State) {
     });
 }
 fn show_stats(hwnd: HWND, state: &mut State, stats: &Value, images: &Value) {
+    // Workers installed before versioning report nothing: treat them as 1.
+    let outdated = stats["worker_version"].as_u64().unwrap_or(1) < cloudflare_oauth::WORKER_VERSION;
+    if let Some(button) = control(hwnd, ID_UPDATE_WORKER) {
+        unsafe {
+            let _ = ShowWindow(
+                button,
+                if outdated && state.tab == 0 {
+                    SW_SHOW
+                } else {
+                    SW_HIDE
+                },
+            );
+        }
+    }
+    state.outdated = outdated;
     let count = |value: &Value, key: &str| value.get(key).and_then(Value::as_u64).unwrap_or(0);
     let daily = &stats["daily"];
     let monthly = &stats["monthly"];
@@ -594,7 +622,7 @@ fn show_stats(hwnd: HWND, state: &mut State, stats: &Value, images: &Value) {
     let mode = match stats["settings"]["limit_action"].as_str() {
         Some("warn") => 0,
         Some("block_upload") => 1,
-        Some("block_all") => 2,
+        Some("block_all") => 1,
         _ => -1,
     };
     if let Some(combo) = control(hwnd, ID_MODE) {
@@ -655,7 +683,9 @@ fn show_stats(hwnd: HWND, state: &mut State, stats: &Value, images: &Value) {
     }
     set_status(
         hwnd,
-        if state.images.is_empty() {
+        if state.outdated {
+            "Worker güncellemesi hazır: görüntüleme koruması ve önbellek. Worker'ı güncelle'ye basın."
+        } else if state.images.is_empty() {
             "Bağlı · Henüz yüklenmiş resim yok."
         } else {
             "Bağlı · Güncel istatistikler alındı."
@@ -826,6 +856,14 @@ fn command(hwnd: HWND, state: &mut State, id: i32) {
         ID_DELETE => delete_image(hwnd, state),
         ID_OPEN_IMAGE => open_image(hwnd, state),
         ID_COPY_IMAGE => copy_image(hwnd, state),
+        ID_UPDATE_WORKER => {
+            state.updating = true;
+            begin_authorization(hwnd, state);
+            set_status(
+                hwnd,
+                "Tarayıcıda Worker'ın bulunduğu hesaba izin verin; adres, linkler ve resimler aynen kalır.",
+            );
+        }
         ID_FORGET => disconnect(hwnd, state),
         ID_CLOSE => close(hwnd, state),
         _ => {}
@@ -1068,6 +1106,45 @@ unsafe extern "system" fn wnd_proc(
                         "Cloudflare bağlantısı iptal edildi; görüntü yerelde kaldı.",
                     );
                 }
+                Some(Completion::Authorization(Ok(auth))) if state.updating => {
+                    state.updating = false;
+                    match state
+                        .settings
+                        .cloud_url
+                        .as_deref()
+                        .ok_or_else(|| "Bağlantı bulunamadı.".to_string())
+                        .and_then(cloudflare_setup::load_credentials)
+                    {
+                        Ok(credentials) => {
+                            set_status(hwnd, "Worker güncelleniyor; pencereyi kapatmayın…");
+                            let cancel = state.cancel.clone();
+                            start(hwnd, state, move || {
+                                Completion::WorkerUpdate(cloudflare_oauth::update_worker(
+                                    &auth.access_token,
+                                    &auth.accounts,
+                                    &credentials,
+                                    &cancel,
+                                ))
+                            });
+                        }
+                        Err(error) => crate::ui::error(hwnd, "Worker güncellemesi", &error),
+                    }
+                }
+                Some(Completion::WorkerUpdate(Ok(credentials))) => {
+                    match cloudflare_setup::save_credentials(&credentials) {
+                        Ok(()) => {
+                            state.outdated = false;
+                            show_tab(hwnd, state);
+                            set_status(hwnd, "Worker güncellendi.");
+                            refresh(hwnd, state);
+                        }
+                        Err(error) => crate::ui::error(hwnd, "Worker güncellemesi", &error),
+                    }
+                }
+                Some(Completion::WorkerUpdate(Err(error))) => {
+                    set_status(hwnd, "Worker güncellenemedi; ayrıntı uyarıda.");
+                    crate::ui::error(hwnd, "Worker güncellemesi", &error);
+                }
                 Some(Completion::Authorization(Ok(auth))) => {
                     let only = auth.accounts.len() == 1;
                     if let Some(combo) = control(hwnd, ID_ACCOUNT) {
@@ -1156,8 +1233,12 @@ unsafe extern "system" fn wnd_proc(
                     );
                     crate::ui::error(hwnd, "Cloudflare", &error);
                 }
-                Some(Completion::Authorization(Err(error)))
-                | Some(Completion::Refresh(Err(error)))
+                Some(Completion::Authorization(Err(error))) => {
+                    state.updating = false;
+                    set_status(hwnd, "Cloudflare işlemi başarısız; ayrıntı uyarıda.");
+                    crate::ui::error(hwnd, "Cloudflare", &error);
+                }
+                Some(Completion::Refresh(Err(error)))
                 | Some(Completion::Limits(Err(error)))
                 | Some(Completion::Delete(Err(error))) => {
                     set_status(hwnd, "Cloudflare işlemi başarısız; ayrıntı uyarıda.");
@@ -1288,6 +1369,7 @@ fn build_controls(hwnd: HWND, state: &State) -> Result<()> {
     edit(hwnd, ID_PASSWORD, true)?;
     button(hwnd, ID_SAVE_PASSWORD, "Şifreyi kaydet")?;
     button(hwnd, ID_REFRESH, "Yenile")?;
+    button(hwnd, ID_UPDATE_WORKER, "Worker'ı güncelle")?;
     button(hwnd, ID_FORGET, "Bağlantıyı kaldır")?;
     for (index, (name, _, _)) in LIMITS.iter().enumerate() {
         label(hwnd, ID_LIMIT_LABEL_FIRST + index as i32, name)?;
@@ -1301,11 +1383,7 @@ fn build_controls(hwnd: HWND, state: &State) -> Result<()> {
         "",
         WINDOW_STYLE(WS_TABSTOP.0 | CBS_DROPDOWNLIST as u32 | WS_VSCROLL.0),
     )?;
-    for text in [
-        "Yalnızca uyar",
-        "Yeni yüklemeleri durdur",
-        "Yükleme ve görüntülemeyi durdur",
-    ] {
+    for text in ["Yalnızca uyar", "Yeni yüklemeleri durdur"] {
         let value = wide(text);
         unsafe {
             SendMessageW(
@@ -1319,7 +1397,7 @@ fn build_controls(hwnd: HWND, state: &State) -> Result<()> {
     label(
         hwnd,
         ID_COST_NOTE,
-        "Sınırlar yalnızca bu Worker'ı sayar; Cloudflare faturasını garanti etmez.",
+        "Görüntüleme hiç engellenmez; sınırlar yalnızca bu Worker'ı sayar ve faturayı garanti etmez.",
     )?;
     button(hwnd, ID_SAVE_LIMITS, "Sınırları kaydet")?;
     label(
@@ -1454,6 +1532,8 @@ fn show_impl(
         for_upload,
         pending: false,
         authorizing: false,
+        updating: false,
+        outdated: false,
         cancel: Arc::new(AtomicBool::new(false)),
         authorization: None,
         loaded: false,

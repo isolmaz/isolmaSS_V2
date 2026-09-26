@@ -1,5 +1,5 @@
 /target
-/site/.wrangler/
+.wrangler/
 **/.env
 **/.env.*
 !**/.env.example
