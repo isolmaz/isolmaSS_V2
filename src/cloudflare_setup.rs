@@ -325,21 +325,29 @@ pub fn control_request(
 struct Failure {
     message: String,
     retryable: bool,
+    /// The host name could not be resolved.
+    unresolved: bool,
 }
 impl From<String> for Failure {
     fn from(message: String) -> Self {
         Self {
             message,
             retryable: false,
+            unresolved: false,
         }
     }
+}
+
+const NAME_NOT_RESOLVED: u32 = 12007;
+
+fn unresolved(error: &windows::core::Error) -> bool {
+    error.code() == windows::core::HRESULT::from_win32(NAME_NOT_RESOLVED)
 }
 
 /// Network hiccups (Wi-Fi roaming, VPN reconnects, a slow DNS answer) are
 /// common on laptops; such failures are retried a few times before surfacing.
 fn transient(error: &windows::core::Error) -> bool {
     const TIMEOUT: u32 = 12002;
-    const NAME_NOT_RESOLVED: u32 = 12007;
     const CANNOT_CONNECT: u32 = 12029;
     const CONNECTION_ERROR: u32 = 12030;
     const INVALID_SERVER_RESPONSE: u32 = 12152;
@@ -363,7 +371,7 @@ fn https_request(
     password: Option<&str>,
     body: RequestBody<'_>,
 ) -> Result<(u32, Vec<u8>), String> {
-    const ATTEMPTS: u32 = 3;
+    const ATTEMPTS: u32 = 4;
     let mut attempt = 1;
     loop {
         match https_attempt(host, path, method, bearer, content_type, password, body) {
@@ -373,10 +381,90 @@ fn https_request(
                     "cloudflare network",
                     &format!("attempt {attempt} failed, retrying: {}", failure.message),
                 );
-                std::thread::sleep(std::time::Duration::from_millis(700 * attempt as u64));
+                if failure.unresolved {
+                    // A DNS server failure (e.g. an unreachable IPv6 resolver)
+                    // is cached by Windows; drop that entry so the retry asks again.
+                    flush_dns_entry(host);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(400 * attempt as u64));
                 attempt += 1;
             }
+            Err(failure) if failure.unresolved => {
+                return Err(format!(
+                    "{} Bilgisayarınız {host} adresini çözemedi. Birkaç saniye sonra tekrar deneyin; sürerse ağ bağdaştırıcınızdaki DNS sunucularını (özellikle erişilemeyen IPv6 DNS adreslerini) denetleyin.",
+                    failure.message
+                ));
+            }
             Err(failure) => return Err(failure.message),
+        }
+    }
+}
+
+/// Removes one host from the Windows DNS client cache, including a cached
+/// failure. `DnsFlushResolverCacheEntry_W` is exported by dnsapi.dll on every
+/// supported Windows version but is not in the SDK headers, so it is bound at
+/// run time; if it is missing the retry simply waits for the cache instead.
+fn flush_dns_entry(host: &str) {
+    use std::sync::LazyLock;
+    use windows::Win32::System::LibraryLoader::{
+        GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
+    };
+    type Flush = unsafe extern "system" fn(PCWSTR) -> i32;
+    static FLUSH: LazyLock<Option<Flush>> = LazyLock::new(|| unsafe {
+        let module = LoadLibraryExW(w!("dnsapi.dll"), None, LOAD_LIBRARY_SEARCH_SYSTEM32).ok()?;
+        GetProcAddress(module, windows::core::s!("DnsFlushResolverCacheEntry_W"))
+            .map(|function| std::mem::transmute::<_, Flush>(function))
+    });
+    if let Some(flush) = *FLUSH {
+        let name = wide(host);
+        unsafe {
+            flush(PCWSTR(name.as_ptr()));
+        }
+    }
+}
+
+/// One WinHTTP session for the process: proxy discovery runs once and
+/// keep-alive connections to the Worker and the Cloudflare API are reused,
+/// which makes repeated uploads noticeably faster. WinHTTP sessions are
+/// thread-safe.
+fn session() -> Result<*mut c_void, String> {
+    use std::sync::OnceLock;
+    static SESSION: OnceLock<usize> = OnceLock::new();
+    if let Some(&handle) = SESSION.get() {
+        return Ok(handle as *mut c_void);
+    }
+    let agent = wide(&format!("isolmaSS/{}", env!("CARGO_PKG_VERSION")));
+    let handle = unsafe {
+        WinHttpOpen(
+            PCWSTR(agent.as_ptr()),
+            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+            PCWSTR::null(),
+            PCWSTR::null(),
+            0,
+        )
+    };
+    if handle.is_null() {
+        return Err(format!(
+            "WinHTTP başlatılamadı: {}",
+            windows::core::Error::from_win32()
+        ));
+    }
+    // Resolve, connect, send and receive limits; uploads over slow uplinks and
+    // Worker cold starts need more headroom than a JSON API call.
+    if let Err(error) = unsafe { WinHttpSetTimeouts(handle, 10_000, 10_000, 30_000, 30_000) } {
+        unsafe {
+            let _ = WinHttpCloseHandle(handle);
+        }
+        return Err(format!("Cloudflare istek süreleri ayarlanamadı: {error}"));
+    }
+    match SESSION.set(handle as usize) {
+        Ok(()) => Ok(handle),
+        // Another thread won the race; keep its session and close ours.
+        Err(_) => {
+            unsafe {
+                let _ = WinHttpCloseHandle(handle);
+            }
+            Ok(*SESSION.get().expect("session was just set") as *mut c_void)
         }
     }
 }
@@ -410,31 +498,11 @@ fn https_attempt(
                 .into(),
         );
     }
-    let agent = wide(&format!("isolmaSS/{}", env!("CARGO_PKG_VERSION")));
-    let session = InternetHandle(unsafe {
-        WinHttpOpen(
-            PCWSTR(agent.as_ptr()),
-            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-            PCWSTR::null(),
-            PCWSTR::null(),
-            0,
-        )
-    });
-    if session.0.is_null() {
-        return Err(format!(
-            "WinHTTP başlatılamadı: {}",
-            windows::core::Error::from_win32()
-        )
-        .into());
-    }
-    // Resolve, connect, send and receive limits; uploads over slow uplinks and
-    // Worker cold starts need more headroom than a JSON API call.
-    unsafe { WinHttpSetTimeouts(session.0, 10_000, 10_000, 30_000, 30_000) }
-        .map_err(|error| format!("Cloudflare istek süreleri ayarlanamadı: {error}"))?;
+    let session = session()?;
     let host_wide = wide(host);
     let connection = InternetHandle(unsafe {
         WinHttpConnect(
-            session.0,
+            session,
             PCWSTR(host_wide.as_ptr()),
             INTERNET_DEFAULT_HTTPS_PORT,
             0,
@@ -534,6 +602,7 @@ fn https_attempt(
     unsafe { WinHttpSendRequest(request.0, Some(&headers), None, 0, size as u32, 0) }.map_err(
         |error| Failure {
             retryable: transient(&error),
+            unresolved: unresolved(&error),
             message: format!("Cloudflare'a ulaşılamadı; internet bağlantınızı denetleyin: {error}"),
         },
     )?;
@@ -590,6 +659,7 @@ fn https_attempt(
     unsafe { WinHttpReceiveResponse(request.0, std::ptr::null_mut()) }.map_err(|error| {
         Failure {
             retryable: method == "GET" && transient(&error),
+            unresolved: false,
             message: format!("Cloudflare yanıt vermedi: {error}"),
         }
     })?;

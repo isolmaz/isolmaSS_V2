@@ -14,7 +14,6 @@ use crate::toolbar::{Toolbar, ToolbarAction, ToolbarItem};
 use crate::window_snap::{WindowInfo, find_window_in_list, get_visible_windows};
 use std::ffi::c_void;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
 use windows::Win32::Foundation::{
     COLORREF, ERROR_CLASS_ALREADY_EXISTS, GetLastError, HINSTANCE, HWND, LPARAM, LRESULT,
     RECT as WIN_RECT, WPARAM,
@@ -281,7 +280,6 @@ pub struct OverlayState {
     bits_ptr: *mut u8,
 
     committed_result: bool,
-    upload_result: Option<crate::upload::UploadResult>,
     setup_pending: bool,
     scene_dirty: bool,
     base_cache: Vec<u8>,
@@ -370,7 +368,6 @@ impl OverlayState {
             old_bmp: HGDIOBJ::default(),
             bits_ptr: std::ptr::null_mut(),
             committed_result: false,
-            upload_result: None,
             setup_pending: false,
             scene_dirty: false,
             base_cache: Vec::new(),
@@ -965,10 +962,10 @@ impl OverlayState {
         result
     }
 
+    /// Lightshot-style upload: encode the selection, hand it to the upload toast
+    /// (which sends it in the background and shows the link), and close the
+    /// editor right away. The first upload opens Cloudflare setup instead.
     fn upload_selection(&mut self, hwnd: HWND) -> std::result::Result<(), String> {
-        if self.upload_result.is_some() {
-            return Err("Bir yükleme zaten sürüyor.".to_string());
-        }
         let selection = self
             .committed_selection
             .ok_or_else(|| "Önce bir ekran bölgesi seçin.".to_string())?;
@@ -994,30 +991,25 @@ impl OverlayState {
         let pixels = unsafe {
             std::slice::from_raw_parts(self.bits_ptr, width as usize * height as usize * 4)
         };
-        let result = Arc::new(Mutex::new(None));
-        let started = crate::upload::begin_upload(
-            pixels,
-            width,
-            height,
-            &selection,
-            &self.settings,
-            result.clone(),
-            hwnd,
-        );
+        let prepared = crate::upload::prepare(pixels, width, height, &selection, &self.settings);
         self.composite_scene();
-        if started.is_ok() {
-            self.upload_result = Some(result);
-            if let Some(toolbar) = self.toolbar.as_mut()
-                && let Some(button) = toolbar
-                    .buttons
-                    .iter_mut()
-                    .find(|button| button.item == ToolbarItem::Action(ToolbarAction::Upload))
-            {
-                button.is_enabled = false;
-            }
-            self.redraw(hwnd);
+        let prepared = prepared?;
+        let anchor = windows::Win32::Foundation::POINT {
+            x: self.capture.x + (selection.left + selection.right) / 2,
+            y: self.capture.y + (selection.top + selection.bottom) / 2,
+        };
+        crate::toast::show_upload(prepared, anchor);
+        self.committed_result = true;
+        unsafe {
+            windows::Win32::UI::WindowsAndMessaging::PostMessageW(
+                hwnd,
+                WM_CLOSE,
+                WPARAM(0),
+                LPARAM(0),
+            )
         }
-        started
+        .map_err(|error| format!("Düzenleyici kapatılamadı: {error}"))?;
+        Ok(())
     }
 
     fn editor_cursor(&self, pt: (i32, i32)) -> PCWSTR {
@@ -1141,13 +1133,18 @@ impl OverlayState {
 
 /// Hides the editor while another top-level flow needs the screen, and brings
 /// it back topmost and focused afterwards if it still exists.
-struct HiddenOverlay(HWND);
+struct HiddenOverlay(HWND, bool);
 impl HiddenOverlay {
     fn new(hwnd: HWND) -> Self {
         unsafe {
             let _ = ShowWindow(hwnd, windows::Win32::UI::WindowsAndMessaging::SW_HIDE);
         }
-        Self(hwnd)
+        Self(hwnd, true)
+    }
+    /// The editor is about to close (the upload continues in its toast), so it
+    /// is not shown again.
+    fn stay_hidden(mut self) {
+        self.1 = false;
     }
 }
 impl Drop for HiddenOverlay {
@@ -1155,7 +1152,7 @@ impl Drop for HiddenOverlay {
         use windows::Win32::UI::WindowsAndMessaging::{
             HWND_TOPMOST, IsWindow, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowPos,
         };
-        if !unsafe { IsWindow(self.0).as_bool() } {
+        if !self.1 || !unsafe { IsWindow(self.0).as_bool() } {
             return;
         }
         unsafe {
@@ -1200,23 +1197,6 @@ unsafe extern "system" fn overlay_wnd_proc(
                 | WM_TIMER
                 | WM_EDITOR_SETTINGS
                 | WM_EDITOR_PICK_COLOR
-        )
-    {
-        return LRESULT(0);
-    }
-    if !state_ptr.is_null()
-        && unsafe { (*state_ptr).upload_result.is_some() }
-        && matches!(
-            msg,
-            WM_OVERLAY_KEYDOWN
-                | WM_KEYDOWN
-                | WM_CHAR
-                | WM_LBUTTONDOWN
-                | WM_LBUTTONUP
-                | WM_RBUTTONUP
-                | WM_EDITOR_SAVE_AS
-                | WM_EDITOR_SETTINGS
-                | WM_CLOSE
         )
     {
         return LRESULT(0);
@@ -1331,7 +1311,6 @@ unsafe extern "system" fn overlay_wnd_proc(
             // memory) until setup finishes, then returns and continues the upload.
             let hidden = HiddenOverlay::new(hwnd);
             let result = crate::cloud_settings_window::show_for_upload(&settings);
-            drop(hidden);
             if !unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(hwnd).as_bool() } {
                 return LRESULT(0);
             }
@@ -1340,65 +1319,18 @@ unsafe extern "system" fn overlay_wnd_proc(
             match result {
                 Ok(Some(settings)) => {
                     state.settings = settings;
-                    if let Err(error) = state.upload_selection(hwnd) {
-                        OverlayState::show_action_error(hwnd, "Yükleme", &error);
-                    }
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    crate::ui::error(hwnd, "Cloudflare kurulumu açılamadı", &error.to_string())
-                }
-            }
-            LRESULT(0)
-        }
-        crate::upload::WM_UPLOAD_DONE => {
-            if state_ptr.is_null() {
-                return LRESULT(0);
-            }
-            let state = unsafe { &mut *state_ptr };
-            let Some(shared) = state.upload_result.take() else {
-                return LRESULT(0);
-            };
-            let outcome = shared
-                .lock()
-                .map_err(|_| "Yükleme sonucu okunamadı.".to_string())
-                .and_then(|mut slot| {
-                    slot.take()
-                        .ok_or_else(|| "Yükleme sonuçsuz bitti.".to_string())
-                });
-            if let Some(toolbar) = state.toolbar.as_mut()
-                && let Some(button) = toolbar
-                    .buttons
-                    .iter_mut()
-                    .find(|button| button.item == ToolbarItem::Action(ToolbarAction::Upload))
-            {
-                button.is_enabled = true;
-            }
-            state.redraw(hwnd);
-            match outcome {
-                Ok(Ok(url)) => {
-                    state.committed_result = true;
-                    match crate::clipboard::copy_text_to_clipboard(Some(hwnd), &url) {
-                        Ok(()) => {
-                            crate::tray::show_notification(
-                                "Görüntü yüklendi",
-                                "Bağlantı panoya kopyalandı.",
-                            );
-                            if state.settings.close_after_action {
-                                let _ = unsafe { DestroyWindow(hwnd) };
-                            }
+                    match state.upload_selection(hwnd) {
+                        Ok(()) => hidden.stay_hidden(),
+                        Err(error) => {
+                            drop(hidden);
+                            OverlayState::show_action_error(hwnd, "Yükleme", &error);
                         }
-                        Err(error) => OverlayState::show_action_error(
-                            hwnd,
-                            "Bağlantıyı panoya kopyalama",
-                            &format!(
-                                "Görüntü yüklendi: {error}\nBağlantıyı elle kopyalayın: {url}"
-                            ),
-                        ),
                     }
                 }
-                Ok(Err(error)) | Err(error) => {
-                    OverlayState::show_action_error(hwnd, "Yükleme", &error)
+                Ok(None) => drop(hidden),
+                Err(error) => {
+                    drop(hidden);
+                    crate::ui::error(hwnd, "Cloudflare kurulumu açılamadı", &error.to_string())
                 }
             }
             LRESULT(0)

@@ -17,6 +17,7 @@ mod settings_window;
 mod smoke;
 mod startup;
 mod theme;
+mod toast;
 mod toolbar;
 mod tray;
 mod ui;
@@ -465,6 +466,7 @@ fn run_capture_once() -> Result<(), Box<dyn std::error::Error>> {
             println!("[isolmaSS] Overlay dismissed.");
         }
     }
+    toast::wait_until_closed();
     Ok(())
 }
 

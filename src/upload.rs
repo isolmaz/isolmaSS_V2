@@ -1,17 +1,17 @@
+//! Upload of a flattened selection to the user's own Worker. The editor only
+//! encodes the image ([`prepare`]); sending happens on a background thread
+//! owned by the upload toast ([`crate::toast`]), so the editor closes at once.
 use crate::capture::Rect;
-use crate::cloudflare_setup::{self, RequestBody};
+use crate::cloudflare_setup::{self, CloudCredentials, RequestBody};
 use crate::save::save_buffer_to_image;
 use crate::settings::{SaveFormat, Settings};
 use serde::Deserialize;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use windows::Win32::Foundation::HWND;
-use windows::Win32::Foundation::{LPARAM, WPARAM};
-use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
+use std::sync::Arc;
 
 pub const WM_UPLOAD_DONE: u32 = windows::Win32::UI::WindowsAndMessaging::WM_APP + 41;
-pub type UploadResult = Arc<Mutex<Option<Result<String, String>>>>;
 
+/// The encoded screenshot on disk; removed when the last owner drops it.
 struct TemporaryScreenshot(PathBuf);
 impl Drop for TemporaryScreenshot {
     fn drop(&mut self) {
@@ -23,24 +23,29 @@ impl Drop for TemporaryScreenshot {
     }
 }
 
+/// An encoded screenshot and the credentials to send it. Cheap to clone; the
+/// file lives until the toast and every in-flight attempt are done with it.
+#[derive(Clone)]
+pub struct Prepared {
+    file: Arc<TemporaryScreenshot>,
+    format: SaveFormat,
+    credentials: CloudCredentials,
+}
+
 #[derive(Deserialize)]
 struct UploadReceipt {
     id: String,
     url: String,
 }
 
-/// Encodes the already-flattened editor selection, then sends its file on a
-/// background thread so the editor remains responsive. The caller keeps the
-/// overlay open until WM_UPLOAD_DONE has been handled.
-pub fn begin_upload(
+/// Encodes the already-flattened editor selection to a private temporary file.
+pub fn prepare(
     pixels: &[u8],
     width: i32,
     height: i32,
     selection: &Rect,
     settings: &Settings,
-    shared: UploadResult,
-    hwnd: HWND,
-) -> Result<(), String> {
+) -> Result<Prepared, String> {
     let origin = settings.cloud_url.as_deref().ok_or_else(|| {
         "Yüklemeden önce Ayarlar > Paylaşım bölümünden Cloudflare bağlantısını kurun.".to_string()
     })?;
@@ -50,7 +55,7 @@ pub fn begin_upload(
         "isolmass-upload-{unique}.{}",
         settings.save_format.extension()
     ));
-    let _guard = TemporaryScreenshot(output.clone());
+    let file = Arc::new(TemporaryScreenshot(output.clone()));
     save_buffer_to_image(
         pixels,
         width,
@@ -61,58 +66,28 @@ pub fn begin_upload(
         settings.jpeg_quality,
     )
     .map_err(|error| format!("Ekran görüntüsü yüklemeye hazırlanamadı: {error}"))?;
-    let format = settings.save_format;
-    let target = credentials.origin.clone();
-    let handle = hwnd.0 as usize;
-    std::thread::Builder::new()
-        .name("isolmass-upload".into())
-        .spawn(move || {
-            let _guard = _guard;
-            let outcome = send(
-                &target,
-                &credentials.upload_token,
-                credentials.share_password.as_deref(),
-                &output,
-                format,
-            );
-            if let Ok(mut pending) = shared.lock() {
-                *pending = Some(outcome);
-            } else {
-                crate::diagnostics::record("upload completion", "Could not record upload result.");
-                return;
-            }
-            let hwnd = HWND(handle as *mut std::ffi::c_void);
-            if let Err(error) = unsafe { PostMessageW(hwnd, WM_UPLOAD_DONE, WPARAM(0), LPARAM(0)) }
-            {
-                crate::diagnostics::record(
-                    "upload completion",
-                    &format!("Could not notify editor: {error}"),
-                );
-            }
-        })
-        .map_err(|error| format!("Yükleme başlatılamadı: {error}"))?;
-    Ok(())
+    Ok(Prepared {
+        file,
+        format: settings.save_format,
+        credentials,
+    })
 }
 
-fn send(
-    origin: &str,
-    token: &str,
-    password: Option<&str>,
-    output: &std::path::Path,
-    format: SaveFormat,
-) -> Result<String, String> {
-    let type_name = match format {
+/// Sends the prepared screenshot (blocking) and returns its share link.
+pub fn send(prepared: &Prepared) -> Result<String, String> {
+    let type_name = match prepared.format {
         SaveFormat::Png => "image/png",
         SaveFormat::Jpeg => "image/jpeg",
     };
+    let origin = prepared.credentials.origin.as_str();
     let (status, body) = cloudflare_setup::api_request(
         origin,
         "/api/upload",
         "POST",
-        token,
+        &prepared.credentials.upload_token,
         Some(type_name),
-        password,
-        RequestBody::File(output),
+        prepared.credentials.share_password.as_deref(),
+        RequestBody::File(&prepared.file.0),
     )?;
     if status != 201 {
         let detail = serde_json::from_slice::<serde_json::Value>(&body)
@@ -132,14 +107,71 @@ fn send(
     }
     let receipt: UploadReceipt = serde_json::from_slice(&body)
         .map_err(|_| "Cloudflare geçersiz bir yükleme yanıtı döndürdü.".to_string())?;
-    if receipt.id.len() != 32
-        || !receipt
-            .id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-        || receipt.url != format!("{origin}/i/{}", receipt.id)
-    {
+    if !is_share_link(origin, &receipt.url) || receipt.url != format!("{origin}/i/{}", receipt.id) {
         return Err("Cloudflare bu kuruluma ait olmayan bir bağlantı döndürdü.".to_string());
     }
     Ok(receipt.url)
+}
+
+/// True for `<origin>/i/<32-character id>`: the only links the app copies or
+/// opens, so a compromised response cannot send the user elsewhere.
+pub fn is_share_link(origin: &str, url: &str) -> bool {
+    cloudflare_setup::valid_cloud_origin(origin)
+        && url
+            .strip_prefix(origin)
+            .and_then(|rest| rest.strip_prefix("/i/"))
+            .is_some_and(|id| {
+                id.len() == 32
+                    && id
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            })
+}
+
+/// Opens a validated share link in the default browser.
+pub fn open_link(url: &str) -> Result<(), String> {
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    use windows::core::{PCWSTR, w};
+    if !url.starts_with("https://") {
+        return Err("Geçersiz bağlantı.".to_string());
+    }
+    let wide: Vec<u16> = url.encode_utf16().chain(Some(0)).collect();
+    let result = unsafe {
+        ShellExecuteW(
+            windows::Win32::Foundation::HWND::default(),
+            w!("open"),
+            PCWSTR(wide.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if result.0 as isize <= 32 {
+        Err("Bağlantı tarayıcıda açılamadı.".to_string())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn share_links_are_limited_to_the_installation() {
+        let origin = "https://isolmass-share-abc.example.workers.dev";
+        let id = "A".repeat(32);
+        assert!(is_share_link(origin, &format!("{origin}/i/{id}")));
+        assert!(!is_share_link(origin, &format!("{origin}/i/{id}x")));
+        assert!(!is_share_link(
+            origin,
+            &format!("https://evil.example/i/{id}")
+        ));
+        assert!(!is_share_link(origin, &format!("{origin}/x/{id}")));
+        assert!(!is_share_link(
+            origin,
+            &format!("{origin}/i/{}", "A/".repeat(16))
+        ));
+    }
 }

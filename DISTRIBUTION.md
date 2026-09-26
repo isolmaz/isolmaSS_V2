@@ -23,7 +23,7 @@ Publish exactly one each of `isolmass-setup.exe`, `isolmass-setup.exe.sig` (raw 
 
 The signature covers the UTF-8 bytes `isolmaSS-update-v1\n<VERSION>\n<INSTALLER-SHA256-LOWERCASE-HEX>\n`. `scripts/sign-update.ps1` implements the version-general form. HTTPS delivery and SHA-256 establish transport/integrity; only the pinned publisher signature establishes update authenticity. The app re-verifies the staged file immediately before launch.
 
-An existing installation whose executable lacks this pinned-key verifier needs a **one-time manual installer** of a build with the pinned verifier. The installer is not paid-code-signed; Windows SmartScreen may display a reputation warning. Never automate bypassing or acceptance of that warning. Installation asks for consent in the app before download and launch; `--check-update` only checks availability.
+The installer is not Authenticode-signed; Windows SmartScreen may display a reputation warning. Never automate bypassing or acceptance of that warning. Installation asks for consent in the app before download and launch; `--check-update` only checks availability.
 
 ## Installation and rollback
 

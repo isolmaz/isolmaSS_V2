@@ -373,6 +373,9 @@ pub fn label(
         let _ = SetTextColor(hdc, color);
         let _ = SetBkMode(hdc, TRANSPARENT);
         let mut wide: Vec<u16> = text.encode_utf16().collect();
+        if wide.is_empty() {
+            return;
+        }
         let mut bounds = windows::Win32::Foundation::RECT {
             left: rect.left,
             top: rect.top,
@@ -477,6 +480,10 @@ pub fn ui_text(
     color: COLORREF,
     centered: bool,
 ) {
+    // An empty slice carries a dangling pointer that DrawTextW dereferences.
+    if text.is_empty() {
+        return;
+    }
     with_font(
         hdc,
         -scaled(crate::theme::FONT_BODY_PX, dpi),

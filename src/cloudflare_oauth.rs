@@ -397,10 +397,63 @@ pub fn authorize(cancel: &AtomicBool) -> Result<Authorization, String> {
         }
     }
     let accounts = list_accounts(&issued.access_token, cancel)?;
+    let accounts = authorized_accounts(&issued.access_token, accounts, cancel)?;
     Ok(Authorization {
         access_token: issued.access_token,
         accounts,
     })
+}
+
+/// Memberships list every account the user belongs to, but the consent page
+/// grants Workers access only to the accounts picked there. Each candidate is
+/// probed in parallel with a harmless read of its Workers subdomain: `200`/`404`
+/// mean the token may manage Workers there, `401`/`403` mean it may not.
+/// Accounts whose probe fails for network reasons are kept rather than hidden.
+fn authorized_accounts(
+    token: &str,
+    accounts: Vec<Account>,
+    cancel: &AtomicBool,
+) -> Result<Vec<Account>, String> {
+    const MAX_PROBES: usize = 25;
+    if accounts.len() <= 1 || accounts.len() > MAX_PROBES {
+        return Ok(accounts);
+    }
+    let verdicts: Vec<bool> = std::thread::scope(|scope| {
+        let probes: Vec<_> = accounts
+            .iter()
+            .map(|account| {
+                scope.spawn(move || {
+                    match cloudflare_setup::control_request(
+                        "api.cloudflare.com",
+                        &account_path(account, "subdomain"),
+                        "GET",
+                        Some(token),
+                        None,
+                        RequestBody::Bytes(&[]),
+                    ) {
+                        Ok((status, _)) => !matches!(status, 401 | 403),
+                        Err(_) => true,
+                    }
+                })
+            })
+            .collect();
+        probes
+            .into_iter()
+            .map(|probe| probe.join().unwrap_or(true))
+            .collect()
+    });
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Cloudflare bağlantısı iptal edildi.".into());
+    }
+    let usable: Vec<Account> = accounts
+        .into_iter()
+        .zip(verdicts)
+        .filter_map(|(account, usable)| usable.then_some(account))
+        .collect();
+    if usable.is_empty() {
+        return Err("İzin verilen hesapların hiçbirinde Workers yetkiniz yok. Cloudflare izin sayfasında Workers kullanabildiğiniz hesabı seçerek yeniden bağlanın; sorun sürerse uygulamanın OAuth istemcisinin herkese açık (public) olduğundan emin olun.".into());
+    }
+    Ok(usable)
 }
 
 fn list_accounts(token: &str, cancel: &AtomicBool) -> Result<Vec<Account>, String> {

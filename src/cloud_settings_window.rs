@@ -39,6 +39,8 @@ const ID_DELETE: i32 = 1030;
 const ID_CLOSE: i32 = 1031;
 const ID_PASSWORD: i32 = 1032;
 const ID_SAVE_PASSWORD: i32 = 1033;
+const ID_OPEN_IMAGE: i32 = 1034;
+const ID_COPY_IMAGE: i32 = 1035;
 // Labels.
 const ID_INTRO: i32 = 1101;
 const ID_STEP_ACCOUNT: i32 = 1102;
@@ -80,7 +82,8 @@ struct State {
     authorization: Option<Authorization>,
     loaded: bool,
     tab: usize,
-    images: Vec<String>,
+    /// (id, share link) of the listed images.
+    images: Vec<(String, String)>,
     response: Arc<Mutex<Option<Completion>>>,
     dpi: u32,
     font: HFONT,
@@ -259,7 +262,7 @@ fn tab_of(id: i32) -> Option<usize> {
         {
             Some(1)
         }
-        ID_IMAGES_LABEL | ID_IMAGES | ID_DELETE => Some(2),
+        ID_IMAGES_LABEL | ID_IMAGES | ID_DELETE | ID_OPEN_IMAGE | ID_COPY_IMAGE => Some(2),
         _ => None,
     }
 }
@@ -355,7 +358,14 @@ fn layout(hwnd: HWND, state: &State) -> i32 {
         // Images
         place(hwnd, ID_IMAGES_LABEL, (MARGIN, top, full, 20), dpi);
         place(hwnd, ID_IMAGES, (MARGIN, top + 28, full, 230), dpi);
-        place(hwnd, ID_DELETE, (MARGIN, top + 268, 180, ROW + 2), dpi);
+        place(hwnd, ID_OPEN_IMAGE, (MARGIN, top + 268, 80, ROW + 2), dpi);
+        place(
+            hwnd,
+            ID_COPY_IMAGE,
+            (MARGIN + 88, top + 268, 150, ROW + 2),
+            dpi,
+        );
+        place(hwnd, ID_DELETE, (right - 150, top + 268, 150, ROW + 2), dpi);
         let images = top + 304;
         connection.max(limits).max(images)
     };
@@ -598,14 +608,33 @@ fn show_stats(hwnd: HWND, state: &mut State, stats: &Value, images: &Value) {
         unsafe {
             SendMessageW(list, LB_RESETCONTENT, WPARAM(0), LPARAM(0));
         }
+        let origin = state.settings.cloud_url.clone().unwrap_or_default();
         if let Some(records) = images["images"].as_array() {
             for record in records {
-                if let Some(id) = record["id"].as_str() {
-                    state.images.push(id.to_string());
+                let (Some(id), Some(url)) = (record["id"].as_str(), record["url"].as_str()) else {
+                    continue;
+                };
+                // Only links of this installation are ever opened or copied.
+                if !crate::upload::is_share_link(&origin, url) {
+                    continue;
+                }
+                state.images.push((id.to_string(), url.to_string()));
+                {
+                    let created = record["created_at"]
+                        .as_i64()
+                        .map(format_time)
+                        .unwrap_or_default();
+                    let size = count(record, "size_bytes") as f64 / 1024.0;
                     let label = wide(&format!(
-                        "{}… · {} görüntülenme",
-                        &id[..8.min(id.len())],
-                        count(record, "views")
+                        "{created} · {size:.0} KB · {} görüntülenme{}",
+                        count(record, "views"),
+                        if record["password_protected"].as_i64() == Some(1)
+                            || record["password_protected"] == true
+                        {
+                            " · şifreli"
+                        } else {
+                            ""
+                        }
                     ));
                     unsafe {
                         SendMessageW(
@@ -618,22 +647,81 @@ fn show_stats(hwnd: HWND, state: &mut State, stats: &Value, images: &Value) {
                 }
             }
         }
+        if !state.images.is_empty() {
+            unsafe {
+                SendMessageW(list, LB_SETCURSEL, WPARAM(0), LPARAM(0));
+            }
+        }
     }
-    set_status(hwnd, "Bağlı · Güncel istatistikler alındı.");
+    set_status(
+        hwnd,
+        if state.images.is_empty() {
+            "Bağlı · Henüz yüklenmiş resim yok."
+        } else {
+            "Bağlı · Güncel istatistikler alındı."
+        },
+    );
+}
+
+/// Local `GG.AA.YYYY SS:DD` for a Unix timestamp, using the Windows time zone.
+fn format_time(seconds: i64) -> String {
+    use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
+    // FILETIME counts 100 ns intervals since 1601-01-01.
+    let ticks = (seconds.max(0) as u64 + 11_644_473_600) * 10_000_000;
+    let file_time = FILETIME {
+        dwLowDateTime: ticks as u32,
+        dwHighDateTime: (ticks >> 32) as u32,
+    };
+    let mut universal = SYSTEMTIME::default();
+    let mut local = SYSTEMTIME::default();
+    let converted = unsafe {
+        FileTimeToSystemTime(&file_time, &mut universal).is_ok()
+            && SystemTimeToTzSpecificLocalTime(None, &universal, &mut local).is_ok()
+    };
+    if !converted {
+        return String::new();
+    }
+    format!(
+        "{:02}.{:02}.{:04} {:02}:{:02}",
+        local.wDay, local.wMonth, local.wYear, local.wHour, local.wMinute
+    )
+}
+
+fn selected_image(hwnd: HWND, state: &State) -> Option<(String, String)> {
+    let list = control(hwnd, ID_IMAGES)?;
+    let index = unsafe { SendMessageW(list, LB_GETCURSEL, WPARAM(0), LPARAM(0)).0 };
+    usize::try_from(index)
+        .ok()
+        .and_then(|i| state.images.get(i))
+        .cloned()
+}
+
+fn open_image(hwnd: HWND, state: &State) {
+    match selected_image(hwnd, state) {
+        Some((_, url)) => {
+            if let Err(error) = crate::upload::open_link(&url) {
+                crate::ui::error(hwnd, "Resmi aç", &error);
+            }
+        }
+        None => crate::ui::error(hwnd, "Resmi aç", "Önce listeden bir resim seçin."),
+    }
+}
+
+fn copy_image(hwnd: HWND, state: &State) {
+    match selected_image(hwnd, state) {
+        Some((_, url)) => match crate::clipboard::copy_text_to_clipboard(Some(hwnd), &url) {
+            Ok(()) => set_status(hwnd, "Bağlantı panoya kopyalandı."),
+            Err(error) => crate::ui::error(hwnd, "Bağlantıyı kopyala", &error.to_string()),
+        },
+        None => crate::ui::error(hwnd, "Bağlantıyı kopyala", "Önce listeden bir resim seçin."),
+    }
 }
 fn delete_image(hwnd: HWND, state: &mut State) {
     let Some(origin) = state.settings.cloud_url.clone() else {
         return;
     };
-    let Some(list) = control(hwnd, ID_IMAGES) else {
-        return;
-    };
-    let index = unsafe { SendMessageW(list, LB_GETCURSEL, WPARAM(0), LPARAM(0)).0 };
-    let Some(id) = usize::try_from(index)
-        .ok()
-        .and_then(|i| state.images.get(i))
-        .cloned()
-    else {
+    let Some((id, _)) = selected_image(hwnd, state) else {
         crate::ui::error(hwnd, "Resim sil", "Önce listeden bir resim seçin.");
         return;
     };
@@ -736,6 +824,8 @@ fn command(hwnd: HWND, state: &mut State, id: i32) {
         ID_SAVE_LIMITS => save_limits(hwnd, state),
         ID_SAVE_PASSWORD => save_password(hwnd, state),
         ID_DELETE => delete_image(hwnd, state),
+        ID_OPEN_IMAGE => open_image(hwnd, state),
+        ID_COPY_IMAGE => copy_image(hwnd, state),
         ID_FORGET => disconnect(hwnd, state),
         ID_CLOSE => close(hwnd, state),
         _ => {}
@@ -1080,6 +1170,13 @@ unsafe extern "system" fn wnd_proc(
             }
             LRESULT(0)
         }
+        WM_COMMAND if !pointer.is_null() && (wparam.0 & 0xffff) as i32 == ID_IMAGES => {
+            const LBN_DBLCLK: usize = 2;
+            if wparam.0 >> 16 == LBN_DBLCLK {
+                open_image(hwnd, unsafe { &*pointer });
+            }
+            LRESULT(0)
+        }
         WM_COMMAND if !pointer.is_null() && wparam.0 >> 16 == 0 => {
             let state = unsafe { &mut *pointer };
             let id = (wparam.0 & 0xffff) as i32;
@@ -1228,7 +1325,7 @@ fn build_controls(hwnd: HWND, state: &State) -> Result<()> {
     label(
         hwnd,
         ID_IMAGES_LABEL,
-        "Son resimler · Silinen bağlantılar hemen kapanır",
+        "Son resimler · Çift tıklayarak açın; silinen bağlantılar hemen kapanır",
     )?;
     create(
         hwnd,
@@ -1237,7 +1334,9 @@ fn build_controls(hwnd: HWND, state: &State) -> Result<()> {
         "",
         WINDOW_STYLE(WS_TABSTOP.0 | WS_VSCROLL.0 | LBS_NOTIFY as u32),
     )?;
-    button(hwnd, ID_DELETE, "Seçili resmi sil")?;
+    button(hwnd, ID_OPEN_IMAGE, "Aç")?;
+    button(hwnd, ID_COPY_IMAGE, "Bağlantıyı kopyala")?;
+    button(hwnd, ID_DELETE, "Sil")?;
     label(hwnd, ID_STATUS, "Bağlı")?;
     button(hwnd, ID_CLOSE, "Kapat")?;
     if let Some(origin) = state.settings.cloud_url.as_deref()
