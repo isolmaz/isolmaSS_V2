@@ -13,7 +13,7 @@ cmd /c release.bat
 & "$env:ISOLMASS_BUILD_DIR\release\isolmass.exe" --verify-update "$env:ISOLMASS_BUILD_DIR\release\isolmass-setup.exe"
 ```
 
-`release.bat` requires the signer and calls `package.bat`. Packaging builds a locked release, checks the executable (≤2.5 MiB) and installer (≤3 MiB) budgets, checks PE file versions, compiles NSIS, writes `isolmass-setup.exe.sha256`, creates the detached `isolmass-setup.exe.sig` and verifies that signature with the **shipped executable's pinned key**. A package without the publisher key is not eligible for auto-update; it will not overwrite an already signed installer in that output directory. CI has no signing key and does not publish releases.
+`release.bat` requires the signer and calls `package.bat`. Packaging builds a locked release, checks the executable (≤2.5 MiB) and installer (≤3 MiB) budgets, checks PE file versions, compiles NSIS, writes `isolmass-setup.exe.sha256`, creates the detached `isolmass-setup.exe.sig` and verifies that signature with the **shipped executable's pinned key**. A package without the publisher key is not eligible for auto-update; it will not overwrite an already signed installer in that output directory.
 
 For a manual portable download, archive the same release executable as `isolmass-portable-windows-x64.zip` with `LICENSE` and `THIRD_PARTY_NOTICES.md`. Portable mode does not modify an installed copy or auto-update it. The ZIP is a manual artifact, not the installer that the in-app updater trusts.
 
