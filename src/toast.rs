@@ -241,6 +241,17 @@ fn finish(hwnd: HWND, state: &mut State, outcome: Result<String, String>) {
     };
     arm_close(hwnd, state);
     unsafe {
+        // Another topmost window may have been activated meanwhile; the result
+        // must be visible without taking focus.
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
         let _ = InvalidateRect(hwnd, None, false);
     }
 }
