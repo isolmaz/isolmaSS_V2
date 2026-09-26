@@ -1139,6 +1139,43 @@ impl OverlayState {
     }
 }
 
+/// Hides the editor while another top-level flow needs the screen, and brings
+/// it back topmost and focused afterwards if it still exists.
+struct HiddenOverlay(HWND);
+impl HiddenOverlay {
+    fn new(hwnd: HWND) -> Self {
+        unsafe {
+            let _ = ShowWindow(hwnd, windows::Win32::UI::WindowsAndMessaging::SW_HIDE);
+        }
+        Self(hwnd)
+    }
+}
+impl Drop for HiddenOverlay {
+    fn drop(&mut self) {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            HWND_TOPMOST, IsWindow, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetWindowPos,
+        };
+        if !unsafe { IsWindow(self.0).as_bool() } {
+            return;
+        }
+        unsafe {
+            let _ = SetWindowPos(
+                self.0,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+            );
+        }
+        crate::ui::bring_to_front(self.0);
+        unsafe {
+            let _ = SetFocus(self.0);
+        }
+    }
+}
+
 unsafe extern "system" fn overlay_wnd_proc(
     hwnd: HWND,
     msg: u32,
@@ -1289,7 +1326,12 @@ unsafe extern "system" fn overlay_wnd_proc(
                 return LRESULT(0);
             }
             let settings = unsafe { (*state_ptr).settings.clone() };
-            let result = crate::cloud_settings_window::show_for_upload(&settings, hwnd);
+            // The full-screen topmost editor would cover the browser's Cloudflare
+            // consent page, so it steps aside (keeping the capture and edits in
+            // memory) until setup finishes, then returns and continues the upload.
+            let hidden = HiddenOverlay::new(hwnd);
+            let result = crate::cloud_settings_window::show_for_upload(&settings);
+            drop(hidden);
             if !unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(hwnd).as_bool() } {
                 return LRESULT(0);
             }

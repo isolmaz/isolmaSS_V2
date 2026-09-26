@@ -1,5 +1,5 @@
 use crate::cloudflare_oauth::{self, Account, Authorization};
-use crate::cloudflare_setup::{self, CloudCredentials};
+use crate::cloudflare_setup;
 use crate::settings::Settings;
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -14,7 +14,7 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::UI::Controls::{
     CDDS_PREPAINT, CDIS_DISABLED, CDIS_FOCUS, CDIS_HOT, CDIS_SELECTED, CDRF_SKIPDEFAULT,
-    NM_CUSTOMDRAW, NMCUSTOMDRAW, NMHDR, SetScrollInfo, SetWindowTheme,
+    NM_CUSTOMDRAW, NMCUSTOMDRAW, NMHDR, SetScrollInfo,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{EnableWindow, IsWindowEnabled, SetActiveWindow};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -137,7 +137,7 @@ impl Drop for State {
 }
 enum Completion {
     Authorization(std::result::Result<Authorization, String>),
-    Install(std::result::Result<CloudCredentials, String>),
+    Install(std::result::Result<cloudflare_oauth::Installed, String>),
     Refresh(std::result::Result<(Value, Value), String>),
     Limits(std::result::Result<Value, String>),
     Delete(std::result::Result<String, String>),
@@ -715,27 +715,6 @@ fn close(hwnd: HWND, state: &mut State) {
         let _ = DestroyWindow(hwnd);
     }
 }
-fn refresh_native_controls(hwnd: HWND) {
-    static LOGGED: AtomicBool = AtomicBool::new(false);
-    let dark = crate::theme::theme() == crate::theme::Theme::Dark;
-    let sub_app = if dark {
-        w!("DarkMode_Explorer")
-    } else {
-        w!("Explorer")
-    };
-    for id in [ID_ACCOUNT, ID_MODE, ID_IMAGES, ID_PASSWORD]
-        .into_iter()
-        .chain(ID_LIMIT_FIRST..ID_LIMIT_FIRST + LIMITS.len() as i32)
-    {
-        if let Some(child) = control(hwnd, id)
-            && let Err(error) = unsafe { SetWindowTheme(child, sub_app, PCWSTR::null()) }
-            && !LOGGED.swap(true, Ordering::Relaxed)
-        {
-            crate::diagnostics::record("Cloudflare görünümü", &error.to_string());
-        }
-    }
-}
-
 fn cloud_uses_card(id: i32) -> bool {
     !matches!(id, 1100 | 1101 | ID_FORGET | ID_CLOSE | 1108)
 }
@@ -931,7 +910,7 @@ unsafe extern "system" fn wnd_proc(
                     true,
                 );
             }
-            refresh_native_controls(hwnd);
+
             unsafe {
                 let _ = RedrawWindow(
                     hwnd,
@@ -997,6 +976,10 @@ unsafe extern "system" fn wnd_proc(
             set_busy(hwnd, state, false);
             state.authorizing = false;
             let response = state.response.lock().ok().and_then(|mut slot| slot.take());
+            if matches!(response, Some(Completion::Authorization(_))) {
+                // The browser holds the foreground after the consent page.
+                crate::ui::bring_to_front(hwnd);
+            }
             match response {
                 Some(Completion::Authorization(Ok(auth)))
                     if state.cancel.load(Ordering::Relaxed) =>
@@ -1046,7 +1029,8 @@ unsafe extern "system" fn wnd_proc(
                         );
                     }
                 }
-                Some(Completion::Install(Ok(credentials))) => {
+                Some(Completion::Install(Ok(installed))) => {
+                    let credentials = installed.credentials;
                     let mut updated = state.settings.clone();
                     updated.cloud_url = Some(credentials.origin.clone());
                     if let Err(error) = cloudflare_setup::save_credentials(&credentials)
@@ -1057,15 +1041,19 @@ unsafe extern "system" fn wnd_proc(
                     } else {
                         state.settings = updated;
                         state.saved = true;
-                        crate::ui::info(
-                            hwnd,
-                            "Cloudflare hazır",
-                            if state.for_upload {
-                                "Bağlantı kuruldu. Görüntü şimdi yükleniyor."
-                            } else {
+                        let message = match (installed.ready, state.for_upload) {
+                            (true, true) => "Bağlantı kuruldu. Görüntü şimdi yükleniyor.",
+                            (true, false) => {
                                 "Bağlantı kuruldu. Artık Yükle düğmesini kullanabilirsiniz."
-                            },
-                        );
+                            }
+                            (false, true) => {
+                                "Worker hesabınıza kuruldu ve bu bilgisayarla eşleştirildi. workers.dev adresinin etkinleşmesi birkaç dakika sürebilir; yükleme şimdi denenecek, olmazsa biraz sonra tekrar deneyin."
+                            }
+                            (false, false) => {
+                                "Worker hesabınıza kuruldu ve bu bilgisayarla eşleştirildi. workers.dev adresinin etkinleşmesi birkaç dakika sürebilir."
+                            }
+                        };
+                        crate::ui::info(hwnd, "Cloudflare hazır", message);
                         unsafe {
                             let _ = DestroyWindow(hwnd);
                         }
@@ -1159,6 +1147,8 @@ fn register() -> Result<()> {
         cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
         lpfnWndProc: Some(wnd_proc),
         hInstance: HINSTANCE::default(),
+        hIcon: crate::tray::app_icon(),
+        hIconSm: crate::tray::app_icon(),
         hCursor: unsafe { LoadCursorW(HINSTANCE::default(), IDC_ARROW).unwrap_or_default() },
         hbrBackground: HBRUSH::default(),
         lpszClassName: CLASS,
@@ -1296,16 +1286,29 @@ impl Drop for OwnerGuard {
     }
 }
 pub fn show(current: &Settings, owner: HWND) -> Result<Option<Settings>> {
-    show_impl(current, owner, false)
+    show_impl(current, Some(owner), false)
 }
-pub fn show_for_upload(current: &Settings, owner: HWND) -> Result<Option<Settings>> {
-    show_impl(current, owner, true)
+/// Opened from the capture editor, which hides itself meanwhile: the dialog is
+/// a normal top-level window with its own taskbar button so the user can move
+/// between it and the browser that shows the Cloudflare consent page.
+pub fn show_for_upload(current: &Settings) -> Result<Option<Settings>> {
+    show_impl(current, None, true)
 }
-fn fit_dialog_to_work_area(hwnd: HWND, owner: HWND, width: i32, height: i32, dpi: u32) {
+fn fit_dialog_to_work_area(hwnd: HWND, owner: Option<HWND>, width: i32, height: i32, dpi: u32) {
+    use windows::Win32::Foundation::POINT;
     use windows::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, MonitorFromWindow,
     };
-    let monitor = unsafe { MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST) };
+    let monitor = match owner {
+        Some(owner) => unsafe { MonitorFromWindow(owner, MONITOR_DEFAULTTONEAREST) },
+        None => {
+            let mut cursor = POINT::default();
+            unsafe {
+                let _ = GetCursorPos(&mut cursor);
+                MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST)
+            }
+        }
+    };
     let mut monitor_info = MONITORINFO {
         cbSize: std::mem::size_of::<MONITORINFO>() as u32,
         ..Default::default()
@@ -1317,8 +1320,10 @@ fn fit_dialog_to_work_area(hwnd: HWND, owner: HWND, width: i32, height: i32, dpi
     let work = monitor_info.rcWork;
     let width = (width * dpi as i32 / 96).min(work.right - work.left);
     let height = (height * dpi as i32 / 96).min(work.bottom - work.top);
-    let mut anchor = RECT::default();
-    if unsafe { GetWindowRect(owner, &mut anchor) }.is_err() {
+    let mut anchor = work;
+    if let Some(owner) = owner
+        && unsafe { GetWindowRect(owner, &mut anchor) }.is_err()
+    {
         anchor = work;
     }
     let x = ((anchor.left + anchor.right - width) / 2).clamp(work.left, work.right - width);
@@ -1338,7 +1343,11 @@ fn fit_dialog_to_work_area(hwnd: HWND, owner: HWND, width: i32, height: i32, dpi
     }
 }
 
-fn show_impl(current: &Settings, owner: HWND, for_upload: bool) -> Result<Option<Settings>> {
+fn show_impl(
+    current: &Settings,
+    owner: Option<HWND>,
+    for_upload: bool,
+) -> Result<Option<Settings>> {
     register()?;
     crate::theme::set_preference(current.theme_preference);
     let guided = current.cloud_url.is_none();
@@ -1372,7 +1381,7 @@ fn show_impl(current: &Settings, owner: HWND, for_upload: bool) -> Result<Option
             CW_USEDEFAULT,
             if guided { 680 } else { 800 },
             if guided { 560 } else { 700 },
-            owner,
+            owner.unwrap_or_default(),
             None,
             HINSTANCE::default(),
             None,
@@ -1380,9 +1389,13 @@ fn show_impl(current: &Settings, owner: HWND, for_upload: bool) -> Result<Option
     }?;
     let _window = crate::ui::OwnedWindow(hwnd);
     let _suspend = crate::hotkey::OverlayInputSuspension::new();
-    let _owner = OwnerGuard(owner);
+    let _owner = owner.map(|owner| {
+        unsafe {
+            let _ = EnableWindow(owner, false);
+        }
+        OwnerGuard(owner)
+    });
     unsafe {
-        let _ = EnableWindow(owner, false);
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, state.as_mut() as *mut State as isize);
     }
     state.dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(hwnd) }.max(96);
@@ -1400,7 +1413,7 @@ fn show_impl(current: &Settings, owner: HWND, for_upload: bool) -> Result<Option
         state.dpi = current_dpi;
         state.refresh_fonts(hwnd);
     }
-    refresh_native_controls(hwnd);
+
     layout(hwnd, &mut state);
     unsafe {
         crate::theme::apply_window_theme(
@@ -1409,8 +1422,8 @@ fn show_impl(current: &Settings, owner: HWND, for_upload: bool) -> Result<Option
             true,
         );
         let _ = ShowWindow(hwnd, SW_SHOW);
-        let _ = SetForegroundWindow(hwnd);
     }
+    crate::ui::bring_to_front(hwnd);
     crate::ui::window_loop(hwnd, crate::ui::WindowKind::CloudSettings)?;
     if state.saved {
         Ok(Some(state.settings.clone()))

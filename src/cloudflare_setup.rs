@@ -253,6 +253,7 @@ fn wide(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(Some(0)).collect()
 }
 
+#[derive(Clone, Copy)]
 pub enum RequestBody<'a> {
     Bytes(&'a [u8]),
     File(&'a Path),
@@ -321,6 +322,40 @@ pub fn control_request(
     https_request(host, path, method, bearer, content_type, None, body)
 }
 
+/// A failed attempt; `retryable` marks transport failures where repeating the
+/// request cannot duplicate its effect.
+struct Failure {
+    message: String,
+    retryable: bool,
+}
+impl From<String> for Failure {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            retryable: false,
+        }
+    }
+}
+
+/// Network hiccups (Wi-Fi roaming, VPN reconnects, a slow DNS answer) are
+/// common on laptops; such failures are retried a few times before surfacing.
+fn transient(error: &windows::core::Error) -> bool {
+    const TIMEOUT: u32 = 12002;
+    const NAME_NOT_RESOLVED: u32 = 12007;
+    const CANNOT_CONNECT: u32 = 12029;
+    const CONNECTION_ERROR: u32 = 12030;
+    const INVALID_SERVER_RESPONSE: u32 = 12152;
+    [
+        TIMEOUT,
+        NAME_NOT_RESOLVED,
+        CANNOT_CONNECT,
+        CONNECTION_ERROR,
+        INVALID_SERVER_RESPONSE,
+    ]
+    .iter()
+    .any(|&code| error.code() == windows::core::HRESULT::from_win32(code))
+}
+
 fn https_request(
     host: &str,
     path: &str,
@@ -330,6 +365,33 @@ fn https_request(
     password: Option<&str>,
     body: RequestBody<'_>,
 ) -> Result<(u32, Vec<u8>), String> {
+    const ATTEMPTS: u32 = 3;
+    let mut attempt = 1;
+    loop {
+        match https_attempt(host, path, method, bearer, content_type, password, body) {
+            Ok(response) => return Ok(response),
+            Err(failure) if failure.retryable && attempt < ATTEMPTS => {
+                crate::diagnostics::record(
+                    "cloudflare network",
+                    &format!("attempt {attempt} failed, retrying: {}", failure.message),
+                );
+                std::thread::sleep(std::time::Duration::from_millis(700 * attempt as u64));
+                attempt += 1;
+            }
+            Err(failure) => return Err(failure.message),
+        }
+    }
+}
+
+fn https_attempt(
+    host: &str,
+    path: &str,
+    method: &str,
+    bearer: Option<&str>,
+    content_type: Option<&str>,
+    password: Option<&str>,
+    body: RequestBody<'_>,
+) -> Result<(u32, Vec<u8>), Failure> {
     let mut file = match body {
         RequestBody::File(path) => Some(
             std::fs::File::open(path)
@@ -344,7 +406,11 @@ fn https_request(
         RequestBody::Bytes(bytes) => bytes.len() as u64,
     };
     if size > 10 * 1024 * 1024 {
-        return Err("Screenshot or setup request exceeds the maximum service size.".to_string());
+        return Err(
+            "Screenshot or setup request exceeds the maximum service size."
+                .to_string()
+                .into(),
+        );
     }
     let agent = wide(&format!("isolmaSS/{}", env!("CARGO_PKG_VERSION")));
     let session = InternetHandle(unsafe {
@@ -360,9 +426,12 @@ fn https_request(
         return Err(format!(
             "WinHTTP could not start: {}",
             windows::core::Error::from_win32()
-        ));
+        )
+        .into());
     }
-    unsafe { WinHttpSetTimeouts(session.0, 5_000, 5_000, 15_000, 20_000) }
+    // Resolve, connect, send and receive limits; uploads over slow uplinks and
+    // Worker cold starts need more headroom than a JSON API call.
+    unsafe { WinHttpSetTimeouts(session.0, 10_000, 10_000, 30_000, 30_000) }
         .map_err(|error| format!("Could not set Cloudflare request timeouts: {error}"))?;
     let host_wide = wide(host);
     let connection = InternetHandle(unsafe {
@@ -377,7 +446,8 @@ fn https_request(
         return Err(format!(
             "Cloudflare host is unavailable: {}",
             windows::core::Error::from_win32()
-        ));
+        )
+        .into());
     }
     let path_wide = wide(path);
     let method_wide = wide(method);
@@ -396,7 +466,8 @@ fn https_request(
         return Err(format!(
             "Could not create the Cloudflare request: {}",
             windows::core::Error::from_win32()
-        ));
+        )
+        .into());
     }
     unsafe {
         WinHttpSetOption(
@@ -428,7 +499,7 @@ fn https_request(
                     | "image/jpeg"
             )
         {
-            return Err("Unsupported Cloudflare content type.".to_string());
+            return Err("Unsupported Cloudflare content type.".to_string().into());
         }
         headers.push_str(&format!("Content-Type: {content_type}\r\n"));
     }
@@ -437,7 +508,7 @@ fn https_request(
             || password.len() > 128
             || password.chars().any(char::is_control)
         {
-            return Err("Invalid image password.".to_string());
+            return Err("Invalid image password.".to_string().into());
         }
         const ALPHABET: &[u8; 64] =
             b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
@@ -460,8 +531,14 @@ fn https_request(
         headers.push_str("\r\n");
     }
     let headers: Vec<u16> = headers.encode_utf16().collect();
-    unsafe { WinHttpSendRequest(request.0, Some(&headers), None, 0, size as u32, 0) }
-        .map_err(|error| format!("Could not send the Cloudflare request: {error}"))?;
+    // Nothing has reached the application yet when the connection itself fails,
+    // so this stage is safe to repeat for every method.
+    unsafe { WinHttpSendRequest(request.0, Some(&headers), None, 0, size as u32, 0) }.map_err(
+        |error| Failure {
+            retryable: transient(&error),
+            message: format!("Could not reach Cloudflare: {error}"),
+        },
+    )?;
     let mut buffer = [0u8; 64 * 1024];
     match body {
         RequestBody::Bytes(bytes) => {
@@ -477,7 +554,9 @@ fn https_request(
                 }
                 .map_err(|error| format!("Could not send Cloudflare data: {error}"))?;
                 if written as usize != chunk.len() {
-                    return Err("Cloudflare connection stopped before upload finished.".to_string());
+                    return Err("Cloudflare connection stopped before upload finished."
+                        .to_string()
+                        .into());
                 }
             }
         }
@@ -501,13 +580,21 @@ fn https_request(
                 }
                 .map_err(|error| format!("Could not send the screenshot: {error}"))?;
                 if written as usize != count {
-                    return Err("Cloudflare connection stopped before upload finished.".to_string());
+                    return Err("Cloudflare connection stopped before upload finished."
+                        .to_string()
+                        .into());
                 }
             }
         }
     }
-    unsafe { WinHttpReceiveResponse(request.0, std::ptr::null_mut()) }
-        .map_err(|error| format!("Cloudflare did not respond: {error}"))?;
+    // A request that was delivered may already have taken effect; only reads
+    // are repeated after a lost response.
+    unsafe { WinHttpReceiveResponse(request.0, std::ptr::null_mut()) }.map_err(|error| {
+        Failure {
+            retryable: method == "GET" && transient(&error),
+            message: format!("Cloudflare did not respond: {error}"),
+        }
+    })?;
     let mut status = 0u32;
     let mut status_bytes = std::mem::size_of::<u32>() as u32;
     let mut index = 0u32;
@@ -531,7 +618,9 @@ fn https_request(
             break;
         }
         if data.len().saturating_add(available as usize) > MAX_JSON_BYTES {
-            return Err("Cloudflare response exceeds the safe size limit.".to_string());
+            return Err("Cloudflare response exceeds the safe size limit."
+                .to_string()
+                .into());
         }
         let mut remaining = available as usize;
         while remaining > 0 {
@@ -547,7 +636,7 @@ fn https_request(
             }
             .map_err(|error| format!("Could not read Cloudflare data: {error}"))?;
             if count == 0 {
-                return Err("Cloudflare response ended early.".to_string());
+                return Err("Cloudflare response ended early.".to_string().into());
             }
             data.extend_from_slice(&buffer[..count as usize]);
             remaining -= count as usize;
@@ -558,7 +647,9 @@ fn https_request(
             .any(|part| part == value.as_bytes())
     }) {
         return Err(
-            "Cloudflare endpoint returned credential data; response was discarded.".to_string(),
+            "Cloudflare endpoint returned credential data; response was discarded."
+                .to_string()
+                .into(),
         );
     }
     Ok((status, data))

@@ -201,8 +201,51 @@ fn callback_reply(socket: &mut TcpStream, accepted: bool) {
         .and_then(|()| socket.write_all(html.as_bytes()));
 }
 
+/// Reads one HTTP request head (bounded to 8 KiB and 5 seconds) and leaves the
+/// socket blocking for the reply. `None` means the connection carried no usable
+/// request.
+fn read_request(socket: &mut TcpStream, cancel: &AtomicBool) -> Option<Vec<u8>> {
+    socket.set_nonblocking(true).ok()?;
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut bytes = vec![0u8; 8192];
+    let mut length = 0;
+    while length < bytes.len() {
+        match socket.read(&mut bytes[length..]) {
+            Ok(0) => break,
+            Ok(count) => {
+                length += count;
+                if bytes[..length].windows(4).any(|part| part == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                ) =>
+            {
+                if cancel.load(Ordering::Relaxed) || Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => return None,
+        }
+    }
+    if length == 0 {
+        return None;
+    }
+    socket.set_nonblocking(false).ok()?;
+    socket
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .ok()?;
+    bytes.truncate(length);
+    Some(bytes)
+}
+
 fn callback(listener: &TcpListener, state: &str, cancel: &AtomicBool) -> Result<String, String> {
-    let deadline = Instant::now() + Duration::from_secs(180);
+    // Signing up, verifying e-mail or completing 2FA can take several minutes.
+    let deadline = Instant::now() + Duration::from_secs(600);
     loop {
         if cancel.load(Ordering::Relaxed) {
             return Err("Cloudflare bağlantısı iptal edildi.".into());
@@ -215,27 +258,14 @@ fn callback(listener: &TcpListener, state: &str, cancel: &AtomicBool) -> Result<
                 if !peer.ip().is_loopback() {
                     continue;
                 }
-                socket
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .map_err(|error| error.to_string())?;
-                socket
-                    .set_write_timeout(Some(Duration::from_secs(5)))
-                    .map_err(|error| error.to_string())?;
-                let mut bytes = [0u8; 8192];
-                let mut length = 0;
-                while length < bytes.len() {
-                    let count = socket
-                        .read(&mut bytes[length..])
-                        .map_err(|error| format!("Cloudflare callback interrupted: {error}"))?;
-                    if count == 0 {
-                        break;
-                    }
-                    length += count;
-                    if bytes[..length].windows(4).any(|part| part == b"\r\n\r\n") {
-                        break;
-                    }
-                }
-                let parsed = std::str::from_utf8(&bytes[..length])
+                // Browsers open speculative connections that send nothing, and a
+                // Windows socket accepted from a non-blocking listener is itself
+                // non-blocking. A quiet or broken connection is skipped instead of
+                // failing the login; the real redirect arrives on another one.
+                let Some(request) = read_request(&mut socket, cancel) else {
+                    continue;
+                };
+                let parsed = std::str::from_utf8(&request)
                     .map_err(|_| "Malformed Cloudflare callback.".to_string())
                     .and_then(|text| parse_callback(text, state));
                 callback_reply(&mut socket, parsed.as_ref().is_ok_and(Option::is_some));
@@ -258,6 +288,9 @@ struct TokenResponse {
     access_token: String,
     token_type: String,
     expires_in: u64,
+    /// Space-separated scopes actually granted; users may deselect optional ones.
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 fn cloudflare_json(
@@ -282,15 +315,7 @@ fn cloudflare_json(
     let response: Value = serde_json::from_slice(&bytes)
         .map_err(|_| format!("Cloudflare API HTTP {status}: invalid JSON."))?;
     if !(200..300).contains(&status) || response["success"] != true {
-        let code = response["errors"]
-            .as_array()
-            .and_then(|errors| errors.first())
-            .and_then(|error| error["code"].as_u64());
-        return Err(format!(
-            "Cloudflare API HTTP {status}{}.",
-            code.map(|code| format!(" (code {code})"))
-                .unwrap_or_default()
-        ));
+        return Err(format!("Cloudflare API {}.", api_error(status, &bytes)));
     }
     Ok(response["result"].clone())
 }
@@ -359,6 +384,18 @@ pub fn authorize(cancel: &AtomicBool) -> Result<Authorization, String> {
     {
         return Err("Cloudflare geçersiz erişim anahtarı verdi.".into());
     }
+    if let Some(granted) = issued.scope.as_deref() {
+        let missing: Vec<&str> = REQUIRED_SCOPES
+            .split(' ')
+            .filter(|scope| !granted.split(' ').any(|given| given == *scope))
+            .collect();
+        if !missing.is_empty() {
+            return Err(format!(
+                "Cloudflare izin ekranında gerekli izinler verilmedi ({}). Yeniden bağlanıp tüm izinleri onaylayın.",
+                missing.join(", ")
+            ));
+        }
+    }
     let accounts = list_accounts(&issued.access_token, cancel)?;
     Ok(Authorization {
         access_token: issued.access_token,
@@ -426,7 +463,12 @@ fn account_path(account: &Account, suffix: &str) -> String {
     format!("/client/v4/accounts/{}/workers/{suffix}", account.id)
 }
 
-fn ensure_subdomain(token: &str, account: &Account, cancel: &AtomicBool) -> Result<String, String> {
+/// The account's workers.dev subdomain, and whether this call registered it.
+fn ensure_subdomain(
+    token: &str,
+    account: &Account,
+    cancel: &AtomicBool,
+) -> Result<(String, bool), String> {
     let path = account_path(account, "subdomain");
     let (status, bytes) = cloudflare_setup::control_request(
         "api.cloudflare.com",
@@ -442,11 +484,17 @@ fn ensure_subdomain(token: &str, account: &Account, cancel: &AtomicBool) -> Resu
         if response["success"] != true {
             return Err("Cloudflare Workers alt alanına erişim reddedildi.".into());
         }
-        return subdomain(&response["result"]["subdomain"]);
+        return subdomain(&response["result"]["subdomain"]).map(|name| (name, false));
     }
     if status != 404 {
         return Err(format!(
-            "Cloudflare Workers alt alanı denetlenemedi (HTTP {status})."
+            "Cloudflare Workers alt alanı denetlenemedi ({}).{}",
+            api_error(status, &bytes),
+            if status == 403 {
+                " Seçilen hesapta Workers yetkiniz olmayabilir ya da uygulamanın OAuth istemcisi yalnızca kendi hesabına açık (private) olabilir; başka bir hesap seçmeyi deneyin."
+            } else {
+                ""
+            }
         ));
     }
     for _ in 0..3 {
@@ -462,7 +510,7 @@ fn ensure_subdomain(token: &str, account: &Account, cancel: &AtomicBool) -> Resu
             Some(&json!({"subdomain": name})),
         );
         if let Ok(response) = result {
-            return subdomain(&response["subdomain"]);
+            return subdomain(&response["subdomain"]).map(|name| (name, true));
         }
         if let Err(error) = result
             && !error.contains("HTTP 409")
@@ -534,11 +582,7 @@ fn vacant_worker(token: &str, account: &Account, cancel: &AtomicBool) -> Result<
     Err("Boş bir Worker adı bulunamadı; tekrar deneyin.".into())
 }
 
-fn multipart(
-    worker_name: &str,
-    upload_token: &str,
-    admin_token: &str,
-) -> Result<(String, Vec<u8>), String> {
+fn multipart(upload_token: &str, admin_token: &str) -> Result<(String, Vec<u8>), String> {
     let boundary = format!("isolmass-{}", cloudflare_setup::generate_token()?);
     let metadata = json!({
         "main_module": "worker.mjs",
@@ -548,8 +592,8 @@ fn multipart(
             {"type":"secret_text", "name":"UPLOAD_TOKEN", "text":upload_token},
             {"type":"secret_text", "name":"ADMIN_TOKEN", "text":admin_token}
         ],
-        "migrations": [{"tag":"v1", "new_sqlite_classes":["ShareStore"]}],
-        "annotations": {"workers/message":format!("isolmaSS user-owned share worker {worker_name}")}
+        // Script-upload API shape (SingleStepMigration), not wrangler's `[[migrations]]` list.
+        "migrations": {"new_tag":"v1", "new_sqlite_classes":["ShareStore"]}
     });
     let encoded = serde_json::to_vec(&metadata).map_err(|error| error.to_string())?;
     let mut body = Vec::with_capacity(WORKER_SOURCE.len() + encoded.len() + 512);
@@ -561,19 +605,22 @@ fn multipart(
     Ok((format!("multipart/form-data; boundary={boundary}"), body))
 }
 
-pub fn install(
-    token: &str,
-    account: &Account,
-    cancel: &AtomicBool,
-) -> Result<CloudCredentials, String> {
+/// A Worker that was created in the user's account. `ready` is false when its
+/// workers.dev address did not answer yet; the pairing is still valid.
+pub struct Installed {
+    pub credentials: CloudCredentials,
+    pub ready: bool,
+}
+
+pub fn install(token: &str, account: &Account, cancel: &AtomicBool) -> Result<Installed, String> {
     if account.id.len() != 32 || !account.id.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err("Geçersiz Cloudflare hesap kimliği.".into());
     }
-    let subdomain = ensure_subdomain(token, account, cancel)?;
+    let (subdomain, created) = ensure_subdomain(token, account, cancel)?;
     let worker = vacant_worker(token, account, cancel)?;
     let upload_token = cloudflare_setup::generate_token()?;
     let admin_token = cloudflare_setup::generate_token()?;
-    let (content_type, body) = multipart(&worker, &upload_token, &admin_token)?;
+    let (content_type, body) = multipart(&upload_token, &admin_token)?;
     if cancel.load(Ordering::Relaxed) {
         return Err("Cloudflare kurulumu iptal edildi.".into());
     }
@@ -587,13 +634,9 @@ pub fn install(
         RequestBody::Bytes(&body),
     )?;
     if !(200..300).contains(&status) {
-        let code = serde_json::from_slice::<Value>(&bytes)
-            .ok()
-            .and_then(|value| value["errors"].as_array()?.first()?.get("code")?.as_u64());
         return Err(format!(
-            "Cloudflare Worker kurulumu reddetti (HTTP {status}{}).",
-            code.map(|value| format!(", kod {value}"))
-                .unwrap_or_default()
+            "Cloudflare Worker kurulumu reddetti ({}).",
+            api_error(status, &bytes)
         ));
     }
     let response: Value = serde_json::from_slice(&bytes)
@@ -624,9 +667,21 @@ pub fn install(
         admin_token,
         share_password: None,
     };
-    for trial in 0..6 {
+    // A new workers.dev name needs DNS/TLS propagation (minutes for a brand-new
+    // account subdomain). Asking too early also plants a negative DNS cache
+    // entry in Windows, so a fresh subdomain gets a head start.
+    let deadline = Instant::now() + Duration::from_secs(if created { 150 } else { 90 });
+    if created {
+        wait(Duration::from_secs(8), cancel);
+    }
+    loop {
         if cancel.load(Ordering::Relaxed) {
-            return Err("Worker oluşturuldu ancak yerel eşleştirme iptal edildi; Cloudflare hesabınızda Worker duruyor.".into());
+            // The Worker exists and its keys are known: keep the pairing rather
+            // than orphaning the Worker in the user's account.
+            return Ok(Installed {
+                credentials,
+                ready: false,
+            });
         }
         if let Ok((200, reply)) = cloudflare_setup::api_request(
             &origin,
@@ -640,15 +695,50 @@ pub fn install(
             && value["status"] == "ready"
             && value["origin"] == origin
         {
-            return Ok(credentials);
+            return Ok(Installed {
+                credentials,
+                ready: true,
+            });
         }
-        if trial < 5 {
-            std::thread::sleep(Duration::from_secs(1));
+        if Instant::now() >= deadline {
+            return Ok(Installed {
+                credentials,
+                ready: false,
+            });
         }
+        wait(Duration::from_secs(3), cancel);
     }
-    Err(format!(
-        "Worker {worker} Cloudflare'da oluşturuldu ama henüz erişilemiyor. Hesabınızdaki bu Worker'ı kontrol edin; tekrar kurmak eskisini silmez."
-    ))
+}
+
+fn wait(duration: Duration, cancel: &AtomicBool) {
+    let end = Instant::now() + duration;
+    while Instant::now() < end && !cancel.load(Ordering::Relaxed) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Cloudflare's first error, shortened and stripped of control characters so it
+/// can be shown in a dialog.
+fn api_error(status: u32, bytes: &[u8]) -> String {
+    let first = serde_json::from_slice::<Value>(bytes)
+        .ok()
+        .and_then(|value| value["errors"].as_array()?.first().cloned());
+    let code = first.as_ref().and_then(|error| error["code"].as_u64());
+    let message: Option<String> = first
+        .as_ref()
+        .and_then(|error| error["message"].as_str())
+        .map(|text| {
+            text.chars()
+                .filter(|character| !character.is_control())
+                .take(200)
+                .collect()
+        });
+    match (code, message) {
+        (Some(code), Some(message)) => format!("HTTP {status}, kod {code}: {message}"),
+        (Some(code), None) => format!("HTTP {status}, kod {code}"),
+        (None, Some(message)) => format!("HTTP {status}: {message}"),
+        (None, None) => format!("HTTP {status}"),
+    }
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 # isolmaSS
 
-Native Windows screenshot editor in Rust. Capture a region or window, draw on it, then copy/save locally or explicitly upload to a Worker in **your own Cloudflare account**. The first Upload opens guided setup if sharing is not configured; isolmaSS operates no shared screenshot service and collects no in-app analytics. Version **0.5.3**.
+Native Windows screenshot editor in Rust. Capture a region or window, draw on it, then copy/save locally or explicitly upload to a Worker in **your own Cloudflare account**. The first Upload opens guided setup if sharing is not configured; isolmaSS operates no shared screenshot service and collects no in-app analytics. Version **0.5.4**.
 
 ## Use
 

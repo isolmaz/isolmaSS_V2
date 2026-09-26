@@ -727,117 +727,34 @@ fn draw_tool_icon(
     surface: COLORREF,
     dpi: u32,
 ) {
-    use crate::drawing::{label, rounded, with_pen};
+    use crate::drawing::{icon, label, rounded};
     let unit = |value: i32| (value * dpi as i32 / 96).max(1);
-    let cx = (rect.left + rect.right) / 2;
-    let cy = (rect.top + rect.bottom) / 2;
     if tool == ToolKind::Step {
+        let cx = (rect.left + rect.right) / 2;
+        let cy = (rect.top + rect.bottom) / 2;
         rounded(
             hdc,
-            Rect::new(cx - unit(9), cy - unit(9), cx + unit(10), cy + unit(10)),
-            unit(9),
+            Rect::new(cx - unit(9), cy - unit(9), cx + unit(9), cy + unit(9)),
+            unit(18),
             ink,
             ink,
         );
-        label(hdc, rect, "1", unit(12), surface, true);
+        label(hdc, rect, "1", unit(11), surface, true);
         return;
     }
-    let point = |x: i32, y: i32| POINT {
-        x: cx + x * dpi as i32 / 96,
-        y: cy + y * dpi as i32 / 96,
+    // Segoe Fluent Icons (Windows 11), shared with Segoe MDL2 on Windows 10.
+    let glyph = match tool {
+        ToolKind::Select => 0xe8b0,
+        ToolKind::Rectangle => 0xe739,
+        ToolKind::Arrow => 0xe8ad,
+        ToolKind::Pen => 0xe70f,
+        ToolKind::Highlight => 0xe7e6,
+        ToolKind::Text => 0xe8d2,
+        ToolKind::Blur => 0xe727,
+        ToolKind::Redact => 0xe73b,
+        ToolKind::Step => unreachable!("drawn above"),
     };
-    with_pen(hdc, PS_SOLID, unit(2), ink, || unsafe {
-        match tool {
-            ToolKind::Select => {
-                let _ = Polyline(
-                    hdc,
-                    &[
-                        point(-7, -9),
-                        point(-7, 7),
-                        point(-3, 4),
-                        point(0, 9),
-                        point(3, 7),
-                        point(0, 2),
-                        point(7, 2),
-                        point(-7, -9),
-                    ],
-                );
-            }
-            ToolKind::Rectangle => {
-                let _ = Polyline(
-                    hdc,
-                    &[
-                        point(-9, -7),
-                        point(9, -7),
-                        point(9, 7),
-                        point(-9, 7),
-                        point(-9, -7),
-                    ],
-                );
-            }
-            ToolKind::Pen => {
-                let _ = Polyline(
-                    hdc,
-                    &[
-                        point(-8, 7),
-                        point(-6, 2),
-                        point(5, -9),
-                        point(9, -5),
-                        point(-2, 6),
-                        point(-8, 7),
-                    ],
-                );
-                let _ = Polyline(hdc, &[point(3, -7), point(7, -3)]);
-            }
-            ToolKind::Text => {
-                let _ = Polyline(hdc, &[point(-8, -8), point(8, -8)]);
-                let _ = Polyline(hdc, &[point(0, -8), point(0, 8)]);
-                let _ = Polyline(hdc, &[point(-4, 8), point(4, 8)]);
-            }
-            ToolKind::Highlight => {
-                let _ = Polyline(
-                    hdc,
-                    &[point(-7, 5), point(5, -7), point(8, -4), point(-4, 8)],
-                );
-                let _ = Polyline(hdc, &[point(-9, 9), point(9, 9)]);
-            }
-            ToolKind::Redact => {
-                let _ = Polyline(
-                    hdc,
-                    &[
-                        point(-9, -6),
-                        point(9, -6),
-                        point(9, 6),
-                        point(-9, 6),
-                        point(-9, -6),
-                    ],
-                );
-                let _ = Polyline(hdc, &[point(-7, 3), point(7, 3)]);
-                let _ = Polyline(hdc, &[point(-7, -2), point(7, -2)]);
-            }
-            ToolKind::Arrow => {
-                let _ = Polyline(hdc, &[point(-9, 7), point(7, -5), point(0, -5)]);
-                let _ = Polyline(hdc, &[point(7, -5), point(5, 2)]);
-            }
-            ToolKind::Blur => {
-                let _ = Polyline(
-                    hdc,
-                    &[
-                        point(-9, -8),
-                        point(9, -8),
-                        point(9, 8),
-                        point(-9, 8),
-                        point(-9, -8),
-                    ],
-                );
-                let _ = Polyline(hdc, &[point(-3, -8), point(-3, 8)]);
-                let _ = Polyline(hdc, &[point(3, -8), point(3, 8)]);
-                let _ = Polyline(hdc, &[point(-9, -2), point(9, -2)]);
-                let _ = Polyline(hdc, &[point(-9, 4), point(9, 4)]);
-            }
-            _ => {}
-        }
-    });
+    icon(hdc, rect, glyph, unit(16), ink, true);
 }
 
 /// Presents the toolbar's commands as a native popup menu for keyboard and screen-reader

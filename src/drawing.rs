@@ -241,6 +241,10 @@ pub fn clear_text_metrics() {
     METRICS.with(|cache| cache.borrow_mut().clear());
 }
 
+/// Fills and outlines a rounded rectangle (`radius` is the corner ellipse
+/// diameter, as with GDI `RoundRect`). GDI+ draws it anti-aliased so small
+/// shapes — switches, check boxes, swatches, toolbar pills — stay smooth at
+/// every scale; plain GDI remains the fallback if GDI+ is unavailable.
 pub fn rounded(
     hdc: HDC,
     rect: crate::capture::Rect,
@@ -248,6 +252,9 @@ pub fn rounded(
     fill: COLORREF,
     border: COLORREF,
 ) {
+    if smooth_rounded(hdc, rect, radius, fill, border) {
+        return;
+    }
     with_brush(hdc, fill, || {
         with_pen(hdc, PS_SOLID, 1, border, || unsafe {
             let _ = RoundRect(
@@ -261,6 +268,88 @@ pub fn rounded(
             );
         })
     });
+}
+
+fn gdiplus_ready() -> bool {
+    use std::sync::LazyLock;
+    use windows::Win32::Graphics::GdiPlus::{GdiplusStartup, GdiplusStartupInput, Ok};
+    static READY: LazyLock<bool> = LazyLock::new(|| {
+        let input = GdiplusStartupInput {
+            GdiplusVersion: 1,
+            ..Default::default()
+        };
+        let mut token = 0usize;
+        // The token lives for the whole process; GDI+ is torn down with it.
+        let status = unsafe { GdiplusStartup(&mut token, &input, std::ptr::null_mut()) };
+        if status != Ok {
+            crate::diagnostics::record("drawing", &format!("GDI+ unavailable: {}", status.0));
+        }
+        status == Ok
+    });
+    *READY
+}
+
+fn argb(color: COLORREF) -> u32 {
+    let r = color.0 & 0xff;
+    let g = (color.0 >> 8) & 0xff;
+    let b = (color.0 >> 16) & 0xff;
+    0xff00_0000 | (r << 16) | (g << 8) | b
+}
+
+fn smooth_rounded(
+    hdc: HDC,
+    rect: crate::capture::Rect,
+    radius: i32,
+    fill: COLORREF,
+    border: COLORREF,
+) -> bool {
+    use windows::Win32::Graphics::GdiPlus::*;
+    if !gdiplus_ready() || rect.right - rect.left < 2 || rect.bottom - rect.top < 2 {
+        return false;
+    }
+    unsafe {
+        let mut graphics = std::ptr::null_mut();
+        if GdipCreateFromHDC(hdc, &mut graphics) != Ok {
+            return false;
+        }
+        GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias8x8);
+        GdipSetPixelOffsetMode(graphics, PixelOffsetModeHalf);
+        let mut path = std::ptr::null_mut();
+        let mut drawn = false;
+        if GdipCreatePath(FillModeAlternate, &mut path) == Ok {
+            // Match RoundRect: the outline sits inside [left, right) × [top, bottom).
+            let x = rect.left as f32 + 0.5;
+            let y = rect.top as f32 + 0.5;
+            let w = (rect.right - rect.left) as f32 - 1.0;
+            let h = (rect.bottom - rect.top) as f32 - 1.0;
+            let d = (radius as f32).clamp(0.0, w.min(h));
+            if d < 1.0 {
+                GdipAddPathRectangle(path, x, y, w, h);
+            } else {
+                GdipAddPathArc(path, x, y, d, d, 180.0, 90.0);
+                GdipAddPathArc(path, x + w - d, y, d, d, 270.0, 90.0);
+                GdipAddPathArc(path, x + w - d, y + h - d, d, d, 0.0, 90.0);
+                GdipAddPathArc(path, x, y + h - d, d, d, 90.0, 90.0);
+                GdipClosePathFigure(path);
+            }
+            let mut brush = std::ptr::null_mut();
+            if GdipCreateSolidFill(argb(fill), &mut brush) == Ok {
+                GdipFillPath(graphics, brush.cast(), path);
+                GdipDeleteBrush(brush.cast());
+                drawn = true;
+            }
+            if border != fill {
+                let mut pen = std::ptr::null_mut();
+                if GdipCreatePen1(argb(border), 1.0, UnitPixel, &mut pen) == Ok {
+                    GdipDrawPath(graphics, pen, path);
+                    GdipDeletePen(pen);
+                }
+            }
+            GdipDeletePath(path);
+        }
+        GdipDeleteGraphics(graphics);
+        drawn
+    }
 }
 
 pub fn label(
@@ -306,7 +395,7 @@ pub fn icon(
     color: COLORREF,
     center: bool,
 ) {
-    with_font_face(hdc, "Segoe Fluent Icons", -size_px.max(1), 600, || unsafe {
+    with_font_face(hdc, "Segoe Fluent Icons", -size_px.max(1), 400, || unsafe {
         let _ = SetTextColor(hdc, color);
         let _ = SetBkMode(hdc, TRANSPARENT);
         let mut wide = [codepoint];

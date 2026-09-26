@@ -1,6 +1,6 @@
 [package]
 name = "isolmass"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2024"
 rust-version = "1.98"
 license = "MIT"
@@ -9,6 +9,7 @@ license = "MIT"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_GdiPlus",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_LibraryLoader",

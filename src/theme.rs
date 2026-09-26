@@ -35,7 +35,105 @@ pub fn set_preference(preference: ThemePreference) {
         ThemePreference::Dark => 2,
     };
     PREFERENCE.store(value, Ordering::Release);
+    set_app_mode(value);
 }
+
+// ---------------------------------------------------------------------------
+// Native dark controls — the uxtheme entry points Explorer, Notepad and the
+// Windows shell use so scroll bars, combo boxes, edits, list boxes and popup
+// menus render in the system dark style. They are exported by ordinal only
+// (stable since Windows 10 1809); a missing export keeps the light controls.
+// ---------------------------------------------------------------------------
+
+type SetPreferredAppMode = unsafe extern "system" fn(i32) -> i32;
+type AllowDarkModeForWindow = unsafe extern "system" fn(HWND, i32) -> i32;
+type FlushMenuThemes = unsafe extern "system" fn();
+
+struct UxTheme {
+    set_preferred_app_mode: Option<SetPreferredAppMode>,
+    allow_dark_mode_for_window: Option<AllowDarkModeForWindow>,
+    flush_menu_themes: Option<FlushMenuThemes>,
+}
+
+fn uxtheme() -> &'static UxTheme {
+    use std::sync::LazyLock;
+    use windows::Win32::System::LibraryLoader::{
+        GetProcAddress, LOAD_LIBRARY_SEARCH_SYSTEM32, LoadLibraryExW,
+    };
+    static API: LazyLock<UxTheme> = LazyLock::new(|| {
+        let Ok(module) = (unsafe {
+            LoadLibraryExW(
+                windows::core::w!("uxtheme.dll"),
+                None,
+                LOAD_LIBRARY_SEARCH_SYSTEM32,
+            )
+        }) else {
+            crate::diagnostics::record("theme", "uxtheme.dll could not be loaded");
+            return UxTheme {
+                set_preferred_app_mode: None,
+                allow_dark_mode_for_window: None,
+                flush_menu_themes: None,
+            };
+        };
+        let ordinal = |number: usize| unsafe {
+            GetProcAddress(module, windows::core::PCSTR(number as *const u8))
+        };
+        // SAFETY: the ordinals' signatures are fixed by the shipped uxtheme ABI.
+        unsafe {
+            UxTheme {
+                set_preferred_app_mode: ordinal(135).map(|f| std::mem::transmute(f)),
+                allow_dark_mode_for_window: ordinal(133).map(|f| std::mem::transmute(f)),
+                flush_menu_themes: ordinal(136).map(|f| std::mem::transmute(f)),
+            }
+        }
+    });
+    &API
+}
+
+/// 0 follows Windows (AllowDark), 1 forces light, 2 forces dark.
+fn set_app_mode(preference: u8) {
+    const ALLOW_DARK: i32 = 1;
+    const FORCE_DARK: i32 = 2;
+    const FORCE_LIGHT: i32 = 3;
+    let api = uxtheme();
+    if let Some(set_mode) = api.set_preferred_app_mode {
+        let mode = match preference {
+            1 => FORCE_LIGHT,
+            2 => FORCE_DARK,
+            _ => ALLOW_DARK,
+        };
+        unsafe {
+            set_mode(mode);
+            if let Some(flush) = api.flush_menu_themes {
+                flush();
+            }
+        }
+    }
+}
+
+/// Gives a standard control the native light or dark visual style. Edits and
+/// combo boxes use the common-file-dialog class, everything else Explorer's.
+pub fn apply_control_theme(control: HWND, dark: bool, input: bool) {
+    use windows::Win32::UI::Controls::SetWindowTheme;
+    use windows::core::w;
+    if let Some(allow) = uxtheme().allow_dark_mode_for_window {
+        unsafe {
+            allow(control, dark as i32);
+        }
+    }
+    let class = match (dark, input) {
+        (true, true) => w!("DarkMode_CFD"),
+        (true, false) => w!("DarkMode_Explorer"),
+        (false, _) => w!("Explorer"),
+    };
+    if let Err(error) = unsafe { SetWindowTheme(control, class, windows::core::PCWSTR::null()) } {
+        log_once(
+            &CONTROL_THEME_LOGGED,
+            &format!("SetWindowTheme failed: {error}"),
+        );
+    }
+}
+static CONTROL_THEME_LOGGED: AtomicBool = AtomicBool::new(false);
 
 /// The full Fluent color set for one theme.
 #[derive(Clone, Copy)]
@@ -342,14 +440,6 @@ fn face_installed(face: &str) -> bool {
 // ---------------------------------------------------------------------------
 /// Corner radius for cards and panels.
 pub const RADIUS_CARD: i32 = 10;
-/// Base spacing grid.
-pub const GRID: i32 = 4;
-/// Standard minimum height for keyboard- and pointer-friendly controls.
-pub const CONTROL_HEIGHT: i32 = 36;
-/// Page margin around window content.
-pub const PAGE_MARGIN: i32 = 24;
-/// Inner padding inside a card.
-pub const CARD_PADDING: i32 = 20;
 
 // ---------------------------------------------------------------------------
 // Cache control — live theme flips and accent broadcasts.
@@ -484,5 +574,35 @@ pub unsafe fn apply_window_theme(hwnd: HWND, dark: bool, mica: bool) {
                 "DwmSetWindowAttribute failed for the system backdrop attribute",
             );
         }
+        if let Some(allow) = uxtheme().allow_dark_mode_for_window {
+            allow(hwnd, dark as i32);
+        }
+        let _ = windows::Win32::UI::WindowsAndMessaging::EnumChildWindows(
+            hwnd,
+            Some(theme_child),
+            windows::Win32::Foundation::LPARAM(dark as isize),
+        );
     }
+}
+
+/// Native scroll bars, edits, combo and list boxes follow the window theme;
+/// owner-drawn buttons and labels paint themselves from the tokens.
+unsafe extern "system" fn theme_child(
+    child: HWND,
+    dark: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::BOOL {
+    let mut class = [0u16; 64];
+    let length =
+        unsafe { windows::Win32::UI::WindowsAndMessaging::GetClassNameW(child, &mut class) };
+    let name = String::from_utf16_lossy(&class[..length.max(0) as usize]).to_ascii_lowercase();
+    let dark = dark.0 != 0;
+    if matches!(name.as_str(), "edit" | "combobox") {
+        apply_control_theme(child, dark, true);
+    } else if matches!(name.as_str(), "listbox" | "combolbox" | "msctls_trackbar32")
+        || name.starts_with("isolmass_")
+    {
+        // Our own containers carry WS_VSCROLL/WS_HSCROLL bars.
+        apply_control_theme(child, dark, false);
+    }
+    true.into()
 }

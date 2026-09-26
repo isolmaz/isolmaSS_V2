@@ -102,6 +102,43 @@ pub fn ask_for_update(owner: HWND, version: &str) -> Result<UpdateChoice> {
     })
 }
 
+/// Activates `hwnd` even when another process (e.g. the browser used for a
+/// Cloudflare login) owns the foreground. Windows only lets the foreground
+/// thread hand activation over, so the input queues are joined for the call;
+/// when activation is still refused the taskbar button flashes instead.
+pub fn bring_to_front(hwnd: HWND) {
+    use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
+    unsafe {
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+        let foreground = GetForegroundWindow();
+        let current = GetCurrentThreadId();
+        let other = if foreground.is_invalid() {
+            0
+        } else {
+            GetWindowThreadProcessId(foreground, None)
+        };
+        let attached =
+            other != 0 && other != current && AttachThreadInput(current, other, true).as_bool();
+        let _ = BringWindowToTop(hwnd);
+        let activated = SetForegroundWindow(hwnd).as_bool();
+        if attached {
+            let _ = AttachThreadInput(current, other, false);
+        }
+        if !activated && GetForegroundWindow() != hwnd {
+            let flash = FLASHWINFO {
+                cbSize: std::mem::size_of::<FLASHWINFO>() as u32,
+                hwnd,
+                dwFlags: FLASHW_ALL | FLASHW_TIMERNOFG,
+                uCount: 3,
+                dwTimeout: 0,
+            };
+            let _ = FlashWindowEx(&flash);
+        }
+    }
+}
+
 /// Declare after the state stored in GWLP_USERDATA so the window is destroyed first.
 pub struct OwnedWindow(pub HWND);
 
@@ -120,6 +157,16 @@ pub enum WindowKind {
     Overlay,
     Settings,
     CloudSettings,
+}
+
+fn combo_dropped(target: HWND) -> bool {
+    if target.is_invalid() {
+        return false;
+    }
+    let mut class = [0u16; 16];
+    let length = unsafe { GetClassNameW(target, &mut class) }.max(0) as usize;
+    String::from_utf16_lossy(&class[..length]).eq_ignore_ascii_case("ComboBox")
+        && unsafe { SendMessageW(target, CB_GETDROPPEDSTATE, WPARAM(0), LPARAM(0)) }.0 != 0
 }
 
 pub fn window_loop(hwnd: HWND, kind: WindowKind) -> Result<()> {
@@ -149,7 +196,12 @@ pub fn window_loop(hwnd: HWND, kind: WindowKind) -> Result<()> {
         {
             continue;
         }
-        if dialog && msg.message == WM_KEYDOWN && msg.wParam == WPARAM(27) {
+        // Escape closes an open combo-box list first, like a native dialog.
+        if dialog
+            && msg.message == WM_KEYDOWN
+            && msg.wParam == WPARAM(27)
+            && !combo_dropped(msg.hwnd)
+        {
             unsafe {
                 PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0))?;
             }
@@ -163,12 +215,6 @@ pub fn window_loop(hwnd: HWND, kind: WindowKind) -> Result<()> {
         }
         if unsafe { IsWindow(hwnd).as_bool() } {
             crate::updater::poll(hwnd, false);
-        }
-        if kind == WindowKind::Settings
-            && msg.message == WM_KEYDOWN
-            && unsafe { IsWindow(hwnd).as_bool() }
-        {
-            crate::settings_window::ensure_focus_visible(hwnd);
         }
     }
     Ok(())
