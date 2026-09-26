@@ -1470,7 +1470,8 @@ fn show_impl(
     state.refresh_brushes();
     let hwnd = unsafe {
         CreateWindowExW(
-            Default::default(),
+            // A taskbar button even when owned by the Settings window.
+            WS_EX_APPWINDOW,
             CLASS,
             w!("isolmaSS Cloudflare"),
             STYLE,

@@ -1,6 +1,6 @@
 # isolmaSS
 
-Native Windows screenshot editor in Rust. Capture a region or window, draw on it, then copy or save locally, or upload to a Worker in **your own Cloudflare account** and get a share link in about a second. isolmaSS operates no shared screenshot service and collects no analytics. Version **0.5.5**.
+Native Windows screenshot editor in Rust. Capture a region or window, draw on it, then copy or save locally, or upload to a Worker in **your own Cloudflare account** and get a share link in about a second. isolmaSS operates no shared screenshot service and collects no analytics. Version **0.5.6**.
 
 ## Use
 
@@ -36,7 +36,7 @@ While editing text, Enter commits; Ctrl+C, Ctrl+S and Ctrl+U commit before expor
 
 ## Settings
 
-Settings is a compact Windows 11 dialog with tabs on top:
+Settings is a compact Windows 11 dialog with tabs on top and its own taskbar button, like the Cloudflare window:
 
 - **Genel** — capture shortcut, delay, theme (system, light, dark), start with Windows, save notification.
 - **Kaydetme** — folder, PNG or JPEG, JPEG quality.

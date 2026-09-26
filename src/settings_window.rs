@@ -1623,7 +1623,8 @@ pub fn show_settings_dialog(current: &Settings, owner: Option<HWND>) -> Result<O
     state.refresh_brushes();
     let hwnd = unsafe {
         CreateWindowExW(
-            Default::default(),
+            // A taskbar button even when owned by the tray or the editor.
+            WS_EX_APPWINDOW,
             SETTINGS_CLASS_NAME,
             w!("isolmaSS Ayarları"),
             WINDOW_STYLE_FLAGS,
